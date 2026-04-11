@@ -1,0 +1,27 @@
+/docs
+  README.md               ← System overview & quick start
+  /architecture
+    overview.md           ← High-level flow diagram + narrative
+    data-flow.md          ← How data moves: Sheets → Supabase → back
+    erp-lifecycle.md      ← Order lifecycle from SO to Invoice
+  /database
+    schema-overview.md    ← All tables, purpose, key relationships
+    business-rules.md     ← Triggers, constraints, RLS policies explained
+    views.md              ← What each view (v_artwork_jobs etc.) is for
+  /sheets
+    workbook-map.md       ← Every tab, its role, and its linked script
+    scripts/              ← Exported .gs files with inline comments
+  /modules
+    sales-orders.md
+    artwork-management.md
+    work-orders.md
+    production.md
+    packing-dispatch.md
+    invoicing.md
+  /runbooks
+    adding-a-new-client.md
+    creating-a-work-order.md
+    handling-a-billing-error.md
+  /decisions
+    adr-001-sheets-as-frontend.md   ← Why this architecture was chosen
+    adr-002-snapshot-json-in-wo.md  ← Why snapshot_json exists
