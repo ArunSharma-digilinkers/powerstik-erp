@@ -1,0 +1,42 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+credentials.json
+service-account*.json
+*.pem
+*.key
+
+# Supabase
+supabase/.temp/
+supabase/.branches/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node (if used for tooling)
+node_modules/
+npm-debug.log*
+yarn-error.log
+
+# Logs
+*.log
+
+# Temp files
+*.tmp
+*.bak
+
+# Claude Code
+CLAUDE.md
+
+# Raw schema dumps
+all-schemas.txt
