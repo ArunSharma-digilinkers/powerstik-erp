@@ -1376,6 +1376,8 @@ create index IF not exists idx_production_entries_routing_id on public.productio
 
 create index IF not exists idx_production_entries_routing_entry_time on public.production_entries using btree (routing_id, entry_datetime) TABLESPACE pg_default;
 
+create index IF not exists idx_production_entries_routing_line on public.production_entries using btree (routing_id, so_number, line_no) TABLESPACE pg_default;
+
 
 create table public.production_live_entries (
   id uuid not null default gen_random_uuid (),
@@ -1662,8 +1664,25 @@ create table public.sales_order_lines (
   business_status text not null default 'PENDING'::text,
   business_at timestamp with time zone null,
   hsn_group text null,
+  status text not null default 'OPEN'::text,
+  closed_at timestamp with time zone null,
+  closed_by text null,
+  status_updated_at timestamp with time zone not null default now(),
   constraint sales_order_lines_pkey primary key (id),
-  constraint sales_order_lines_so_id_fkey foreign KEY (so_id) references sales_orders (id) on delete CASCADE
+  constraint sales_order_lines_so_id_fkey foreign KEY (so_id) references sales_orders (id) on delete CASCADE,
+  constraint sales_order_lines_status_chk check (
+    (
+      upper(status) = any (
+        array[
+          'OPEN'::text,
+          'PARTIAL_DISPATCHED'::text,
+          'CLOSED'::text,
+          'CANCELLED'::text,
+          'HOLD'::text
+        ]
+      )
+    )
+  )
 ) TABLESPACE pg_default;
 
 create index IF not exists idx_so_lines_soid on public.sales_order_lines using btree (so_id) TABLESPACE pg_default;
@@ -1676,7 +1695,18 @@ create index IF not exists idx_sales_order_lines_wo_queue on public.sales_order_
 
 create index IF not exists idx_sales_order_lines_so_id_approval on public.sales_order_lines using btree (so_id, accounts_status, business_status) TABLESPACE pg_default;
 
+create index IF not exists idx_sales_order_lines_status on public.sales_order_lines using btree (status) TABLESPACE pg_default;
+
+create index IF not exists idx_sales_order_lines_active on public.sales_order_lines using btree (so_id, status, line_no) TABLESPACE pg_default;
+
 create index IF not exists idx_sales_order_lines_so_id_delivery on public.sales_order_lines using btree (so_id, final_delivery, expected_delivery) TABLESPACE pg_default;
+
+create trigger trg_sales_order_line_status_from_line
+after INSERT
+or
+update OF qty,
+so_id on sales_order_lines for EACH row
+execute FUNCTION sales_order_line_status_from_line_trg ();
 
 create trigger trg_sales_order_rollup_from_lines
 after INSERT
@@ -2287,7 +2317,6 @@ where
 group by
   so_line_id;
 
-
 create view public.v_dispatch_board as
 select
   pr.id as pack_id,
@@ -2836,6 +2865,74 @@ with recursive
     from
       work_orders wo
   ),
+  stores_issue_plan as (
+    select
+      wo.id as wo_id,
+      sum(
+        case
+          when upper(
+            COALESCE(split_part(l.remarks, '|'::text, 5), ''::text)
+          ) = any (array['SHEET'::text, 'SHEETS'::text]) then COALESCE(l.qty_out, 0::numeric)
+          else 0::numeric
+        end
+      ) as issued_sheet_qty,
+      sum(
+        case
+          when upper(
+            COALESCE(split_part(l.remarks, '|'::text, 5), ''::text)
+          ) = any (
+            array[
+              'RM'::text,
+              'R.M.'::text,
+              'RUNNING METER'::text,
+              'RUNNING METERS'::text
+            ]
+          ) then COALESCE(l.qty_out, 0::numeric)
+          else 0::numeric
+        end
+      ) as issued_rm_qty
+    from
+      work_orders wo
+      join inv_ledger l on l.ref_type = 'ISSUE'::text
+      and l.ref_no = wo.wo_number
+      left join inv_ledger rev on rev.ref_no = l.id::text
+      and upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text
+    where
+      rev.id is null
+    group by
+      wo.id
+  ),
+  initial_routing as (
+    select distinct
+      on (r.wo_id) r.wo_id,
+      COALESCE(
+        NULLIF(r.process_name, ''::text),
+        NULLIF(r.department, ''::text),
+        'PROCESS'::text
+      ) as first_process_name
+    from
+      work_order_routing r
+    where
+      upper(
+        COALESCE(
+          NULLIF(r.process_name, ''::text),
+          NULLIF(r.department, ''::text),
+          'PROCESS'::text
+        )
+      ) <> all (
+        array[
+          'PACKING'::text,
+          'DISPATCH'::text,
+          'CUTTING PRE'::text,
+          'CUTTING POST'::text,
+          'QC'::text
+        ]
+      )
+    order by
+      r.wo_id,
+      r.sequence_no,
+      r.id
+  ),
   job_meta as (
     select
       woj.wo_id,
@@ -2919,6 +3016,32 @@ with recursive
         )
       end as department_category,
       COALESCE(
+        case
+          when upper(
+            COALESCE(
+              (wo.snapshot_json -> 'jobDetails'::text) ->> 'type'::text,
+              ''::text
+            )
+          ) ~~ '%FLEXO%'::text
+          or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%INSPECTION%'::text
+          or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%SLITTING%'::text
+          or upper(COALESCE(max(ac.department_category), ''::text)) = 'FLEXO'::text
+          or upper(COALESCE(max(woj.category), ''::text)) ~~ '%FLEXO%'::text then NULLIF(max(sip.issued_rm_qty), 0::numeric)
+          else NULLIF(max(sip.issued_sheet_qty), 0::numeric)
+        end,
+        case
+          when upper(
+            COALESCE(
+              (wo.snapshot_json -> 'jobDetails'::text) ->> 'type'::text,
+              ''::text
+            )
+          ) ~~ '%FLEXO%'::text
+          or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%INSPECTION%'::text
+          or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%SLITTING%'::text
+          or upper(COALESCE(max(ac.department_category), ''::text)) = 'FLEXO'::text
+          or upper(COALESCE(max(woj.category), ''::text)) ~~ '%FLEXO%'::text then NULLIF(max(sm.flexo_running_meter), 0::numeric)
+          else null::numeric
+        end,
         NULLIF(max(sm.paper_sheets_with_waste), 0::numeric),
         NULLIF(
           max(sm.paper_core_sheets) + max(sm.process_waste_sheets),
@@ -2931,6 +3054,8 @@ with recursive
       work_order_jobs woj
       join work_orders wo on wo.id = woj.wo_id
       join snapshot_metrics sm on sm.wo_id = wo.id
+      left join stores_issue_plan sip on sip.wo_id = wo.id
+      left join initial_routing ir on ir.wo_id = wo.id
       left join artwork_category ac on ac.artwork_no = woj.artwork_no
     group by
       woj.wo_id,
@@ -3073,6 +3198,8 @@ with recursive
         when upper(rb.process_name) ~~ '%COAT%'::text then sc_1.ok_produced_qty
         when upper(rb.process_name) ~~ '%DIE CUT%'::text then sc_1.ok_produced_qty
         when upper(rb.process_name) ~~ '%DIECUT%'::text then sc_1.ok_produced_qty
+        when upper(rb.process_name) ~~ '%INSPECTION%'::text then sc_1.ok_produced_qty
+        when upper(rb.process_name) ~~ '%SLITTING%'::text then sc_1.ok_produced_qty
         when upper(sc_1.process_name) ~~ '%PRINT%'::text then round(
           sc_1.ok_produced_qty * COALESCE(NULLIF(rb.ups_factor, 0::numeric), 1::numeric)
         )
@@ -3097,6 +3224,8 @@ with recursive
           when upper(rb.process_name) ~~ '%COAT%'::text then sc_1.ok_produced_qty
           when upper(rb.process_name) ~~ '%DIE CUT%'::text then sc_1.ok_produced_qty
           when upper(rb.process_name) ~~ '%DIECUT%'::text then sc_1.ok_produced_qty
+          when upper(rb.process_name) ~~ '%INSPECTION%'::text then sc_1.ok_produced_qty
+          when upper(rb.process_name) ~~ '%SLITTING%'::text then sc_1.ok_produced_qty
           when upper(sc_1.process_name) ~~ '%PRINT%'::text then round(
             sc_1.ok_produced_qty * COALESCE(NULLIF(rb.ups_factor, 0::numeric), 1::numeric)
           )
@@ -3149,7 +3278,7 @@ select
     and produced_qty <= 0::numeric then 'PENDING'::text
     when balance_qty <= 0::numeric then 'COMPLETED'::text
     when produced_qty > 0::numeric then 'IN_PROGRESS'::text
-    else COALESCE(NULLIF(routing_status, ''::text), 'PENDING'::text)
+    else 'PENDING'::text
   end as status
 from
   stage_calc sc;
@@ -3513,7 +3642,11 @@ with recursive
       jd.job_priority,
       jd.expected_delivery,
       jd.job_ups,
-      COALESCE(ret.ok_produced_qty, 0::numeric) * COALESCE(NULLIF(jd.job_ups, 0::numeric), 1::numeric) as planned_qty,
+      case
+        when upper(COALESCE(psr.process_name, ''::text)) ~~ '%INSPECTION%'::text
+        or upper(COALESCE(psr.process_name, ''::text)) ~~ '%SLITTING%'::text then COALESCE(ret.ok_produced_qty, 0::numeric)
+        else COALESCE(ret.ok_produced_qty, 0::numeric) * COALESCE(NULLIF(jd.job_ups, 0::numeric), 1::numeric)
+      end as planned_qty,
       COALESCE(jt.gross_produced_qty, 0::numeric) as produced_qty,
       COALESCE(jt.ok_produced_qty, 0::numeric) as ok_produced_qty
     from
@@ -3620,7 +3753,11 @@ select
   ) as job_sort,
   'JOB'::text as row_kind,
   'Separated Job'::text as row_description,
-  'UNITS'::text as plan_unit,
+  case
+    when upper(COALESCE(psr.process_name, ''::text)) ~~ '%INSPECTION%'::text
+    or upper(COALESCE(psr.process_name, ''::text)) ~~ '%SLITTING%'::text then 'RM'::text
+    else 'UNITS'::text
+  end as plan_unit,
   psr.wo_id,
   psr.wo_date,
   psr.routing_id,
@@ -3680,10 +3817,7 @@ select
     and jsc.produced_qty <= 0::numeric then 'PENDING'::text
     when GREATEST(jsc.planned_qty - jsc.produced_qty, 0::numeric) <= 0::numeric then 'COMPLETED'::text
     when jsc.produced_qty > 0::numeric then 'IN_PROGRESS'::text
-    else COALESCE(
-      NULLIF(psr.routing_status, ''::text),
-      'PENDING'::text
-    )
+    else 'PENDING'::text
   end as status
 from
   job_stage_calc jsc
