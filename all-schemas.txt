@@ -5261,3 +5261,538 @@ create unique INDEX IF not exists idx_work_orders_wo_number on public.work_order
 create index IF not exists idx_work_orders_wo_date on public.work_orders using btree (wo_date desc) TABLESPACE pg_default;
 
 create index IF not exists idx_work_orders_wo_number_trgm on public.work_orders using gin (wo_number gin_trgm_ops) TABLESPACE pg_default;
+
+create view public.v_report_production_nop_daily as
+with
+  machine_standards (
+    machine_key,
+    machine,
+    standard_make_ready_minutes,
+    target_hourly_output
+  ) as (
+    values
+      (
+        'SM74'::text,
+        'Heidelberg SM74'::text,
+        30::numeric,
+        4125::numeric
+      ),
+      (
+        'CD102'::text,
+        'CD102'::text,
+        30::numeric,
+        4125::numeric
+      ),
+      (
+        'LAM1'::text,
+        'Lamination Roll-1'::text,
+        10::numeric,
+        1100::numeric
+      ),
+      (
+        'LAM2'::text,
+        'Lamination 02'::text,
+        10::numeric,
+        1100::numeric
+      ),
+      (
+        'LAM3'::text,
+        'Lamination 03'::text,
+        10::numeric,
+        1100::numeric
+      ),
+      (
+        'DIE1'::text,
+        'Die Cutting 01'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE2'::text,
+        'Die Cutting 02'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE3'::text,
+        'Die Cutting 03'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE4'::text,
+        'Die Cutting 04'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE5'::text,
+        'Die Cutting 05'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'FLEXOPRINT'::text,
+        'Markany Flexo E5'::text,
+        30::numeric,
+        55::numeric
+      ),
+      (
+        'FLEXODIE'::text,
+        'Automatic Die Cutting - Flexo Die Cutting Offline'::text,
+        30::numeric,
+        44::numeric
+      ),
+      (
+        'FLEXOSLIT'::text,
+        'Rhyguan'::text,
+        30::numeric,
+        88::numeric
+      ),
+      (
+        'DIGITAL'::text,
+        'Canon Digital Printing'::text,
+        10::numeric,
+        660::numeric
+      ),
+      (
+        '2PLY'::text,
+        '2 Ply Making Machine'::text,
+        15::numeric,
+        2000::numeric
+      ),
+      (
+        'MSP1'::text,
+        'Manual Sheet Pasting'::text,
+        0::numeric,
+        600::numeric
+      ),
+      (
+        'MSP2'::text,
+        'Manual Pasting'::text,
+        0::numeric,
+        600::numeric
+      ),
+      (
+        'FMZ'::text,
+        'Flute Laminator'::text,
+        0::numeric,
+        2000::numeric
+      ),
+      (
+        'DCMAN1'::text,
+        'Manual Die Cutting 04'::text,
+        45::numeric,
+        800::numeric
+      ),
+      (
+        'DCMAN2'::text,
+        'Manual Die Cutting 05'::text,
+        45::numeric,
+        800::numeric
+      ),
+      (
+        'DCAUTO'::text,
+        'Automatic Die Cutting'::text,
+        90::numeric,
+        2500::numeric
+      ),
+      (
+        'STMAN1'::text,
+        'Stitching Manual 01'::text,
+        0::numeric,
+        250::numeric
+      ),
+      (
+        'STMAN2'::text,
+        'Stitching Manual 02'::text,
+        0::numeric,
+        250::numeric
+      ),
+      (
+        'STAUTO'::text,
+        'Auto Stitching'::text,
+        0::numeric,
+        200::numeric
+      ),
+      (
+        'FOLDER'::text,
+        'Folder Gluer'::text,
+        45::numeric,
+        15000::numeric
+      ),
+      (
+        'RS4'::text,
+        'RS4 Printing'::text,
+        60::numeric,
+        1500::numeric
+      )
+  ),
+  entry_base as (
+    select
+      pe.id,
+      pe.routing_id,
+      timezone ('Asia/Kolkata'::text, pe.entry_datetime)::date as production_date,
+      timezone ('Asia/Kolkata'::text, pe.entry_datetime) as entry_local_ts,
+      COALESCE(
+        NULLIF(pe.machine, ''::text),
+        NULLIF(r.planned_machine, ''::text),
+        'Unassigned'::text
+      ) as raw_machine,
+      upper(
+        COALESCE(
+          NULLIF(pe.machine, ''::text),
+          NULLIF(r.planned_machine, ''::text),
+          'UNASSIGNED'::text
+        )
+      ) as raw_machine_upper,
+      upper(
+        COALESCE(
+          NULLIF(r.process_name, ''::text),
+          NULLIF(r.department, ''::text),
+          ''::text
+        )
+      ) as raw_process_upper,
+      NULLIF(
+        TRIM(
+          both
+          from
+            pe.operator_name
+        ),
+        ''::text
+      ) as operator_name,
+      GREATEST(COALESCE(pe.produced_qty, 0::numeric), 0::numeric) as produced_qty,
+      COALESCE(
+        NULLIF(pe.job_reference, ''::text),
+        (NULLIF(pe.so_number, ''::text) || '-'::text) || NULLIF(pe.line_no, ''::text),
+        pe.routing_id::text,
+        pe.id::text
+      ) as job_key,
+      COALESCE(
+        NULLIF(
+          "substring" (
+            COALESCE(pe.downtime_reason, ''::text),
+            'DOWN:[[:space:]]*([0-9]+[.]?[0-9]*)[[:space:]]*min'::text
+          ),
+          ''::text
+        )::numeric,
+        0::numeric
+      ) as downtime_minutes,
+      NULLIF(
+        TRIM(
+          both
+          from
+            regexp_replace(
+              COALESCE(
+                "substring" (
+                  COALESCE(pe.downtime_reason, ''::text),
+                  'DOWN:([^|]+)'::text
+                ),
+                ''::text
+              ),
+              '^[[:space:]]*[0-9]+[.]?[0-9]*[[:space:]]*min[[:space:]]*-?[[:space:]]*'::text,
+              ''::text
+            )
+        ),
+        ''::text
+      ) as downtime_label
+    from
+      production_entries pe
+      left join work_order_routing r on r.id = pe.routing_id
+    where
+      pe.entry_datetime is not null
+  ),
+  entry_normalized as (
+    select
+      eb.id,
+      eb.routing_id,
+      eb.production_date,
+      eb.entry_local_ts,
+      eb.raw_machine,
+      eb.raw_machine_upper,
+      eb.raw_process_upper,
+      eb.operator_name,
+      eb.produced_qty,
+      eb.job_key,
+      eb.downtime_minutes,
+      eb.downtime_label,
+      case
+        when eb.raw_machine_upper ~~ '%SM74%'::text
+        or eb.raw_machine_upper ~~ '%SM-74%'::text
+        or eb.raw_machine_upper ~~ '%HEIDELBERG%'::text then 'SM74'::text
+        when eb.raw_machine_upper ~~ '%CD102%'::text
+        or eb.raw_machine_upper ~~ '%CD-102%'::text
+        or eb.raw_machine_upper ~~ '%CD 102%'::text then 'CD102'::text
+        when eb.raw_machine_upper ~~ '%LAMINATION 01%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION 1%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION ROLL-1%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION ROLL 1%'::text
+        or eb.raw_machine_upper ~~ '%LAM-1%'::text
+        or eb.raw_machine_upper = 'LAM1'::text then 'LAM1'::text
+        when eb.raw_machine_upper ~~ '%LAMINATION 02%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION 2%'::text
+        or eb.raw_machine_upper ~~ '%LAM-2%'::text
+        or eb.raw_machine_upper = 'LAM2'::text then 'LAM2'::text
+        when eb.raw_machine_upper ~~ '%LAMINATION 03%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION 3%'::text
+        or eb.raw_machine_upper ~~ '%LAM-3%'::text
+        or eb.raw_machine_upper = 'LAM3'::text then 'LAM3'::text
+        when eb.raw_machine_upper ~~ '%RHYGUAN%'::text
+        or eb.raw_process_upper ~~ '%INSPECTION%'::text
+        or eb.raw_process_upper ~~ '%SLITTING%'::text
+        or eb.raw_process_upper ~~ '%SLIT%'::text then 'FLEXOSLIT'::text
+        when eb.raw_process_upper ~~ '%FLEXO%'::text
+        and (
+          eb.raw_process_upper ~~ '%DIE%'::text
+          or eb.raw_process_upper ~~ '%CUT%'::text
+        )
+        or eb.raw_machine_upper ~~ '%FLEXO%'::text
+        and (
+          eb.raw_machine_upper ~~ '%DIE%'::text
+          or eb.raw_machine_upper ~~ '%CUT%'::text
+        ) then 'FLEXODIE'::text
+        when eb.raw_process_upper ~~ '%FLEXO%'::text
+        or eb.raw_machine_upper ~~ '%FLEXO%'::text
+        or eb.raw_machine_upper ~~ '%MARKANY%'::text then 'FLEXOPRINT'::text
+        when eb.raw_machine_upper ~~ '%DIGITAL%'::text
+        or eb.raw_machine_upper ~~ '%CANON%'::text then 'DIGITAL'::text
+        when eb.raw_machine_upper ~~ '%2 PLY%'::text
+        or eb.raw_machine_upper ~~ '%TWO PLY%'::text
+        or eb.raw_machine_upper ~~ '%PLY MAKING%'::text then '2PLY'::text
+        when eb.raw_machine_upper ~~ '%FMZ%'::text
+        or eb.raw_machine_upper ~~ '%FLUTE%'::text then 'FMZ'::text
+        when eb.raw_machine_upper ~~ '%MANUAL PASTING%'::text
+        or eb.raw_machine_upper ~~ '%MANUAL SHEET PASTING 2%'::text
+        or eb.raw_machine_upper ~~ '%MANUAL SHEET PASTING - 2%'::text then 'MSP2'::text
+        when eb.raw_machine_upper ~~ '%MANUAL SHEET PASTING%'::text then 'MSP1'::text
+        when eb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 05%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING MANUAL 2%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING MANUAL - 2%'::text then 'DCMAN2'::text
+        when eb.raw_machine_upper ~~ '%MANUAL DIE%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING MANUAL%'::text
+        or eb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 04%'::text then 'DCMAN1'::text
+        when eb.raw_machine_upper ~~ '%AUTOMATIC DIE%'::text
+        or eb.raw_machine_upper ~~ '%AUTO DIE%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING AUTO%'::text then 'DCAUTO'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 01%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING-01%'::text
+        or eb.raw_machine_upper ~~ '%DIE-CUTTING-01%'::text
+        or eb.raw_machine_upper ~~ '%DIE-1%'::text
+        or eb.raw_machine_upper ~~ '%DYE-1%'::text then 'DIE1'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 02%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING-02%'::text
+        or eb.raw_machine_upper ~~ '%DIE-CUTTING-02%'::text
+        or eb.raw_machine_upper ~~ '%DIE-2%'::text
+        or eb.raw_machine_upper ~~ '%DYE-2%'::text then 'DIE2'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 03%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING-03%'::text
+        or eb.raw_machine_upper ~~ '%DIE-CUTTING-03%'::text
+        or eb.raw_machine_upper ~~ '%DIE-3%'::text
+        or eb.raw_machine_upper ~~ '%DYE-3%'::text then 'DIE3'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 04%'::text
+        or eb.raw_machine_upper ~~ '%DIE-4%'::text
+        or eb.raw_machine_upper ~~ '%DYE-4%'::text then 'DIE4'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 05%'::text
+        or eb.raw_machine_upper ~~ '%DIE-5%'::text
+        or eb.raw_machine_upper ~~ '%DYE-5%'::text then 'DIE5'::text
+        when eb.raw_machine_upper ~~ '%STITCHING MANUAL 02%'::text
+        or eb.raw_machine_upper ~~ '%STITCHING MANUAL - 2%'::text then 'STMAN2'::text
+        when eb.raw_machine_upper ~~ '%STITCHING MANUAL%'::text
+        or eb.raw_machine_upper ~~ '%STITCHING MANUAL 01%'::text
+        or eb.raw_machine_upper ~~ '%STITCHING MANUAL - 1%'::text then 'STMAN1'::text
+        when eb.raw_machine_upper ~~ '%AUTO STITCH%'::text
+        or eb.raw_machine_upper ~~ '%STITCHING AUTO%'::text then 'STAUTO'::text
+        when eb.raw_machine_upper ~~ '%FOLDER GLUER%'::text then 'FOLDER'::text
+        when eb.raw_machine_upper ~~ '%RS4%'::text then 'RS4'::text
+        else regexp_replace(
+          eb.raw_machine_upper,
+          '[^A-Z0-9]+'::text,
+          ''::text,
+          'g'::text
+        )
+      end as machine_key
+    from
+      entry_base eb
+  ),
+  daily_agg as (
+    select
+      en.production_date,
+      en.machine_key,
+      COALESCE(ms.machine, max(en.raw_machine)) as machine,
+      COALESCE(ms.standard_make_ready_minutes, 0::numeric) as standard_make_ready_minutes,
+      COALESCE(ms.target_hourly_output, 0::numeric) as target_hourly_output,
+      string_agg(
+        distinct en.operator_name,
+        ', '::text
+        order by
+          en.operator_name
+      ) filter (
+        where
+          en.operator_name is not null
+      ) as operator_names,
+      max(en.entry_local_ts) as last_completion_at,
+      count(distinct en.job_key) as make_ready_jobs,
+      sum(en.produced_qty) as actual_production,
+      sum(en.downtime_minutes) / 60.0 as downtime_hours,
+      string_agg(
+        distinct en.downtime_label,
+        ', '::text
+        order by
+          en.downtime_label
+      ) filter (
+        where
+          en.downtime_label is not null
+      ) as downtime_reasons
+    from
+      entry_normalized en
+      left join machine_standards ms on ms.machine_key = en.machine_key
+    group by
+      en.production_date,
+      en.machine_key,
+      ms.machine,
+      ms.standard_make_ready_minutes,
+      ms.target_hourly_output
+  ),
+  daily_calc as (
+    select
+      da.production_date,
+      da.machine_key,
+      da.machine,
+      da.standard_make_ready_minutes,
+      da.target_hourly_output,
+      da.operator_names,
+      da.last_completion_at,
+      da.make_ready_jobs,
+      da.actual_production,
+      da.downtime_hours,
+      da.downtime_reasons,
+      round(
+        8::numeric + case
+          when da.last_completion_at::time without time zone > '17:30:00'::time without time zone then EXTRACT(
+            epoch
+            from
+              da.last_completion_at - (
+                da.production_date::timestamp without time zone + '17:30:00'::time without time zone::interval
+              )
+          ) / 3600.0
+          else 0::numeric
+        end,
+        2
+      ) as working_hours,
+      round(
+        da.make_ready_jobs::numeric * da.standard_make_ready_minutes / 60.0,
+        2
+      ) as total_make_ready_hours
+    from
+      daily_agg da
+  ),
+  final_calc as (
+    select
+      dc.production_date,
+      dc.machine_key,
+      dc.machine,
+      dc.standard_make_ready_minutes,
+      dc.target_hourly_output,
+      dc.operator_names,
+      dc.last_completion_at,
+      dc.make_ready_jobs,
+      dc.actual_production,
+      dc.downtime_hours,
+      dc.downtime_reasons,
+      dc.working_hours,
+      dc.total_make_ready_hours,
+      round(
+        GREATEST(
+          dc.working_hours - COALESCE(dc.downtime_hours, 0::numeric) - dc.total_make_ready_hours,
+          0::numeric
+        ),
+        2
+      ) as actual_running_hours
+    from
+      daily_calc dc
+  )
+select
+  production_date,
+  machine_key,
+  machine,
+  COALESCE(operator_names, ''::text) as operator_names,
+  round(working_hours, 2) as working_hours,
+  COALESCE(downtime_reasons, ''::text) as downtime_reasons,
+  round(COALESCE(downtime_hours, 0::numeric), 2) as downtime_hours,
+  make_ready_jobs,
+  standard_make_ready_minutes,
+  total_make_ready_hours,
+  actual_running_hours,
+  target_hourly_output,
+  round(
+    actual_running_hours * case
+      when machine_key = any (
+        array[
+          'FLEXOPRINT'::text,
+          'FLEXODIE'::text,
+          'FLEXOSLIT'::text
+        ]
+      ) then target_hourly_output * 60::numeric
+      else target_hourly_output
+    end,
+    2
+  ) as target_production,
+  round(actual_production, 2) as actual_production,
+  round(
+    actual_production / NULLIF(actual_running_hours, 0::numeric) / case
+      when machine_key = any (
+        array[
+          'FLEXOPRINT'::text,
+          'FLEXODIE'::text,
+          'FLEXOSLIT'::text
+        ]
+      ) then 60
+      else 1
+    end::numeric,
+    2
+  ) as actual_nop,
+  round(
+    actual_production / NULLIF(actual_running_hours, 0::numeric) / case
+      when machine_key = any (
+        array[
+          'FLEXOPRINT'::text,
+          'FLEXODIE'::text,
+          'FLEXOSLIT'::text
+        ]
+      ) then 60
+      else 1
+    end::numeric - NULLIF(target_hourly_output, 0::numeric),
+    2
+  ) as nop_deviation,
+  round(
+    actual_production / NULLIF(actual_running_hours, 0::numeric) / case
+      when machine_key = any (
+        array[
+          'FLEXOPRINT'::text,
+          'FLEXODIE'::text,
+          'FLEXOSLIT'::text
+        ]
+      ) then 60
+      else 1
+    end::numeric / NULLIF(target_hourly_output, 0::numeric) * 100.0,
+    2
+  ) as nop_achievement_pct,
+  case
+    when COALESCE(target_hourly_output, 0::numeric) <= 0::numeric then 'NO_TARGET'::text
+    when (
+      actual_production / NULLIF(actual_running_hours, 0::numeric) / case
+        when machine_key = any (
+          array[
+            'FLEXOPRINT'::text,
+            'FLEXODIE'::text,
+            'FLEXOSLIT'::text
+          ]
+        ) then 60
+        else 1
+      end::numeric
+    ) >= target_hourly_output then 'ON_TARGET'::text
+    else 'BELOW_TARGET'::text
+  end as performance_status,
+  last_completion_at
+from
+  final_calc;
