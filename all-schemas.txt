@@ -37,6 +37,7 @@ create table public.artworks (
   hybrid_plate_size text null,
   hybrid_plate_count integer null,
   die_count integer null,
+  stock_qty_to_bill numeric(12, 2) not null default 0,
   constraint artworks_pkey primary key (id),
   constraint artworks_so_id_fkey foreign KEY (so_id) references sales_orders (id)
 ) TABLESPACE pg_default;
@@ -56,6 +57,12 @@ create index IF not exists idx_artworks_die_new on public.artworks using btree (
 create index IF not exists idx_artworks_so_line_activity on public.artworks using btree (so_id, line_no, approved_at, artwork_at) TABLESPACE pg_default;
 
 create index IF not exists idx_artworks_so_line_queue on public.artworks using btree (so_id, line_no, approved_at, artwork_at) TABLESPACE pg_default;
+
+create index IF not exists idx_artworks_stock_qty_to_bill on public.artworks using btree (stock_qty_to_bill) TABLESPACE pg_default
+where
+  (stock_qty_to_bill > (0)::numeric);
+
+create index IF not exists idx_flexowo_artworks_so_line on public.artworks using btree (so_id, line_no) TABLESPACE pg_default;
 
 create trigger trg_artworks_updated BEFORE
 update on artworks for EACH row
@@ -191,6 +198,51 @@ create index IF not exists idx_clients_name on public.clients using btree (clien
 create index IF not exists idx_clients_client_name_trgm on public.clients using gin (client_name gin_trgm_ops) TABLESPACE pg_default;
 
 
+create table public.corrugation_2ply_entry_details (
+  id uuid not null default gen_random_uuid (),
+  production_entry_id uuid null,
+  wo_id uuid null,
+  routing_id uuid null,
+  row_key text null,
+  set_group_key text not null,
+  set_numbers text null,
+  flute text null,
+  liner_item_code text null,
+  liner_item_name text null,
+  liner_wo_gsm numeric null,
+  liner_actual_item_code text null,
+  liner_actual_item_name text null,
+  liner_actual_gsm numeric null,
+  liner_reel_width_mm numeric null,
+  fluting_item_code text null,
+  fluting_item_name text null,
+  fluting_wo_gsm numeric null,
+  fluting_actual_item_code text null,
+  fluting_actual_item_name text null,
+  fluting_actual_gsm numeric null,
+  fluting_reel_width_mm numeric null,
+  deckle_mm numeric null,
+  cut_size_mm numeric null,
+  produced_sheets numeric null default 0,
+  rejected_sheets numeric null default 0,
+  liner_consumed_kg numeric null default 0,
+  fluting_consumed_kg numeric null default 0,
+  total_consumed_kg numeric null default 0,
+  created_at timestamp with time zone null default now(),
+  created_by text null,
+  liner_reel_no text null,
+  fluting_reel_no text null,
+  constraint corrugation_2ply_entry_details_pkey primary key (id),
+  constraint corrugation_2ply_entry_details_production_entry_id_fkey foreign KEY (production_entry_id) references production_entries (id) on delete CASCADE
+) TABLESPACE pg_default;
+
+create index IF not exists idx_corrugation_2ply_entry_details_production_entry on public.corrugation_2ply_entry_details using btree (production_entry_id) TABLESPACE pg_default;
+
+create index IF not exists idx_corrugation_2ply_entry_details_routing_group on public.corrugation_2ply_entry_details using btree (routing_id, set_group_key) TABLESPACE pg_default;
+
+create index IF not exists idx_corrugation_2ply_entry_details_wo on public.corrugation_2ply_entry_details using btree (wo_id) TABLESPACE pg_default;
+
+
 create table public.costing_audit_log (
   id uuid not null default gen_random_uuid (),
   entity_type text not null,
@@ -292,6 +344,7 @@ create index IF not exists costing_master_revisions_lookup_idx on public.costing
 create trigger trg_costing_master_revisions_updated_at BEFORE
 update on costing_master_revisions for EACH row
 execute FUNCTION set_updated_at_timestamp ();
+
 
 
 create table public.costing_records (
@@ -423,6 +476,14 @@ create index IF not exists idx_dispatch_records_so_line_id on public.dispatch_re
 create index IF not exists idx_dispatch_records_so_line_date on public.dispatch_records using btree (so_line_id, dispatch_date desc, created_at desc) TABLESPACE pg_default;
 
 create index IF not exists idx_dispatch_records_billing_fast on public.dispatch_records using btree (so_line_id, dispatch_date desc, created_at desc) TABLESPACE pg_default;
+
+create trigger trg_sales_order_line_status_from_dispatch
+after INSERT
+or DELETE
+or
+update on dispatch_records for EACH row
+execute FUNCTION sales_order_line_status_from_dispatch_trg ();
+
 
 
 create table public.dispatch_sequence (
@@ -631,6 +692,23 @@ create index IF not exists idx_inv_ledger_pr_receipt on public.inv_ledger using 
 where
   (ref_type = 'PR-RECEIPT'::text);
 
+create index IF not exists idx_inv_ledger_issue_ref_no on public.inv_ledger using btree (ref_no) TABLESPACE pg_default
+where
+  (ref_type = 'ISSUE'::text);
+
+create index IF not exists idx_inv_ledger_issue_wo_key on public.inv_ledger using btree (ref_type, ref_no, remarks) TABLESPACE pg_default
+where
+  (
+    upper(COALESCE(ref_type, ''::text)) = 'ISSUE'::text
+  );
+
+create index IF not exists idx_inv_ledger_reversal_ref on public.inv_ledger using btree (ref_no, ref_type) TABLESPACE pg_default
+where
+  (
+    upper(COALESCE(ref_type, ''::text)) ~~ 'REV-%'::text
+  );
+
+
 
 create table public.inv_lot_allocations (
   id uuid not null,
@@ -680,6 +758,7 @@ create index IF not exists idx_inv_lots_item_loc_date on public.inv_lots using b
 create index IF not exists idx_inv_lots_item_available on public.inv_lots using btree (item_id, location, qty_available) TABLESPACE pg_default;
 
 create index IF not exists idx_inv_lots_item_loc_receipt on public.inv_lots using btree (item_id, location, receipt_date) TABLESPACE pg_default;
+
 
 
 create table public.inv_pr_sequences (
@@ -1015,6 +1094,13 @@ or
 update on invoice_lines for EACH row
 execute FUNCTION lock_invoice_lines ();
 
+create trigger trg_sales_order_line_status_from_invoice_line
+after INSERT
+or DELETE
+or
+update on invoice_lines for EACH row
+execute FUNCTION sales_order_line_status_from_invoice_line_trg ();
+
 
 create table public.invoice_sequences (
   fy text not null,
@@ -1088,6 +1174,14 @@ create index IF not exists idx_invoices_billing_register_fast on public.invoices
   invoice_no,
   client_code
 ) TABLESPACE pg_default;
+
+create trigger trg_sales_order_line_status_from_invoice
+after DELETE
+or
+update OF status,
+document_type,
+invoice_no on invoices for EACH row
+execute FUNCTION sales_order_line_status_from_invoice_trg ();
 
 
 create table public.item_bom_materials (
@@ -1301,6 +1395,7 @@ create table public.packing_records (
   packed_by text null,
   packed_at timestamp without time zone null,
   created_at timestamp without time zone null default now(),
+  packed_weight_kg numeric null default 0,
   constraint packing_records_pkey primary key (id)
 ) TABLESPACE pg_default;
 
@@ -1377,6 +1472,8 @@ create index IF not exists idx_production_entries_routing_id on public.productio
 create index IF not exists idx_production_entries_routing_entry_time on public.production_entries using btree (routing_id, entry_datetime) TABLESPACE pg_default;
 
 create index IF not exists idx_production_entries_routing_line on public.production_entries using btree (routing_id, so_number, line_no) TABLESPACE pg_default;
+
+create index IF not exists idx_production_entries_entry_machine on public.production_entries using btree (entry_datetime, machine) TABLESPACE pg_default;
 
 
 create table public.production_live_entries (
@@ -1701,6 +1798,8 @@ create index IF not exists idx_sales_order_lines_active on public.sales_order_li
 
 create index IF not exists idx_sales_order_lines_so_id_delivery on public.sales_order_lines using btree (so_id, final_delivery, expected_delivery) TABLESPACE pg_default;
 
+create index IF not exists idx_flexowo_sales_order_lines_so_line on public.sales_order_lines using btree (so_id, line_no) TABLESPACE pg_default;
+
 create trigger trg_sales_order_line_status_from_line
 after INSERT
 or
@@ -1813,6 +1912,12 @@ create index IF not exists idx_sales_orders_sales_rep_trgm on public.sales_order
 
 create index IF not exists idx_sales_orders_po_number_trgm on public.sales_orders using gin (po_number gin_trgm_ops) TABLESPACE pg_default;
 
+create trigger trg_sales_order_line_status_from_order
+after INSERT
+or
+update OF status on sales_orders for EACH row
+execute FUNCTION sales_order_line_status_from_order_trg ();
+
 create trigger trg_sales_order_rollup_from_sales_orders
 after INSERT
 or DELETE
@@ -1821,7 +1926,9 @@ update on sales_orders for EACH row
 execute FUNCTION sales_order_rollup_from_sales_orders_trg ();
 
 
-create view public.sales_orders_list as
+create view public.sales_orders_list
+with
+  (security_invoker = on) as
 select
   so.id,
   so.so_number,
@@ -1861,7 +1968,9 @@ create table public.so_counters (
 ) TABLESPACE pg_default;
 
 
-create view public.so_line_billed_qty as
+create view public.so_line_billed_qty
+with
+  (security_invoker = on) as
 select
   il.so_line_id,
   sum(il.qty) as billed_qty
@@ -1889,7 +1998,9 @@ create table public.users (
 ) TABLESPACE pg_default;
 
 
-create view public.v_artwork_jobs as
+create view public.v_artwork_jobs
+with
+  (security_invoker = on) as
 select
   a.id,
   so.so_number,
@@ -1908,6 +2019,7 @@ select
   sol.product_code,
   sol.product_name,
   sol.category,
+  sol.division,
   sol.qty,
   sol.unit,
   a.artwork_no,
@@ -1927,7 +2039,7 @@ select
   a.across_ups,
   a.along_ups,
   a.total_ups,
-  COALESCE(a.across_width, a.teeth) as across_width,
+  a.across_width,
   a.teeth,
   a.across_gap_mm,
   a.along_gap_mm,
@@ -1944,7 +2056,63 @@ from
   left join clients c on c.client_code = so.client_code;
 
 
-create view public.v_billing_dispatch_summary as
+create view public.v_artwork_jobs_active as
+select
+  aj.id,
+  aj.so_number,
+  aj.so_date,
+  aj.so_created_at,
+  aj.so_time,
+  aj.sales_rep,
+  aj.line_no,
+  aj.client_name,
+  aj.product_code,
+  aj.product_name,
+  aj.category,
+  aj.division,
+  aj.qty,
+  aj.unit,
+  aj.artwork_no,
+  aj.product_type,
+  aj.plate_status,
+  aj.die_status,
+  aj.plate_size,
+  aj.plate_count,
+  aj.has_hybrid_plate,
+  aj.hybrid_plate_size,
+  aj.hybrid_plate_count,
+  aj.die_count,
+  aj.sheet_length,
+  aj.sheet_width,
+  aj.sheet_ups,
+  aj.printing_colors,
+  aj.across_ups,
+  aj.along_ups,
+  aj.total_ups,
+  aj.across_width,
+  aj.teeth,
+  aj.across_gap_mm,
+  aj.along_gap_mm,
+  aj.status,
+  aj.artwork_at,
+  aj.approved_at,
+  aj.accounts_status,
+  aj.business_status
+from
+  v_artwork_jobs aj
+  join sales_orders so on so.so_number = aj.so_number
+  join sales_order_lines sol on sol.so_id = so.id
+  and sol.line_no::text = aj.line_no::text
+where
+  upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text
+  and (
+    upper(COALESCE(sol.status, 'OPEN'::text)) <> all (array['CLOSED'::text, 'CANCELLED'::text])
+  );
+
+
+create view public.v_billing_dispatch_summary
+with
+  (security_invoker = on) as
 with
   dispatch_totals as (
     select
@@ -1996,7 +2164,9 @@ from
   left join dispatch_latest l on l.so_line_id = t.so_line_id;
 
 
-create view public.v_billing_document_register as
+create view public.v_billing_document_register
+with
+  (security_invoker = on) as
 with
   base as (
     select
@@ -2121,7 +2291,9 @@ from
   left join line_preview lp on lp.id = b.id;
 
 
-create view public.v_billing_invoice_usage_summary as
+create view public.v_billing_invoice_usage_summary
+with
+  (security_invoker = on) as
 with
   usage_base as (
     select
@@ -2197,7 +2369,9 @@ from
   left join usage_refs r on r.so_line_id = t.so_line_id;
 
 
-create view public.v_billing_line_read_model as
+create view public.v_billing_line_read_model
+with
+  (security_invoker = on) as
 with
   fg_adjustments as (
     select
@@ -2305,7 +2479,9 @@ where
   upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text;
 
 
-create view public.v_billing_packing_summary as
+create view public.v_billing_packing_summary
+with
+  (security_invoker = on) as
 select
   so_line_id,
   COALESCE(sum(packed_qty), 0::numeric)::numeric(18, 3) as packed_qty,
@@ -2317,7 +2493,10 @@ where
 group by
   so_line_id;
 
-create view public.v_dispatch_board as
+
+create view public.v_dispatch_board
+with
+  (security_invoker = on) as
 select
   pr.id as pack_id,
   pr.so_id,
@@ -2382,7 +2561,8 @@ select
   pq.artwork_no,
   pq.wo_number,
   pq.wo_date,
-  pq.transport_mode
+  pq.transport_mode,
+  pq.packed_weight_kg
 from
   v_packing_queue_fast pq
   left join dispatch_totals dt on dt.so_line_id = pq.so_line_id
@@ -2390,7 +2570,9 @@ where
   pq.ready_to_dispatch = true;
 
 
-create view public.v_item_bom_current as
+create view public.v_item_bom_current
+with
+  (security_invoker = on) as
 select
   r.id as revision_id,
   r.item_code,
@@ -2418,7 +2600,9 @@ where
   r.is_current = true;
 
 
-create view public.v_packing_board as
+create view public.v_packing_board
+with
+  (security_invoker = on) as
 with
   prod as (
     select
@@ -2584,6 +2768,7 @@ with
         )
       ) [1] as pack_id,
       sum(COALESCE(pr.packed_qty, 0::numeric)) as packed_qty,
+      sum(COALESCE(pr.packed_weight_kg, 0::numeric)) as packed_weight_kg,
       bool_or(pr.ready_to_dispatch = true) as ready_to_dispatch
     from
       packing_records pr
@@ -2621,7 +2806,8 @@ select
   COALESCE(
     wo.snapshot_json ->> 'modeOfTransport'::text,
     ''::text
-  ) as transport_mode
+  ) as transport_mode,
+  COALESCE(pt.packed_weight_kg, 0::numeric) as packed_weight_kg
 from
   job_base jb
   join work_orders wo on wo.id = jb.wo_id
@@ -2636,7 +2822,9 @@ where
   COALESCE(prod.produced_qty, 0::numeric) > 0::numeric;
 
 
-create view public.v_production_board as
+create view public.v_production_board
+with
+  (security_invoker = on) as
 with
   stage_production as (
     select
@@ -2679,7 +2867,9 @@ from
   left join stage_production prev_stage_prod on prev_stage_prod.routing_id = prev_stage.id;
 
 
-create view public.v_production_jobcard_lookup_fast as
+create view public.v_production_jobcard_lookup_fast
+with
+  (security_invoker = on) as
 with
   artwork_category as (
     select
@@ -2857,6 +3047,13 @@ with recursive
       ) as flexo_running_meter,
       COALESCE(
         NULLIF(
+          (wo.snapshot_json -> 'flexoDetails'::text) ->> 'requiredKg'::text,
+          ''::text
+        )::numeric,
+        0::numeric
+      ) as flexo_required_kg,
+      COALESCE(
+        NULLIF(
           (wo.snapshot_json -> 'wastage'::text) ->> 'processSheets'::text,
           ''::text
         )::numeric,
@@ -2890,7 +3087,22 @@ with recursive
           ) then COALESCE(l.qty_out, 0::numeric)
           else 0::numeric
         end
-      ) as issued_rm_qty
+      ) as issued_rm_qty,
+      sum(
+        case
+          when upper(
+            COALESCE(split_part(l.remarks, '|'::text, 5), ''::text)
+          ) = any (
+            array[
+              'KG'::text,
+              'KGS'::text,
+              'KILOGRAM'::text,
+              'KILOGRAMS'::text
+            ]
+          ) then COALESCE(l.qty_out, 0::numeric)
+          else 0::numeric
+        end
+      ) as issued_kg_qty
     from
       work_orders wo
       join inv_ledger l on l.ref_type = 'ISSUE'::text
@@ -2901,6 +3113,46 @@ with recursive
       rev.id is null
     group by
       wo.id
+  ),
+  stores_issue_plan_normalized as (
+    select
+      sip.wo_id,
+      sip.issued_sheet_qty,
+      sip.issued_rm_qty,
+      sip.issued_kg_qty,
+      case
+        when sm.flexo_required_kg > 0::numeric
+        and COALESCE(sip.issued_kg_qty, 0::numeric) > (sm.flexo_required_kg * 20::numeric)
+        and (
+          COALESCE(sip.issued_kg_qty, 0::numeric) / 1000::numeric
+        ) <= (sm.flexo_required_kg * 2.5) then COALESCE(sip.issued_kg_qty, 0::numeric) / 1000::numeric
+        else COALESCE(sip.issued_kg_qty, 0::numeric)
+      end as effective_issued_kg_qty,
+      case
+        when sm.flexo_running_meter > 0::numeric
+        and sm.flexo_required_kg > 0::numeric then case
+          when case
+            when sm.flexo_required_kg > 0::numeric
+            and COALESCE(sip.issued_kg_qty, 0::numeric) > (sm.flexo_required_kg * 20::numeric)
+            and (
+              COALESCE(sip.issued_kg_qty, 0::numeric) / 1000::numeric
+            ) <= (sm.flexo_required_kg * 2.5) then COALESCE(sip.issued_kg_qty, 0::numeric) / 1000::numeric * sm.flexo_running_meter / sm.flexo_required_kg
+            else COALESCE(sip.issued_kg_qty, 0::numeric) * sm.flexo_running_meter / sm.flexo_required_kg
+          end > (sm.flexo_running_meter * 5::numeric) then sm.flexo_running_meter
+          else case
+            when sm.flexo_required_kg > 0::numeric
+            and COALESCE(sip.issued_kg_qty, 0::numeric) > (sm.flexo_required_kg * 20::numeric)
+            and (
+              COALESCE(sip.issued_kg_qty, 0::numeric) / 1000::numeric
+            ) <= (sm.flexo_required_kg * 2.5) then COALESCE(sip.issued_kg_qty, 0::numeric) / 1000::numeric * sm.flexo_running_meter / sm.flexo_required_kg
+            else COALESCE(sip.issued_kg_qty, 0::numeric) * sm.flexo_running_meter / sm.flexo_required_kg
+          end
+        end
+        else 0::numeric
+      end as issued_kg_equivalent_rm
+    from
+      stores_issue_plan sip
+      join snapshot_metrics sm on sm.wo_id = sip.wo_id
   ),
   initial_routing as (
     select distinct
@@ -2963,6 +3215,8 @@ with recursive
         order by
           woj.product_name
       ) as product_names,
+      sum(COALESCE(woj.qty, 0::numeric)) as order_qty,
+      max(sm.flexo_running_meter) as flexo_running_meter,
       max(NULLIF(woj.job_priority, ''::text)) as job_priority,
       max(woj.expected_delivery) as expected_delivery,
       COALESCE(
@@ -3015,46 +3269,35 @@ with recursive
           end
         )
       end as department_category,
-      COALESCE(
-        case
-          when upper(
-            COALESCE(
-              (wo.snapshot_json -> 'jobDetails'::text) ->> 'type'::text,
-              ''::text
-            )
-          ) ~~ '%FLEXO%'::text
-          or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%INSPECTION%'::text
-          or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%SLITTING%'::text
-          or upper(COALESCE(max(ac.department_category), ''::text)) = 'FLEXO'::text
-          or upper(COALESCE(max(woj.category), ''::text)) ~~ '%FLEXO%'::text then NULLIF(max(sip.issued_rm_qty), 0::numeric)
-          else NULLIF(max(sip.issued_sheet_qty), 0::numeric)
-        end,
-        case
-          when upper(
-            COALESCE(
-              (wo.snapshot_json -> 'jobDetails'::text) ->> 'type'::text,
-              ''::text
-            )
-          ) ~~ '%FLEXO%'::text
-          or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%INSPECTION%'::text
-          or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%SLITTING%'::text
-          or upper(COALESCE(max(ac.department_category), ''::text)) = 'FLEXO'::text
-          or upper(COALESCE(max(woj.category), ''::text)) ~~ '%FLEXO%'::text then NULLIF(max(sm.flexo_running_meter), 0::numeric)
-          else null::numeric
-        end,
-        NULLIF(max(sm.paper_sheets_with_waste), 0::numeric),
-        NULLIF(
-          max(sm.paper_core_sheets) + max(sm.process_waste_sheets),
-          0::numeric
-        ),
-        NULLIF(max(sm.flexo_running_meter), 0::numeric),
-        max(sm.job_core_sheets) + max(sm.process_waste_sheets)
-      ) as stage1_plan_qty
+      case
+        when upper(
+          COALESCE(
+            (wo.snapshot_json -> 'jobDetails'::text) ->> 'type'::text,
+            ''::text
+          )
+        ) ~~ '%FLEXO%'::text
+        or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%INSPECTION%'::text
+        or upper(COALESCE(max(ir.first_process_name), ''::text)) ~~ '%SLITTING%'::text
+        or upper(COALESCE(max(ac.department_category), ''::text)) = 'FLEXO'::text
+        or upper(COALESCE(max(woj.category), ''::text)) ~~ '%FLEXO%'::text then GREATEST(
+          COALESCE(max(sipn.issued_rm_qty), 0::numeric) + COALESCE(max(sipn.issued_kg_equivalent_rm), 0::numeric),
+          COALESCE(max(sm.flexo_running_meter), 0::numeric)
+        )
+        else COALESCE(
+          NULLIF(max(sipn.issued_sheet_qty), 0::numeric),
+          NULLIF(max(sm.paper_sheets_with_waste), 0::numeric),
+          NULLIF(
+            max(sm.paper_core_sheets) + max(sm.process_waste_sheets),
+            0::numeric
+          ),
+          max(sm.job_core_sheets) + max(sm.process_waste_sheets)
+        )
+      end as stage1_plan_qty
     from
       work_order_jobs woj
       join work_orders wo on wo.id = woj.wo_id
       join snapshot_metrics sm on sm.wo_id = wo.id
-      left join stores_issue_plan sip on sip.wo_id = wo.id
+      left join stores_issue_plan_normalized sipn on sipn.wo_id = wo.id
       left join initial_routing ir on ir.wo_id = wo.id
       left join artwork_category ac on ac.artwork_no = woj.artwork_no
     group by
@@ -3094,6 +3337,8 @@ with recursive
       jm.artwork_nos,
       jm.client_name,
       jm.product_names,
+      jm.order_qty,
+      jm.flexo_running_meter,
       jm.job_priority,
       jm.expected_delivery,
       jm.ups_factor,
@@ -3149,6 +3394,8 @@ with recursive
       rb.artwork_nos,
       rb.client_name,
       rb.product_names,
+      rb.order_qty,
+      rb.flexo_running_meter,
       rb.job_priority,
       rb.expected_delivery,
       rb.ups_factor,
@@ -3160,11 +3407,36 @@ with recursive
       rb.routing_status,
       rb.gross_produced_qty as produced_qty,
       rb.ok_produced_qty,
-      rb.stage1_plan_qty as planned_qty,
+      case
+        when rb.department_category = 'FLEXO'::text
+        and (
+          upper(rb.process_name) ~~ '%DIE CUT%'::text
+          or upper(rb.process_name) ~~ '%DIECUT%'::text
+        )
+        and upper(rb.process_name) !~~ '%DIE SHEET%'::text then GREATEST(rb.stage1_plan_qty, rb.gross_produced_qty)
+        when rb.department_category = 'FLEXO'::text then GREATEST(rb.stage1_plan_qty, rb.gross_produced_qty)
+        else rb.stage1_plan_qty
+      end as planned_qty,
       GREATEST(
-        rb.stage1_plan_qty - rb.gross_produced_qty,
+        case
+          when rb.department_category = 'FLEXO'::text
+          and (
+            upper(rb.process_name) ~~ '%DIE CUT%'::text
+            or upper(rb.process_name) ~~ '%DIECUT%'::text
+          )
+          and upper(rb.process_name) !~~ '%DIE SHEET%'::text then GREATEST(rb.stage1_plan_qty, rb.gross_produced_qty)
+          when rb.department_category = 'FLEXO'::text then GREATEST(rb.stage1_plan_qty, rb.gross_produced_qty)
+          else rb.stage1_plan_qty
+        end - rb.gross_produced_qty,
         0::numeric
       ) as balance_qty,
+      case
+        when rb.department_category = 'FLEXO'::text
+        and upper(rb.process_name) !~~ '%DIE CUT%'::text
+        and upper(rb.process_name) !~~ '%DIECUT%'::text
+        and upper(rb.process_name) !~~ '%DIE SHEET%'::text then rb.ok_produced_qty
+        else 0::numeric
+      end as rm_carry_qty,
       rb.rn
     from
       routing_base rb
@@ -3181,6 +3453,8 @@ with recursive
       rb.artwork_nos,
       rb.client_name,
       rb.product_names,
+      rb.order_qty,
+      rb.flexo_running_meter,
       rb.job_priority,
       rb.expected_delivery,
       rb.ups_factor,
@@ -3193,11 +3467,28 @@ with recursive
       rb.gross_produced_qty as produced_qty,
       rb.ok_produced_qty,
       case
+        when rb.department_category = 'FLEXO'::text then sc_1.ok_produced_qty
         when upper(rb.process_name) ~~ '%PRINT%'::text then sc_1.ok_produced_qty
         when upper(rb.process_name) ~~ '%LAMINAT%'::text then sc_1.ok_produced_qty
         when upper(rb.process_name) ~~ '%COAT%'::text then sc_1.ok_produced_qty
+        when rb.department_category = 'FLEXO'::text
+        and (
+          upper(rb.process_name) ~~ '%INSPECTION%'::text
+          or upper(rb.process_name) ~~ '%SLITTING%'::text
+        ) then sc_1.rm_carry_qty
+        when rb.department_category = 'FLEXO'::text
+        and (
+          upper(rb.process_name) ~~ '%DIE CUT%'::text
+          or upper(rb.process_name) ~~ '%DIECUT%'::text
+        )
+        and upper(rb.process_name) !~~ '%DIE SHEET%'::text then sc_1.rm_carry_qty
         when upper(rb.process_name) ~~ '%DIE CUT%'::text then sc_1.ok_produced_qty
         when upper(rb.process_name) ~~ '%DIECUT%'::text then sc_1.ok_produced_qty
+        when upper(rb.process_name) ~~ '%2 PLY%'::text then sc_1.ok_produced_qty
+        when upper(rb.process_name) ~~ '%TWO PLY%'::text then sc_1.ok_produced_qty
+        when upper(rb.process_name) ~~ '%PLY MAKING%'::text then sc_1.ok_produced_qty
+        when upper(rb.process_name) ~~ '%CORRUGATION SHEET PASTING%'::text then sc_1.ok_produced_qty
+        when upper(rb.process_name) ~~ '%SHEET PASTING%'::text then sc_1.ok_produced_qty
         when upper(rb.process_name) ~~ '%INSPECTION%'::text then sc_1.ok_produced_qty
         when upper(rb.process_name) ~~ '%SLITTING%'::text then sc_1.ok_produced_qty
         when upper(sc_1.process_name) ~~ '%PRINT%'::text then round(
@@ -3219,11 +3510,28 @@ with recursive
       end as planned_qty,
       GREATEST(
         case
+          when rb.department_category = 'FLEXO'::text then sc_1.ok_produced_qty
           when upper(rb.process_name) ~~ '%PRINT%'::text then sc_1.ok_produced_qty
           when upper(rb.process_name) ~~ '%LAMINAT%'::text then sc_1.ok_produced_qty
           when upper(rb.process_name) ~~ '%COAT%'::text then sc_1.ok_produced_qty
+          when rb.department_category = 'FLEXO'::text
+          and (
+            upper(rb.process_name) ~~ '%INSPECTION%'::text
+            or upper(rb.process_name) ~~ '%SLITTING%'::text
+          ) then sc_1.rm_carry_qty
+          when rb.department_category = 'FLEXO'::text
+          and (
+            upper(rb.process_name) ~~ '%DIE CUT%'::text
+            or upper(rb.process_name) ~~ '%DIECUT%'::text
+          )
+          and upper(rb.process_name) !~~ '%DIE SHEET%'::text then sc_1.rm_carry_qty
           when upper(rb.process_name) ~~ '%DIE CUT%'::text then sc_1.ok_produced_qty
           when upper(rb.process_name) ~~ '%DIECUT%'::text then sc_1.ok_produced_qty
+          when upper(rb.process_name) ~~ '%2 PLY%'::text then sc_1.ok_produced_qty
+          when upper(rb.process_name) ~~ '%TWO PLY%'::text then sc_1.ok_produced_qty
+          when upper(rb.process_name) ~~ '%PLY MAKING%'::text then sc_1.ok_produced_qty
+          when upper(rb.process_name) ~~ '%CORRUGATION SHEET PASTING%'::text then sc_1.ok_produced_qty
+          when upper(rb.process_name) ~~ '%SHEET PASTING%'::text then sc_1.ok_produced_qty
           when upper(rb.process_name) ~~ '%INSPECTION%'::text then sc_1.ok_produced_qty
           when upper(rb.process_name) ~~ '%SLITTING%'::text then sc_1.ok_produced_qty
           when upper(sc_1.process_name) ~~ '%PRINT%'::text then round(
@@ -3245,6 +3553,13 @@ with recursive
         end - rb.gross_produced_qty,
         0::numeric
       ) as balance_qty,
+      case
+        when rb.department_category = 'FLEXO'::text then case
+          when rb.ok_produced_qty > 0::numeric then rb.ok_produced_qty
+          else sc_1.ok_produced_qty
+        end
+        else sc_1.rm_carry_qty
+      end as rm_carry_qty,
       rb.rn
     from
       routing_base rb
@@ -3293,8 +3608,11 @@ with recursive
     from
       v_production_stage_queue_fast q
     where
-      upper(COALESCE(q.process_name, ''::text)) ~~ '%DIE CUT%'::text
-      or upper(COALESCE(q.process_name, ''::text)) ~~ '%DIECUT%'::text
+      upper(COALESCE(q.department_category, ''::text)) <> 'FLEXO'::text
+      and (
+        upper(COALESCE(q.process_name, ''::text)) ~~ '%DIE CUT%'::text
+        or upper(COALESCE(q.process_name, ''::text)) ~~ '%DIECUT%'::text
+      )
     group by
       q.wo_id
   ),
@@ -3322,6 +3640,17 @@ with recursive
       'COMBINED'::text as row_kind,
       'Combined Sheet Flow'::text as row_description,
       case
+        when upper(COALESCE(q.department_category, ''::text)) = 'FLEXO'::text
+        and (
+          upper(COALESCE(q.process_name, ''::text)) ~~ '%DIE CUT%'::text
+          or upper(COALESCE(q.process_name, ''::text)) ~~ '%DIECUT%'::text
+          or upper(COALESCE(q.process_name, ''::text)) ~~ '%INSPECTION%'::text
+          or upper(COALESCE(q.process_name, ''::text)) ~~ '%SLITTING%'::text
+        )
+        and upper(COALESCE(q.process_name, ''::text)) !~~ '%DIE SHEET%'::text then 'RM'::text
+        when upper(COALESCE(q.process_name, ''::text)) ~~ '%DIE CUT%'::text
+        or upper(COALESCE(q.process_name, ''::text)) ~~ '%DIECUT%'::text
+        or upper(COALESCE(q.process_name, ''::text)) ~~ '%DIE SHEET%'::text then 'SHEETS'::text
         when upper(COALESCE(q.department_category, ''::text)) = 'FLEXO'::text then 'RM'::text
         else 'SHEETS'::text
       end as plan_unit,
@@ -3644,7 +3973,18 @@ with recursive
       jd.job_ups,
       case
         when upper(COALESCE(psr.process_name, ''::text)) ~~ '%INSPECTION%'::text
-        or upper(COALESCE(psr.process_name, ''::text)) ~~ '%SLITTING%'::text then COALESCE(ret.ok_produced_qty, 0::numeric)
+        or upper(COALESCE(psr.process_name, ''::text)) ~~ '%SLITTING%'::text
+        or upper(COALESCE(psr.process_name, ''::text)) ~~ '%2 PLY%'::text
+        or upper(COALESCE(psr.process_name, ''::text)) ~~ '%TWO PLY%'::text
+        or upper(COALESCE(psr.process_name, ''::text)) ~~ '%PLY MAKING%'::text
+        or upper(COALESCE(psr.process_name, ''::text)) ~~ '%CORRUGATION SHEET PASTING%'::text
+        or upper(COALESCE(psr.process_name, ''::text)) ~~ '%SHEET PASTING%'::text
+        or upper(COALESCE(psr.department_category, ''::text)) <> 'FLEXO'::text
+        and (
+          upper(COALESCE(psr.process_name, ''::text)) ~~ '%DIE CUT%'::text
+          or upper(COALESCE(psr.process_name, ''::text)) ~~ '%DIECUT%'::text
+        )
+        or upper(COALESCE(psr.process_name, ''::text)) ~~ '%DIE SHEET%'::text then COALESCE(ret.ok_produced_qty, 0::numeric)
         else COALESCE(ret.ok_produced_qty, 0::numeric) * COALESCE(NULLIF(jd.job_ups, 0::numeric), 1::numeric)
       end as planned_qty,
       COALESCE(jt.gross_produced_qty, 0::numeric) as produced_qty,
@@ -3756,6 +4096,23 @@ select
   case
     when upper(COALESCE(psr.process_name, ''::text)) ~~ '%INSPECTION%'::text
     or upper(COALESCE(psr.process_name, ''::text)) ~~ '%SLITTING%'::text then 'RM'::text
+    when upper(COALESCE(psr.department_category, ''::text)) = 'FLEXO'::text
+    and (
+      upper(COALESCE(psr.process_name, ''::text)) ~~ '%DIE CUT%'::text
+      or upper(COALESCE(psr.process_name, ''::text)) ~~ '%DIECUT%'::text
+    )
+    and upper(COALESCE(psr.process_name, ''::text)) !~~ '%DIE SHEET%'::text then 'RM'::text
+    when upper(COALESCE(psr.process_name, ''::text)) ~~ '%2 PLY%'::text
+    or upper(COALESCE(psr.process_name, ''::text)) ~~ '%TWO PLY%'::text
+    or upper(COALESCE(psr.process_name, ''::text)) ~~ '%PLY MAKING%'::text
+    or upper(COALESCE(psr.process_name, ''::text)) ~~ '%CORRUGATION SHEET PASTING%'::text
+    or upper(COALESCE(psr.process_name, ''::text)) ~~ '%SHEET PASTING%'::text
+    or upper(COALESCE(psr.department_category, ''::text)) <> 'FLEXO'::text
+    and (
+      upper(COALESCE(psr.process_name, ''::text)) ~~ '%DIE CUT%'::text
+      or upper(COALESCE(psr.process_name, ''::text)) ~~ '%DIECUT%'::text
+    )
+    or upper(COALESCE(psr.process_name, ''::text)) ~~ '%DIE SHEET%'::text then 'SHEETS'::text
     else 'UNITS'::text
   end as plan_unit,
   psr.wo_id,
@@ -3853,7 +4210,9 @@ group by
   status;
 
 
-create view public.v_purchase_plate_die_jobs as
+create view public.v_purchase_plate_die_jobs
+with
+  (security_invoker = on) as
 select
   so.id as so_id,
   so.so_number,
@@ -3871,7 +4230,9 @@ where
   or upper(COALESCE(a.die_status, ''::text)) = 'NEW'::text;
 
 
-create view public.v_purchase_requests_open as
+create view public.v_purchase_requests_open
+with
+  (security_invoker = on) as
 select
   pr_no,
   created_at,
@@ -4343,9 +4704,11 @@ select
   COALESCE(c.client_name, so.client_code) as client_name,
   so.sales_rep,
   sol.line_no,
+  COALESCE(sol.status, 'OPEN'::text) as so_line_status,
   sol.product_code,
   sol.product_name,
   sol.category,
+  sol.division,
   COALESCE(sol.qty, 0::numeric) as order_qty,
   sol.unit,
   sol.rate,
@@ -4392,6 +4755,40 @@ select
   COALESCE(cs.current_stage_status, ''::text) as current_stage_status,
   COALESCE(sb.stage_summary, ''::text) as stage_summary,
   sb.stage_last_updated_at,
+  COALESCE(
+    ms.rm_availability_status,
+    'MATERIAL_NOT_DEFINED'::text
+  ) as rm_availability_status,
+  COALESCE(ms.rm_required_qty, 0::numeric) as rm_required_qty,
+  COALESCE(ms.rm_issued_qty, 0::numeric) as rm_issued_qty,
+  COALESCE(ms.rm_pending_qty, 0::numeric) as rm_pending_qty,
+  COALESCE(ms.rm_in_stock_qty, 0::numeric) as rm_in_stock_qty,
+  COALESCE(ms.rm_shortage_qty, 0::numeric) as rm_shortage_qty,
+  COALESCE(ms.rm_pending_receipt_qty, 0::numeric) as rm_pending_receipt_qty,
+  COALESCE(ms.rm_po_nos, ''::text) as rm_po_nos,
+  ms.rm_first_po_date,
+  ms.rm_latest_grn_date,
+  COALESCE(ms.rm_receipt_refs, ''::text) as rm_receipt_refs,
+  COALESCE(ms.rm_pr_nos, ''::text) as rm_pr_nos,
+  COALESCE(ms.rm_detail, ''::text) as rm_detail,
+  COALESCE(ts.plate_procurement_status, ''::text) as plate_procurement_status,
+  COALESCE(ts.plate_po_nos, ''::text) as plate_po_nos,
+  ts.plate_ordered_on,
+  ts.plate_received_on,
+  COALESCE(ts.plate_ordered_qty, 0::numeric) as plate_ordered_qty,
+  COALESCE(ts.plate_received_qty, 0::numeric) as plate_received_qty,
+  COALESCE(ts.plate_pending_qty, 0::numeric) as plate_pending_qty,
+  COALESCE(ts.plate_vendors, ''::text) as plate_vendors,
+  COALESCE(ts.plate_receipt_refs, ''::text) as plate_receipt_refs,
+  COALESCE(ts.die_procurement_status, ''::text) as die_procurement_status,
+  COALESCE(ts.die_po_nos, ''::text) as die_po_nos,
+  ts.die_ordered_on,
+  ts.die_received_on,
+  COALESCE(ts.die_ordered_qty, 0::numeric) as die_ordered_qty,
+  COALESCE(ts.die_received_qty, 0::numeric) as die_received_qty,
+  COALESCE(ts.die_pending_qty, 0::numeric) as die_pending_qty,
+  COALESCE(ts.die_vendors, ''::text) as die_vendors,
+  COALESCE(ts.die_receipt_refs, ''::text) as die_receipt_refs,
   COALESCE(ib.billed_qty, 0::numeric) as billed_qty,
   GREATEST(
     COALESCE(sol.qty, 0::numeric) - COALESCE(ib.billed_qty, 0::numeric),
@@ -4422,6 +4819,10 @@ from
   and sb.line_no = sol.line_no
   left join current_stage cs on cs.so_number = so.so_number
   and cs.line_no = sol.line_no
+  left join v_report_planning_material_status ms on ms.so_number = so.so_number
+  and ms.line_no::text = sol.line_no::text
+  left join v_report_planning_tooling_status ts on ts.so_number = so.so_number
+  and ts.line_no::text = sol.line_no::text
   left join invoice_base ib on ib.so_line_id = sol.id
 where
   upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text;
@@ -4445,7 +4846,8 @@ select
   planned_qty,
   produced_qty,
   balance_qty,
-  status
+  status,
+  department_category
 from
   v_production_stage_queue_fast
 where
@@ -4499,7 +4901,9 @@ where
   ) > 0::numeric;
 
 
-create view public.v_sales_order_line_details as
+create view public.v_sales_order_line_details
+with
+  (security_invoker = on) as
 select
   sol.id,
   sol.so_id,
@@ -4509,7 +4913,11 @@ select
   sol.product_code,
   sol.product_name,
   sol.category,
-  COALESCE(i.hsn_group, ''::text) as hsn_group,
+  COALESCE(
+    NULLIF(sol.hsn_group, ''::text),
+    i.hsn_group,
+    ''::text
+  ) as hsn_group,
   COALESCE(sol.qty, 0::numeric) as qty,
   COALESCE(sol.unit, ''::text) as unit,
   COALESCE(sol.rate, 0::numeric) as rate,
@@ -4556,7 +4964,9 @@ from
   left join sales_order_rollup_cache src on src.so_id = so.id::text;
 
 
-create view public.v_sales_order_lines_for_approval as
+create view public.v_sales_order_lines_for_approval
+with
+  (security_invoker = on) as
 select
   so.so_number,
   so.so_date,
@@ -4579,7 +4989,9 @@ from
   left join clients c on c.client_code = so.client_code;
 
 
-create view public.v_sales_orders_dashboard as
+create view public.v_sales_orders_dashboard
+with
+  (security_invoker = on) as
 select
   id,
   so_number,
@@ -4670,7 +5082,9 @@ from
   sales_orders so;
 
 
-create view public.v_sales_orders_list_fast as
+create view public.v_sales_orders_list_fast
+with
+  (security_invoker = on) as
 select
   so.id,
   so.so_number,
@@ -4765,7 +5179,9 @@ from
   left join sales_order_rollup_cache src on src.so_id = so.id::text;
 
 
-create view public.v_workorder_candidates as
+create view public.v_workorder_candidates
+with
+  (security_invoker = on) as
 with
   service_only_items as (
     select
@@ -5112,7 +5528,62 @@ from
   scored;
 
 
-create view public.wo_material_pending as
+create view public.v_workorder_candidates_active as
+select
+  wc.so_id,
+  wc.so_line_id,
+  wc.so_number,
+  wc.so_date,
+  wc.so_created_at,
+  wc.so_time,
+  wc.sales_rep,
+  wc.client_code,
+  wc.client_name,
+  wc.line_no,
+  wc.product_code,
+  wc.product_name,
+  wc.category,
+  wc.department_category,
+  wc.qty,
+  wc.unit,
+  wc.po_number,
+  wc.expected_delivery,
+  wc.job_priority,
+  wc.job_type,
+  wc.so_remarks,
+  wc.product_remarks,
+  wc.prepress_remark,
+  wc.job_reference,
+  wc.accounts_status,
+  wc.business_status,
+  wc.artwork_no,
+  wc.product_type,
+  wc.sheet_length,
+  wc.sheet_width,
+  wc.sheet_ups,
+  wc.printing_colors,
+  wc.artwork_status,
+  wc.artwork_approved_at,
+  wc.processed_qty,
+  wc.remaining_qty,
+  wc.wo_list,
+  wc.approval_stage,
+  wc.can_create_wo
+from
+  v_workorder_candidates wc
+  join sales_orders so on so.so_number = wc.so_number
+  join sales_order_lines sol on sol.so_id = so.id
+  and sol.line_no::text = wc.line_no::text
+where
+  upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text
+  and (
+    upper(COALESCE(sol.status, 'OPEN'::text)) <> all (array['CLOSED'::text, 'CANCELLED'::text])
+  );
+
+
+create view public.wo_material_pending
+with
+  (security_invoker = on) as
 select
   wom.wo_id,
   wom.material_key,
@@ -5185,6 +5656,8 @@ create index IF not exists idx_work_order_jobs_so_line_queue on public.work_orde
 
 create index IF not exists idx_work_order_jobs_so_number_line_no on public.work_order_jobs using btree (so_number, line_no) TABLESPACE pg_default;
 
+create index IF not exists idx_flexowo_work_order_jobs_so_line on public.work_order_jobs using btree (so_number, line_no, wo_id) TABLESPACE pg_default;
+
 create trigger trg_sales_order_rollup_from_work_order_jobs
 after INSERT
 or DELETE
@@ -5212,6 +5685,8 @@ create table public.work_order_materials (
 ) TABLESPACE pg_default;
 
 create unique INDEX IF not exists uq_wom_material on public.work_order_materials using btree (wo_id, material_key) TABLESPACE pg_default;
+
+create index IF not exists idx_work_order_materials_wo_key on public.work_order_materials using btree (wo_id, material_key) TABLESPACE pg_default;
 
 
 create table public.work_order_routing (
@@ -5261,6 +5736,7 @@ create unique INDEX IF not exists idx_work_orders_wo_number on public.work_order
 create index IF not exists idx_work_orders_wo_date on public.work_orders using btree (wo_date desc) TABLESPACE pg_default;
 
 create index IF not exists idx_work_orders_wo_number_trgm on public.work_orders using gin (wo_number gin_trgm_ops) TABLESPACE pg_default;
+
 
 create view public.v_report_production_nop_daily as
 with
@@ -5339,7 +5815,7 @@ with
       ),
       (
         'FLEXODIE'::text,
-        'Automatic Die Cutting - Flexo Die Cutting Offline'::text,
+        'Flexo Die Cutting Offline'::text,
         30::numeric,
         44::numeric
       ),
@@ -5360,6 +5836,18 @@ with
         '2 Ply Making Machine'::text,
         15::numeric,
         2000::numeric
+      ),
+      (
+        'ROTARY'::text,
+        'Rotary Cutting'::text,
+        0::numeric,
+        650::numeric
+      ),
+      (
+        'AUTOWINDOW'::text,
+        'Auto Window Pasting'::text,
+        0::numeric,
+        1500::numeric
       ),
       (
         'MSP1'::text,
@@ -5556,9 +6044,16 @@ with
         or eb.raw_machine_upper ~~ '%MARKANY%'::text then 'FLEXOPRINT'::text
         when eb.raw_machine_upper ~~ '%DIGITAL%'::text
         or eb.raw_machine_upper ~~ '%CANON%'::text then 'DIGITAL'::text
+        when eb.raw_machine_upper = any (array['AUTOMATIC'::text, 'AUTO'::text]) then '2PLY'::text
         when eb.raw_machine_upper ~~ '%2 PLY%'::text
         or eb.raw_machine_upper ~~ '%TWO PLY%'::text
         or eb.raw_machine_upper ~~ '%PLY MAKING%'::text then '2PLY'::text
+        when eb.raw_machine_upper ~~ '%ROTARY%'::text then 'ROTARY'::text
+        when eb.raw_machine_upper ~~ '%AUTO WINDOW%'::text
+        or eb.raw_machine_upper ~~ '%AUTOMATIC WINDOW%'::text
+        or eb.raw_machine_upper ~~ '%WINDOW%'::text
+        and eb.raw_machine_upper ~~ '%PAST%'::text
+        and eb.raw_machine_upper !~~ '%MANUAL%'::text then 'AUTOWINDOW'::text
         when eb.raw_machine_upper ~~ '%FMZ%'::text
         or eb.raw_machine_upper ~~ '%FLUTE%'::text then 'FMZ'::text
         when eb.raw_machine_upper ~~ '%MANUAL PASTING%'::text
@@ -5602,7 +6097,9 @@ with
         or eb.raw_machine_upper ~~ '%STITCHING MANUAL - 1%'::text then 'STMAN1'::text
         when eb.raw_machine_upper ~~ '%AUTO STITCH%'::text
         or eb.raw_machine_upper ~~ '%STITCHING AUTO%'::text then 'STAUTO'::text
+        when eb.raw_machine_upper = 'STITCHING'::text then 'STMAN1'::text
         when eb.raw_machine_upper ~~ '%FOLDER GLUER%'::text then 'FOLDER'::text
+        when eb.raw_machine_upper = any (array['PASTING'::text, 'SIDE PASTING'::text]) then 'FOLDER'::text
         when eb.raw_machine_upper ~~ '%RS4%'::text then 'RS4'::text
         else regexp_replace(
           eb.raw_machine_upper,
@@ -5796,3 +6293,3248 @@ select
   last_completion_at
 from
   final_calc;
+
+
+create view public.v_report_production_nop_machine_cleanup as
+with
+  machine_standards (
+    machine_key,
+    machine,
+    standard_make_ready_minutes,
+    target_hourly_output
+  ) as (
+    values
+      (
+        'SM74'::text,
+        'Heidelberg SM74'::text,
+        30::numeric,
+        4125::numeric
+      ),
+      (
+        'CD102'::text,
+        'CD102'::text,
+        30::numeric,
+        4125::numeric
+      ),
+      (
+        'LAM1'::text,
+        'Lamination Roll-1'::text,
+        10::numeric,
+        1100::numeric
+      ),
+      (
+        'LAM2'::text,
+        'Lamination 02'::text,
+        10::numeric,
+        1100::numeric
+      ),
+      (
+        'LAM3'::text,
+        'Lamination 03'::text,
+        10::numeric,
+        1100::numeric
+      ),
+      (
+        'DIE1'::text,
+        'Die Cutting 01'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE2'::text,
+        'Die Cutting 02'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE3'::text,
+        'Die Cutting 03'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE4'::text,
+        'Die Cutting 04'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE5'::text,
+        'Die Cutting 05'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'FLEXOPRINT'::text,
+        'Markany Flexo E5'::text,
+        30::numeric,
+        55::numeric
+      ),
+      (
+        'FLEXODIE'::text,
+        'Flexo Die Cutting Offline'::text,
+        30::numeric,
+        44::numeric
+      ),
+      (
+        'FLEXOSLIT'::text,
+        'Rhyguan'::text,
+        30::numeric,
+        88::numeric
+      ),
+      (
+        'DIGITAL'::text,
+        'Canon Digital Printing'::text,
+        10::numeric,
+        660::numeric
+      ),
+      (
+        '2PLY'::text,
+        '2 Ply Making Machine'::text,
+        15::numeric,
+        2000::numeric
+      ),
+      (
+        'ROTARY'::text,
+        'Rotary Cutting'::text,
+        0::numeric,
+        650::numeric
+      ),
+      (
+        'AUTOWINDOW'::text,
+        'Auto Window Pasting'::text,
+        0::numeric,
+        1500::numeric
+      ),
+      (
+        'MSP1'::text,
+        'Manual Sheet Pasting'::text,
+        0::numeric,
+        600::numeric
+      ),
+      (
+        'MSP2'::text,
+        'Manual Pasting'::text,
+        0::numeric,
+        600::numeric
+      ),
+      (
+        'FMZ'::text,
+        'Flute Laminator'::text,
+        0::numeric,
+        2000::numeric
+      ),
+      (
+        'DCMAN1'::text,
+        'Manual Die Cutting 04'::text,
+        45::numeric,
+        800::numeric
+      ),
+      (
+        'DCMAN2'::text,
+        'Manual Die Cutting 05'::text,
+        45::numeric,
+        800::numeric
+      ),
+      (
+        'DCAUTO'::text,
+        'Automatic Die Cutting'::text,
+        90::numeric,
+        2500::numeric
+      ),
+      (
+        'STMAN1'::text,
+        'Stitching Manual 01'::text,
+        0::numeric,
+        250::numeric
+      ),
+      (
+        'STMAN2'::text,
+        'Stitching Manual 02'::text,
+        0::numeric,
+        250::numeric
+      ),
+      (
+        'STAUTO'::text,
+        'Auto Stitching'::text,
+        0::numeric,
+        200::numeric
+      ),
+      (
+        'FOLDER'::text,
+        'Folder Gluer'::text,
+        45::numeric,
+        15000::numeric
+      ),
+      (
+        'RS4'::text,
+        'RS4 Printing'::text,
+        60::numeric,
+        1500::numeric
+      )
+  ),
+  entry_base as (
+    select
+      pe.id as production_entry_id,
+      pe.routing_id,
+      r.wo_id,
+      wo.wo_number,
+      pe.so_number,
+      pe.line_no,
+      pe.job_reference,
+      timezone ('Asia/Kolkata'::text, pe.entry_datetime) as entry_local_ts,
+      timezone ('Asia/Kolkata'::text, pe.entry_datetime)::date as production_date,
+      NULLIF(pe.machine, ''::text) as production_entry_machine,
+      NULLIF(r.planned_machine, ''::text) as routing_planned_machine,
+      NULLIF(r.process_name, ''::text) as routing_process_name,
+      NULLIF(r.department, ''::text) as routing_department,
+      COALESCE(
+        NULLIF(pe.machine, ''::text),
+        NULLIF(r.planned_machine, ''::text),
+        'Unassigned'::text
+      ) as raw_machine,
+      upper(
+        COALESCE(
+          NULLIF(pe.machine, ''::text),
+          NULLIF(r.planned_machine, ''::text),
+          'UNASSIGNED'::text
+        )
+      ) as raw_machine_upper,
+      upper(
+        COALESCE(
+          NULLIF(r.process_name, ''::text),
+          NULLIF(r.department, ''::text),
+          ''::text
+        )
+      ) as raw_process_upper,
+      NULLIF(
+        TRIM(
+          both
+          from
+            pe.operator_name
+        ),
+        ''::text
+      ) as operator_name,
+      GREATEST(COALESCE(pe.produced_qty, 0::numeric), 0::numeric) as produced_qty
+    from
+      production_entries pe
+      left join work_order_routing r on r.id = pe.routing_id
+      left join work_orders wo on wo.id = r.wo_id
+    where
+      pe.entry_datetime is not null
+  ),
+  entry_normalized as (
+    select
+      eb.production_entry_id,
+      eb.routing_id,
+      eb.wo_id,
+      eb.wo_number,
+      eb.so_number,
+      eb.line_no,
+      eb.job_reference,
+      eb.entry_local_ts,
+      eb.production_date,
+      eb.production_entry_machine,
+      eb.routing_planned_machine,
+      eb.routing_process_name,
+      eb.routing_department,
+      eb.raw_machine,
+      eb.raw_machine_upper,
+      eb.raw_process_upper,
+      eb.operator_name,
+      eb.produced_qty,
+      case
+        when eb.raw_machine_upper ~~ '%SM74%'::text
+        or eb.raw_machine_upper ~~ '%SM-74%'::text
+        or eb.raw_machine_upper ~~ '%HEIDELBERG%'::text then 'SM74'::text
+        when eb.raw_machine_upper ~~ '%CD102%'::text
+        or eb.raw_machine_upper ~~ '%CD-102%'::text
+        or eb.raw_machine_upper ~~ '%CD 102%'::text then 'CD102'::text
+        when eb.raw_machine_upper ~~ '%LAMINATION 01%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION 1%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION ROLL-1%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION ROLL 1%'::text
+        or eb.raw_machine_upper ~~ '%LAM-1%'::text
+        or eb.raw_machine_upper = 'LAM1'::text then 'LAM1'::text
+        when eb.raw_machine_upper ~~ '%LAMINATION 02%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION 2%'::text
+        or eb.raw_machine_upper ~~ '%LAM-2%'::text
+        or eb.raw_machine_upper = 'LAM2'::text then 'LAM2'::text
+        when eb.raw_machine_upper ~~ '%LAMINATION 03%'::text
+        or eb.raw_machine_upper ~~ '%LAMINATION 3%'::text
+        or eb.raw_machine_upper ~~ '%LAM-3%'::text
+        or eb.raw_machine_upper = 'LAM3'::text then 'LAM3'::text
+        when eb.raw_machine_upper ~~ '%RHYGUAN%'::text
+        or eb.raw_process_upper ~~ '%INSPECTION%'::text
+        or eb.raw_process_upper ~~ '%SLITTING%'::text
+        or eb.raw_process_upper ~~ '%SLIT%'::text then 'FLEXOSLIT'::text
+        when eb.raw_process_upper ~~ '%FLEXO%'::text
+        and (
+          eb.raw_process_upper ~~ '%DIE%'::text
+          or eb.raw_process_upper ~~ '%CUT%'::text
+        )
+        or eb.raw_machine_upper ~~ '%FLEXO%'::text
+        and (
+          eb.raw_machine_upper ~~ '%DIE%'::text
+          or eb.raw_machine_upper ~~ '%CUT%'::text
+        ) then 'FLEXODIE'::text
+        when eb.raw_process_upper ~~ '%FLEXO%'::text
+        or eb.raw_machine_upper ~~ '%FLEXO%'::text
+        or eb.raw_machine_upper ~~ '%MARKANY%'::text then 'FLEXOPRINT'::text
+        when eb.raw_machine_upper ~~ '%DIGITAL%'::text
+        or eb.raw_machine_upper ~~ '%CANON%'::text then 'DIGITAL'::text
+        when eb.raw_machine_upper = any (array['AUTOMATIC'::text, 'AUTO'::text]) then '2PLY'::text
+        when eb.raw_machine_upper ~~ '%2 PLY%'::text
+        or eb.raw_machine_upper ~~ '%TWO PLY%'::text
+        or eb.raw_machine_upper ~~ '%PLY MAKING%'::text then '2PLY'::text
+        when eb.raw_machine_upper ~~ '%ROTARY%'::text then 'ROTARY'::text
+        when eb.raw_machine_upper ~~ '%AUTO WINDOW%'::text
+        or eb.raw_machine_upper ~~ '%AUTOMATIC WINDOW%'::text
+        or eb.raw_machine_upper ~~ '%WINDOW%'::text
+        and eb.raw_machine_upper ~~ '%PAST%'::text
+        and eb.raw_machine_upper !~~ '%MANUAL%'::text then 'AUTOWINDOW'::text
+        when eb.raw_machine_upper ~~ '%FMZ%'::text
+        or eb.raw_machine_upper ~~ '%FLUTE%'::text then 'FMZ'::text
+        when eb.raw_machine_upper ~~ '%MANUAL PASTING%'::text
+        or eb.raw_machine_upper ~~ '%MANUAL SHEET PASTING 2%'::text
+        or eb.raw_machine_upper ~~ '%MANUAL SHEET PASTING - 2%'::text then 'MSP2'::text
+        when eb.raw_machine_upper ~~ '%MANUAL SHEET PASTING%'::text then 'MSP1'::text
+        when eb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 05%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING MANUAL 2%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING MANUAL - 2%'::text then 'DCMAN2'::text
+        when eb.raw_machine_upper ~~ '%MANUAL DIE%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING MANUAL%'::text
+        or eb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 04%'::text then 'DCMAN1'::text
+        when eb.raw_machine_upper ~~ '%AUTOMATIC DIE%'::text
+        or eb.raw_machine_upper ~~ '%AUTO DIE%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING AUTO%'::text then 'DCAUTO'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 01%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING-01%'::text
+        or eb.raw_machine_upper ~~ '%DIE-CUTTING-01%'::text
+        or eb.raw_machine_upper ~~ '%DIE-1%'::text
+        or eb.raw_machine_upper ~~ '%DYE-1%'::text then 'DIE1'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 02%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING-02%'::text
+        or eb.raw_machine_upper ~~ '%DIE-CUTTING-02%'::text
+        or eb.raw_machine_upper ~~ '%DIE-2%'::text
+        or eb.raw_machine_upper ~~ '%DYE-2%'::text then 'DIE2'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 03%'::text
+        or eb.raw_machine_upper ~~ '%DIE CUTTING-03%'::text
+        or eb.raw_machine_upper ~~ '%DIE-CUTTING-03%'::text
+        or eb.raw_machine_upper ~~ '%DIE-3%'::text
+        or eb.raw_machine_upper ~~ '%DYE-3%'::text then 'DIE3'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 04%'::text
+        or eb.raw_machine_upper ~~ '%DIE-4%'::text
+        or eb.raw_machine_upper ~~ '%DYE-4%'::text then 'DIE4'::text
+        when eb.raw_machine_upper ~~ '%DIE CUTTING 05%'::text
+        or eb.raw_machine_upper ~~ '%DIE-5%'::text
+        or eb.raw_machine_upper ~~ '%DYE-5%'::text then 'DIE5'::text
+        when eb.raw_machine_upper ~~ '%STITCHING MANUAL 02%'::text
+        or eb.raw_machine_upper ~~ '%STITCHING MANUAL - 2%'::text then 'STMAN2'::text
+        when eb.raw_machine_upper ~~ '%STITCHING MANUAL%'::text
+        or eb.raw_machine_upper ~~ '%STITCHING MANUAL 01%'::text
+        or eb.raw_machine_upper ~~ '%STITCHING MANUAL - 1%'::text then 'STMAN1'::text
+        when eb.raw_machine_upper ~~ '%AUTO STITCH%'::text
+        or eb.raw_machine_upper ~~ '%STITCHING AUTO%'::text then 'STAUTO'::text
+        when eb.raw_machine_upper = 'STITCHING'::text then 'STMAN1'::text
+        when eb.raw_machine_upper ~~ '%FOLDER GLUER%'::text then 'FOLDER'::text
+        when eb.raw_machine_upper = any (array['PASTING'::text, 'SIDE PASTING'::text]) then 'FOLDER'::text
+        when eb.raw_machine_upper ~~ '%RS4%'::text then 'RS4'::text
+        else regexp_replace(
+          eb.raw_machine_upper,
+          '[^A-Z0-9]+'::text,
+          ''::text,
+          'g'::text
+        )
+      end as normalized_machine_key
+    from
+      entry_base eb
+  )
+select
+  en.production_entry_id,
+  en.routing_id,
+  en.wo_id,
+  en.wo_number,
+  en.so_number,
+  en.line_no,
+  en.job_reference,
+  en.production_date,
+  en.entry_local_ts,
+  en.production_entry_machine,
+  en.routing_planned_machine,
+  en.routing_process_name,
+  en.routing_department,
+  en.raw_machine as current_machine_input,
+  en.normalized_machine_key,
+  COALESCE(ms.machine, en.raw_machine) as report_machine_label,
+  COALESCE(ms.target_hourly_output, 0::numeric) as target_hourly_output,
+  en.operator_name,
+  en.produced_qty,
+  case
+    when en.raw_machine_upper = 'MANUAL'::text then 'Review production_entries.machine / work_order_routing.planned_machine and assign the actual manual process machine.'::text
+    when en.raw_machine_upper = any (array['AUTOMATIC'::text, 'AUTO'::text]) then 'Reporting maps this to 2 Ply Making Machine. Update source only after confirming.'::text
+    when en.raw_machine_upper = any (array['PASTING'::text, 'SIDE PASTING'::text]) then 'Reporting maps this to Folder Gluer. Update source only after confirming.'::text
+    when en.raw_machine_upper = 'STITCHING'::text then 'Reporting maps this to Stitching Manual 01. Update source only after confirming.'::text
+    when en.raw_machine_upper ~~ '%UV%'::text then 'Target not configured yet. Confirm whether this should be RS4 Printing or a separate UV target.'::text
+    when ms.machine_key is null then 'No NOP target found for this machine input. Review and map safely before updating live data.'::text
+    else ''::text
+  end as review_note,
+  'production_entries.machine / work_order_routing.planned_machine'::text as review_columns,
+  'Use this view to identify records first; do not update live machine values without operational confirmation.'::text as safe_update_note
+from
+  entry_normalized en
+  left join machine_standards ms on ms.machine_key = en.normalized_machine_key
+where
+  (
+    en.raw_machine_upper = any (
+      array[
+        'MANUAL'::text,
+        'AUTOMATIC'::text,
+        'AUTO'::text,
+        'PASTING'::text,
+        'SIDE PASTING'::text,
+        'STITCHING'::text
+      ]
+    )
+  )
+  or en.raw_machine_upper ~~ '%ROTARY%'::text
+  or en.raw_machine_upper ~~ '%WINDOW%'::text
+  or en.raw_machine_upper ~~ '%UV%'::text
+  or ms.machine_key is null;
+
+
+create table public.work_order_routing_digital_cleanup_backup_20260420 (
+  backup_at timestamp with time zone null,
+  cleanup_reason text null,
+  id uuid null,
+  wo_id uuid null,
+  so_number text null,
+  line_no text null,
+  process_name text null,
+  sequence_no integer null,
+  department text null,
+  planned_machine text null,
+  planned_qty numeric null,
+  completed_qty numeric null,
+  status text null,
+  created_at timestamp with time zone null
+) TABLESPACE pg_default;
+
+
+create table public.work_orders_snapshot_digital_cleanup_backup_20260420 (
+  backup_at timestamp with time zone null,
+  id uuid null,
+  wo_number text null,
+  snapshot_json jsonb null
+) TABLESPACE pg_default;
+
+
+create view public.inv_wo_issue_requirement_v as
+with
+  material_rows as (
+    select
+      wom.wo_id,
+      wom.material_key,
+      max(wom.item_name) as item_name,
+      max(wom.gsm) as gsm,
+      max(wom.deckle) as deckle,
+      max(wom.cut_size) as cut_size,
+      max(wom.uom) as uom,
+      sum(COALESCE(wom.required_qty, 0::numeric)) as required_qty
+    from
+      work_order_materials wom
+    group by
+      wom.wo_id,
+      wom.material_key
+  ),
+  issued_rows as (
+    select
+      il.ref_no as wo_number,
+      il.remarks as material_key,
+      sum(COALESCE(il.qty_out, 0::numeric)) as issued_qty
+    from
+      inv_ledger il
+    where
+      upper(COALESCE(il.ref_type, ''::text)) = 'ISSUE'::text
+      and COALESCE(il.qty_out, 0::numeric) > 0::numeric
+      and COALESCE(il.remarks, ''::text) <> ''::text
+      and not (
+        exists (
+          select
+            1
+          from
+            inv_ledger rev
+          where
+            rev.ref_no = il.id::text
+            and upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text
+        )
+      )
+    group by
+      il.ref_no,
+      il.remarks
+  ),
+  wo_base as (
+    select
+      wo.id,
+      wo.wo_number,
+      wo.status,
+      wo.snapshot_json,
+      COALESCE(
+        NULLIF(
+          wo.snapshot_json #>> '{jobDetails,department}'::text[],
+          ''::text
+        ),
+        NULLIF(
+          wo.snapshot_json #>> '{department}'::text[],
+          ''::text
+        ),
+        NULLIF(
+          wo.snapshot_json #>> '{departmentCategory}'::text[],
+          ''::text
+        ),
+        NULLIF(
+          wo.snapshot_json #>> '{jobDetails,category}'::text[],
+          ''::text
+        ),
+        NULLIF(
+          wo.snapshot_json #>> '{jobDetails,type}'::text[],
+          ''::text
+        ),
+        ''::text
+      ) as raw_department
+    from
+      work_orders wo
+    where
+      COALESCE(upper(wo.status), ''::text) <> 'CLOSED'::text
+  ),
+  prepared as (
+    select
+      wb.id as wo_id,
+      wb.wo_number,
+      wb.status,
+      case
+        when upper(wb.raw_department) ~~ '%FLEXO%'::text then 'Flexo'::text
+        when upper(wb.raw_department) ~~ '%OFFSET%'::text then 'Offset'::text
+        when upper(wb.raw_department) = 'FLAT'::text then 'Offset'::text
+        when upper(wb.raw_department) ~~ '%FLAT%'::text then 'Offset'::text
+        when upper(wb.raw_department) ~~ '%DIGITAL%'::text then 'Digital'::text
+        when upper(wb.raw_department) ~~ '%CORR%'::text then 'Corrugation'::text
+        else 'Offset'::text
+      end as issue_department,
+      mr.material_key,
+      COALESCE(
+        NULLIF(mr.item_name, ''::text),
+        NULLIF(
+          split_part(mr.material_key, '|'::text, 1),
+          ''::text
+        ),
+        ''::text
+      ) as item_label,
+      mr.gsm,
+      COALESCE(
+        NULLIF(mr.deckle, 0::numeric),
+        NULLIF(
+          NULLIF(
+            split_part(mr.material_key, '|'::text, 3),
+            ''::text
+          )::numeric,
+          0::numeric
+        ),
+        0::numeric
+      ) as deckle_mm,
+      COALESCE(
+        NULLIF(mr.cut_size, 0::numeric),
+        NULLIF(
+          NULLIF(
+            split_part(mr.material_key, '|'::text, 4),
+            ''::text
+          )::numeric,
+          0::numeric
+        ),
+        0::numeric
+      ) as cut_mm,
+      COALESCE(
+        NULLIF(mr.uom, ''::text),
+        NULLIF(
+          split_part(mr.material_key, '|'::text, 5),
+          ''::text
+        ),
+        ''::text
+      ) as uom,
+      COALESCE(mr.required_qty, 0::numeric) as required_qty,
+      COALESCE(ir.issued_qty, 0::numeric) as issued_qty
+    from
+      wo_base wb
+      join material_rows mr on mr.wo_id = wb.id
+      left join issued_rows ir on ir.wo_number = wb.wo_number
+      and ir.material_key = mr.material_key
+  )
+select
+  wo_id,
+  wo_number,
+  status,
+  issue_department,
+  material_key,
+  item_label,
+  gsm,
+  deckle_mm,
+  cut_mm,
+  uom,
+  required_qty,
+  issued_qty,
+  GREATEST(required_qty - issued_qty, 0::numeric) as remaining_qty,
+  case
+    when GREATEST(required_qty - issued_qty, 0::numeric) > 0.0001 then 'PENDING'::text
+    else 'ISSUED'::text
+  end as line_status
+from
+  prepared;
+
+
+create view public.inv_wo_issue_status_v as
+select
+  wo_number,
+  max(issue_department) as issue_department,
+  case
+    when bool_or(line_status = 'PENDING'::text) then 'PENDING'::text
+    else 'ISSUED'::text
+  end as material_status,
+  sum(required_qty) as required_qty,
+  sum(issued_qty) as issued_qty,
+  sum(remaining_qty) as remaining_qty
+from
+  inv_wo_issue_requirement_v
+group by
+  wo_number;
+
+
+create view public.v_client_master_register
+with
+  (security_invoker = on) as
+select
+  c.id,
+  c.client_code,
+  c.client_name,
+  c.state,
+  c.gstin,
+  c.pan_no,
+  c.credit_days,
+  c.category,
+  c.payment_terms,
+  c.active,
+  count(cp.id) filter (
+    where
+      cp.address_type = 'BILL_TO'::text
+  ) as bill_to_count,
+  count(cp.id) filter (
+    where
+      cp.address_type = 'SHIP_TO'::text
+  ) as ship_to_count,
+  COALESCE(
+    jsonb_agg(
+      jsonb_build_object(
+        'id',
+        cp.id,
+        'party_name',
+        cp.party_name,
+        'address_type',
+        cp.address_type,
+        'label',
+        cp.label,
+        'address_line1',
+        cp.address_line1,
+        'address_line2',
+        cp.address_line2,
+        'city',
+        cp.city,
+        'state',
+        cp.state,
+        'pincode',
+        cp.pincode,
+        'gstin',
+        cp.gstin,
+        'pan_no',
+        cp.pan_no,
+        'payment_terms',
+        cp.payment_terms,
+        'contact_person',
+        cp.contact_person,
+        'contact_phone',
+        cp.contact_phone,
+        'is_default',
+        cp.is_default,
+        'active',
+        cp.active
+      )
+      order by
+        cp.address_type,
+        cp.is_default desc,
+        cp.label,
+        cp.party_name
+    ) filter (
+      where
+        cp.id is not null
+    ),
+    '[]'::jsonb
+  ) as parties
+from
+  clients c
+  left join client_parties cp on cp.client_id = c.id
+group by
+  c.id,
+  c.client_code,
+  c.client_name,
+  c.state,
+  c.gstin,
+  c.pan_no,
+  c.credit_days,
+  c.category,
+  c.payment_terms,
+  c.active;
+
+
+create view public.v_fg_stock_available as
+with
+  invoice_usage as (
+    select
+      il.so_line_id,
+      sum(COALESCE(il.qty, 0::numeric)) as billed_qty
+    from
+      invoice_lines il
+      left join invoices i on i.id = il.invoice_id
+    where
+      COALESCE(upper(i.status), ''::text) <> 'CANCELLED'::text
+    group by
+      il.so_line_id
+  ),
+  fg_adjustments as (
+    select
+      fg_stock_adjustments.pack_id,
+      fg_stock_adjustments.opening_id,
+      fg_stock_adjustments.so_line_id,
+      sum(
+        COALESCE(fg_stock_adjustments.adjustment_qty, 0::numeric)
+      ) as adjusted_qty,
+      (
+        array_agg(
+          fg_stock_adjustments.reason
+          order by
+            fg_stock_adjustments.adjustment_date desc nulls last,
+            fg_stock_adjustments.created_at desc
+        )
+      ) [1] as latest_adjustment_reason,
+      (
+        array_agg(
+          fg_stock_adjustments.remarks
+          order by
+            fg_stock_adjustments.adjustment_date desc nulls last,
+            fg_stock_adjustments.created_at desc
+        )
+      ) [1] as latest_adjustment_remarks,
+      max(
+        COALESCE(
+          fg_stock_adjustments.adjustment_date,
+          fg_stock_adjustments.created_at
+        )
+      ) as latest_adjustment_at
+    from
+      fg_stock_adjustments
+    group by
+      fg_stock_adjustments.pack_id,
+      fg_stock_adjustments.opening_id,
+      fg_stock_adjustments.so_line_id
+  ),
+  packed_fg as (
+    select
+      'PACKED::'::text || pr.id::text as row_id,
+      'PACKED'::text as source_type,
+      pr.id as pack_id,
+      null::uuid as opening_id,
+      pr.so_id,
+      pr.so_line_id,
+      pr.so_number,
+      pr.line_no::text as line_no,
+      so.client_code,
+      COALESCE(c.client_name, so.client_code) as client_name,
+      COALESCE(sol.product_code, pr.product_code) as product_code,
+      COALESCE(sol.product_name, pr.product_name) as product_name,
+      COALESCE(sol.unit, 'Pcs'::text) as uom,
+      0::numeric as opening_qty,
+      COALESCE(pr.packed_qty, 0::numeric) as packed_qty,
+      COALESCE(iu.billed_qty, 0::numeric) as billed_qty,
+      COALESCE(adj.adjusted_qty, 0::numeric) as adjusted_qty,
+      GREATEST(
+        COALESCE(pr.packed_qty, 0::numeric) - COALESCE(iu.billed_qty, 0::numeric) - COALESCE(adj.adjusted_qty, 0::numeric),
+        0::numeric
+      ) as available_qty,
+      GREATEST(
+        COALESCE(pr.packed_qty, 0::numeric) - COALESCE(iu.billed_qty, 0::numeric) - COALESCE(adj.adjusted_qty, 0::numeric),
+        0::numeric
+      ) as billable_qty,
+      pr.packed_at::timestamp with time zone as stock_date,
+      adj.latest_adjustment_reason,
+      adj.latest_adjustment_remarks,
+      adj.latest_adjustment_at,
+      sol.product_remarks as remarks
+    from
+      packing_records pr
+      left join sales_orders so on so.id = pr.so_id
+      left join clients c on c.client_code = so.client_code
+      left join sales_order_lines sol on sol.id = pr.so_line_id
+      left join invoice_usage iu on iu.so_line_id = pr.so_line_id
+      left join fg_adjustments adj on adj.pack_id = pr.id
+    where
+      COALESCE(pr.packed_qty, 0::numeric) > 0::numeric
+  ),
+  opening_fg as (
+    select
+      'OPENING::'::text || os.id::text as row_id,
+      'OPENING'::text as source_type,
+      null::uuid as pack_id,
+      os.id as opening_id,
+      null::uuid as so_id,
+      null::uuid as so_line_id,
+      ''::text as so_number,
+      ''::text as line_no,
+      os.client_code,
+      COALESCE(os.client_name, os.client_code) as client_name,
+      os.product_code,
+      os.product_name,
+      COALESCE(os.uom, 'Pcs'::text) as uom,
+      COALESCE(os.opening_qty, 0::numeric) as opening_qty,
+      0::numeric as packed_qty,
+      0::numeric as billed_qty,
+      COALESCE(adj.adjusted_qty, 0::numeric) as adjusted_qty,
+      GREATEST(
+        COALESCE(os.opening_qty, 0::numeric) - COALESCE(adj.adjusted_qty, 0::numeric),
+        0::numeric
+      ) as available_qty,
+      0::numeric as billable_qty,
+      os.opening_date as stock_date,
+      adj.latest_adjustment_reason,
+      adj.latest_adjustment_remarks,
+      adj.latest_adjustment_at,
+      os.remarks
+    from
+      fg_opening_stock os
+      left join fg_adjustments adj on adj.opening_id = os.id
+  )
+select
+  packed_fg.row_id,
+  packed_fg.source_type,
+  packed_fg.pack_id,
+  packed_fg.opening_id,
+  packed_fg.so_id,
+  packed_fg.so_line_id,
+  packed_fg.so_number,
+  packed_fg.line_no,
+  packed_fg.client_code,
+  packed_fg.client_name,
+  packed_fg.product_code,
+  packed_fg.product_name,
+  packed_fg.uom,
+  packed_fg.opening_qty,
+  packed_fg.packed_qty,
+  packed_fg.billed_qty,
+  packed_fg.adjusted_qty,
+  packed_fg.available_qty,
+  packed_fg.billable_qty,
+  packed_fg.stock_date,
+  packed_fg.latest_adjustment_reason,
+  packed_fg.latest_adjustment_remarks,
+  packed_fg.latest_adjustment_at,
+  packed_fg.remarks
+from
+  packed_fg
+union all
+select
+  opening_fg.row_id,
+  opening_fg.source_type,
+  opening_fg.pack_id,
+  opening_fg.opening_id,
+  opening_fg.so_id,
+  opening_fg.so_line_id,
+  opening_fg.so_number,
+  opening_fg.line_no,
+  opening_fg.client_code,
+  opening_fg.client_name,
+  opening_fg.product_code,
+  opening_fg.product_name,
+  opening_fg.uom,
+  opening_fg.opening_qty,
+  opening_fg.packed_qty,
+  opening_fg.billed_qty,
+  opening_fg.adjusted_qty,
+  opening_fg.available_qty,
+  opening_fg.billable_qty,
+  opening_fg.stock_date,
+  opening_fg.latest_adjustment_reason,
+  opening_fg.latest_adjustment_remarks,
+  opening_fg.latest_adjustment_at,
+  opening_fg.remarks
+from
+  opening_fg;
+
+
+create view public.v_flexo_work_order_jobs as
+with
+  latest_artwork as (
+    select distinct
+      on (a.so_id, (a.line_no::text)) a.id,
+      a.so_id,
+      a.line_no,
+      a.artwork_no,
+      a.product_type,
+      a.sheet_length,
+      a.sheet_width,
+      a.sheet_ups,
+      a.printing_colors,
+      a.across_ups,
+      a.along_ups,
+      a.total_ups,
+      a.across_width,
+      a.teeth,
+      a.across_gap_mm,
+      a.along_gap_mm,
+      COALESCE(a.stock_qty_to_bill, 0::numeric) as stock_qty_to_bill,
+      a.status,
+      a.artwork_at,
+      a.approved_at
+    from
+      artworks a
+    order by
+      a.so_id,
+      (a.line_no::text),
+      (
+        case
+          when NULLIF(btrim(COALESCE(a.artwork_no, ''::text)), ''::text) is not null then 0
+          else 1
+        end
+      ),
+      a.approved_at desc nulls last,
+      a.artwork_at desc nulls last,
+      a.id desc
+  ),
+  processed_flexo_jobs as (
+    select
+      woj.wo_id,
+      woj.so_number,
+      woj.line_no::text as line_no_key,
+      woj.qty,
+      wo.wo_number,
+      wo.wo_date,
+      COALESCE(wo.snapshot_json, '{}'::jsonb) as snapshot_json
+    from
+      work_order_jobs woj
+      join work_orders wo on wo.id = woj.wo_id
+    where
+      upper(
+        COALESCE(
+          wo.snapshot_json #>> '{jobDetails,type}'::text[],
+          ''::text
+        )
+      ) = 'FLEXO'::text
+      or COALESCE(wo.snapshot_json, '{}'::jsonb) ? 'flexoDetails'::text
+  ),
+  processed_agg as (
+    select
+      pfj.so_number,
+      pfj.line_no_key,
+      sum(COALESCE(pfj.qty, 0::numeric)) as processed_qty,
+      string_agg(
+        distinct pfj.wo_number,
+        ', '::text
+        order by
+          pfj.wo_number
+      ) as wo_list,
+      min(pfj.wo_number) as wo_no,
+      max(pfj.wo_date) as wo_date,
+      COALESCE(
+        to_char(
+          max(pfj.wo_date)::timestamp without time zone,
+          'HH24:MI'::text
+        ),
+        ''::text
+      ) as wo_time,
+      COALESCE(max(pfj.wo_date)::text, ''::text) as wo_date_time,
+      max(
+        NULLIF(
+          pfj.snapshot_json #>> '{flexoDetails,cylinderTeeth}'::text[],
+          ''::text
+        )
+      ) as processed_teeth,
+      max(
+        NULLIF(
+          pfj.snapshot_json #>> '{flexoDetails,totalUps}'::text[],
+          ''::text
+        )
+      ) as processed_ups,
+      max(
+        NULLIF(
+          btrim(
+            concat_ws(
+              ' - '::text,
+              NULLIF(
+                pfj.snapshot_json #>> '{flexoDetails,itemCode}'::text[],
+                ''::text
+              ),
+              NULLIF(
+                pfj.snapshot_json #>> '{flexoDetails,itemName}'::text[],
+                ''::text
+              )
+            )
+          ),
+          ''::text
+        )
+      ) as processed_item_details
+    from
+      processed_flexo_jobs pfj
+    group by
+      pfj.so_number,
+      pfj.line_no_key
+  ),
+  base_rows as (
+    select
+      so.id as so_id,
+      so.so_number,
+      so.so_date,
+      COALESCE(
+        to_char(
+          (so.created_at AT TIME ZONE 'Asia/Kolkata'::text),
+          'HH24:MI'::text
+        ),
+        ''::text
+      ) as so_time,
+      btrim(
+        concat_ws(
+          ' '::text,
+          COALESCE(so.so_date::text, ''::text),
+          COALESCE(
+            to_char(
+              (so.created_at AT TIME ZONE 'Asia/Kolkata'::text),
+              'HH24:MI'::text
+            ),
+            ''::text
+          )
+        )
+      ) as so_date_time,
+      so.sales_rep,
+      so.po_number,
+      so.remarks as so_remarks,
+      upper(COALESCE(so.status, 'OPEN'::text)) as header_status,
+      sol.id as so_line_id,
+      sol.line_no,
+      sol.product_code,
+      sol.product_name,
+      sol.category,
+      COALESCE(sol.qty, 0::numeric) as order_qty,
+      COALESCE(sol.unit, ''::text) as unit,
+      COALESCE(sol.job_reference, ''::text) as job_reference,
+      COALESCE(sol.job_reference, ''::text) as job_card_no,
+      COALESCE(sol.division, ''::text) as division,
+      sol.expected_delivery,
+      COALESCE(sol.job_priority, ''::text) as job_priority,
+      COALESCE(sol.product_remarks, ''::text) as product_remarks,
+      COALESCE(sol.prepress_remarks, ''::text) as prepress_remarks,
+      COALESCE(sol.prepress_remarks, ''::text) as prepress_remark,
+      upper(COALESCE(sol.status, 'OPEN'::text)) as line_status,
+      upper(COALESCE(sol.accounts_status, 'PENDING'::text)) as accounts_status,
+      upper(COALESCE(sol.business_status, 'PENDING'::text)) as business_status,
+      COALESCE(c.client_name, so.client_code, ''::text) as client_name,
+      a.artwork_no,
+      a.product_type as artwork_product_type,
+      a.sheet_length,
+      a.sheet_width,
+      a.sheet_ups,
+      a.printing_colors,
+      a.across_ups,
+      a.along_ups,
+      a.total_ups,
+      a.across_width,
+      a.teeth,
+      a.across_gap_mm,
+      a.along_gap_mm,
+      COALESCE(a.stock_qty_to_bill, 0::numeric) as stock_qty_to_bill,
+      upper(COALESCE(a.status, 'NO_ART'::text)) as artwork_status,
+      a.approved_at,
+      COALESCE(pa.processed_qty, 0::numeric) as processed_qty,
+      COALESCE(pa.wo_list, ''::text) as wo_list,
+      COALESCE(pa.wo_no, ''::text) as wo_no,
+      pa.wo_date,
+      COALESCE(pa.wo_time, ''::text) as wo_time,
+      COALESCE(pa.wo_date_time, ''::text) as wo_date_time,
+      COALESCE(pa.processed_teeth, ''::text) as processed_teeth,
+      COALESCE(pa.processed_ups, ''::text) as processed_ups,
+      COALESCE(pa.processed_item_details, ''::text) as processed_item_details
+    from
+      sales_order_lines sol
+      join sales_orders so on so.id = sol.so_id
+      left join clients c on c.client_code = so.client_code
+      left join latest_artwork a on a.so_id = sol.so_id
+      and a.line_no::text = sol.line_no::text
+      left join processed_agg pa on pa.so_number = so.so_number
+      and pa.line_no_key = sol.line_no::text
+    where
+      upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text
+      and upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text
+  ),
+  classified as (
+    select
+      b.so_id,
+      b.so_number,
+      b.so_date,
+      b.so_time,
+      b.so_date_time,
+      b.sales_rep,
+      b.po_number,
+      b.so_remarks,
+      b.header_status,
+      b.so_line_id,
+      b.line_no,
+      b.product_code,
+      b.product_name,
+      b.category,
+      b.order_qty,
+      b.unit,
+      b.job_reference,
+      b.job_card_no,
+      b.division,
+      b.expected_delivery,
+      b.job_priority,
+      b.product_remarks,
+      b.prepress_remarks,
+      b.prepress_remark,
+      b.line_status,
+      b.accounts_status,
+      b.business_status,
+      b.client_name,
+      b.artwork_no,
+      b.artwork_product_type,
+      b.sheet_length,
+      b.sheet_width,
+      b.sheet_ups,
+      b.printing_colors,
+      b.across_ups,
+      b.along_ups,
+      b.total_ups,
+      b.across_width,
+      b.teeth,
+      b.across_gap_mm,
+      b.along_gap_mm,
+      b.stock_qty_to_bill,
+      b.artwork_status,
+      b.approved_at,
+      b.processed_qty,
+      b.wo_list,
+      b.wo_no,
+      b.wo_date,
+      b.wo_time,
+      b.wo_date_time,
+      b.processed_teeth,
+      b.processed_ups,
+      b.processed_item_details,
+      case
+        when upper(COALESCE(b.artwork_product_type, ''::text)) ~~ '%FLEXO%'::text then 'Flexo'::text
+        when upper(COALESCE(b.artwork_product_type, ''::text)) ~~ '%CORR%'::text then 'Corrugation'::text
+        when upper(COALESCE(b.artwork_product_type, ''::text)) ~~ '%OFFSET%'::text then 'Offset'::text
+        when upper(COALESCE(b.artwork_product_type, ''::text)) ~~ '%DIGITAL%'::text then 'Digital'::text
+        else NULLIF(b.artwork_product_type, ''::text)
+      end as normalized_artwork_product_type,
+      case
+        when upper(COALESCE(b.division, ''::text)) ~~ '%FLEXO%'::text then 'Flexo'::text
+        when upper(COALESCE(b.division, ''::text)) ~~ '%CORR%'::text then 'Corrugation'::text
+        when upper(COALESCE(b.division, ''::text)) ~~ '%OFFSET%'::text then 'Offset'::text
+        when upper(COALESCE(b.division, ''::text)) ~~ '%DIGITAL%'::text then 'Digital'::text
+        else NULLIF(b.division, ''::text)
+      end as normalized_division,
+      case
+        when upper(COALESCE(b.category, ''::text)) ~~ '%FLEXO%'::text then 'Flexo'::text
+        when upper(COALESCE(b.category, ''::text)) ~~ '%CORR%'::text then 'Corrugation'::text
+        when upper(COALESCE(b.category, ''::text)) ~~ '%OFFSET%'::text then 'Offset'::text
+        when upper(COALESCE(b.category, ''::text)) ~~ '%DIGITAL%'::text then 'Digital'::text
+        else NULLIF(b.category, ''::text)
+      end as normalized_category
+    from
+      base_rows b
+  ),
+  eligible as (
+    select
+      c.so_id,
+      c.so_number,
+      c.so_date,
+      c.so_time,
+      c.so_date_time,
+      c.sales_rep,
+      c.po_number,
+      c.so_remarks,
+      c.header_status,
+      c.so_line_id,
+      c.line_no,
+      c.product_code,
+      c.product_name,
+      c.category,
+      c.order_qty,
+      c.unit,
+      c.job_reference,
+      c.job_card_no,
+      c.division,
+      c.expected_delivery,
+      c.job_priority,
+      c.product_remarks,
+      c.prepress_remarks,
+      c.prepress_remark,
+      c.line_status,
+      c.accounts_status,
+      c.business_status,
+      c.client_name,
+      c.artwork_no,
+      c.artwork_product_type,
+      c.sheet_length,
+      c.sheet_width,
+      c.sheet_ups,
+      c.printing_colors,
+      c.across_ups,
+      c.along_ups,
+      c.total_ups,
+      c.across_width,
+      c.teeth,
+      c.across_gap_mm,
+      c.along_gap_mm,
+      c.stock_qty_to_bill,
+      c.artwork_status,
+      c.approved_at,
+      c.processed_qty,
+      c.wo_list,
+      c.wo_no,
+      c.wo_date,
+      c.wo_time,
+      c.wo_date_time,
+      c.processed_teeth,
+      c.processed_ups,
+      c.processed_item_details,
+      c.normalized_artwork_product_type,
+      c.normalized_division,
+      c.normalized_category,
+      case
+        when upper(
+          COALESCE(c.normalized_artwork_product_type, ''::text)
+        ) = any (
+          array[
+            'FLEXO'::text,
+            'OFFSET'::text,
+            'DIGITAL'::text,
+            'CORRUGATION'::text
+          ]
+        ) then c.normalized_artwork_product_type
+        else COALESCE(
+          c.normalized_division,
+          c.normalized_category,
+          c.normalized_artwork_product_type,
+          ''::text
+        )
+      end as product_type,
+      case
+        when upper(
+          COALESCE(c.normalized_artwork_product_type, ''::text)
+        ) = any (
+          array[
+            'FLEXO'::text,
+            'OFFSET'::text,
+            'DIGITAL'::text,
+            'CORRUGATION'::text
+          ]
+        ) then 'Artwork Product Type'::text
+        else 'Sales Order Division'::text
+      end as classification_source,
+      case
+        when upper(
+          COALESCE(c.normalized_artwork_product_type, ''::text)
+        ) = any (
+          array[
+            'FLEXO'::text,
+            'OFFSET'::text,
+            'DIGITAL'::text,
+            'CORRUGATION'::text
+          ]
+        ) then upper(c.normalized_artwork_product_type) = 'FLEXO'::text
+        else upper(COALESCE(c.normalized_division, ''::text)) = 'FLEXO'::text
+        or NULLIF(btrim(COALESCE(c.artwork_no, ''::text)), ''::text) is null
+        and upper(COALESCE(c.normalized_category, ''::text)) = 'FLEXO'::text
+      end as is_flexo_wo_candidate,
+      upper(COALESCE(c.line_status, 'OPEN'::text)) <> all (array['CLOSED'::text, 'CANCELLED'::text]) as is_line_active
+    from
+      classified c
+  )
+select
+  so_number,
+  so_date,
+  so_time,
+  so_date_time,
+  sales_rep,
+  line_no,
+  job_card_no,
+  division,
+  classification_source,
+  product_code,
+  client_name,
+  product_name,
+  category,
+  product_type,
+  GREATEST(order_qty - stock_qty_to_bill, 0::numeric) as qty,
+  order_qty,
+  stock_qty_to_bill,
+  case
+    when is_line_active then GREATEST(
+      order_qty - stock_qty_to_bill - processed_qty,
+      0::numeric
+    )
+    else 0::numeric
+  end as remaining_qty,
+  processed_qty,
+  unit,
+  artwork_no,
+  sheet_length,
+  sheet_width,
+  sheet_ups,
+  printing_colors,
+  across_ups,
+  along_ups,
+  total_ups,
+  across_width,
+  across_gap_mm,
+  along_gap_mm,
+  teeth,
+  artwork_status as status,
+  artwork_status,
+  approved_at,
+  accounts_status,
+  business_status,
+  accounts_status = 'APPROVED'::text
+  and business_status = 'APPROVED'::text
+  and artwork_status = 'APPROVED'::text as can_create_wo,
+  case
+    when accounts_status = 'REJECTED'::text
+    or business_status = 'REJECTED'::text
+    or artwork_status = 'REJECTED'::text then 'Rejected at '::text || concat_ws(
+      ' / '::text,
+      case
+        when accounts_status = 'REJECTED'::text then 'Accounts'::text
+        else null::text
+      end,
+      case
+        when business_status = 'REJECTED'::text then 'Business'::text
+        else null::text
+      end,
+      case
+        when artwork_status = 'REJECTED'::text then 'Artwork'::text
+        else null::text
+      end
+    )
+    when accounts_status <> 'APPROVED'::text
+    or business_status <> 'APPROVED'::text
+    or artwork_status <> 'APPROVED'::text then 'Pending at '::text || concat_ws(
+      ' / '::text,
+      case
+        when accounts_status <> 'APPROVED'::text then 'Accounts'::text
+        else null::text
+      end,
+      case
+        when business_status <> 'APPROVED'::text then 'Business'::text
+        else null::text
+      end,
+      case
+        when artwork_status <> 'APPROVED'::text then 'Artwork'::text
+        else null::text
+      end
+    )
+    else 'Approved'::text
+  end as approval_stage,
+  wo_list,
+  wo_no,
+  processed_teeth,
+  processed_ups,
+  processed_item_details,
+  po_number,
+  expected_delivery,
+  job_priority,
+  so_remarks,
+  product_remarks,
+  prepress_remark,
+  prepress_remarks,
+  job_reference,
+  wo_date,
+  wo_time,
+  wo_date_time,
+  line_status,
+  is_line_active
+from
+  eligible e
+where
+  is_flexo_wo_candidate = true
+  and (
+    is_line_active = true
+    or processed_qty > 0::numeric
+  );
+
+
+create view public.v_report_machine_load_lines as
+with
+  machine_standards (
+    machine_key,
+    machine,
+    standard_make_ready_minutes,
+    target_output
+  ) as (
+    values
+      (
+        'SM74'::text,
+        'Heidelberg SM74'::text,
+        30::numeric,
+        4125::numeric
+      ),
+      (
+        'CD102'::text,
+        'CD102'::text,
+        30::numeric,
+        4125::numeric
+      ),
+      (
+        'LAMINATION'::text,
+        'Lamination'::text,
+        10::numeric,
+        2200::numeric
+      ),
+      (
+        'LAM1'::text,
+        'Lamination Roll-1'::text,
+        10::numeric,
+        1100::numeric
+      ),
+      (
+        'LAM2'::text,
+        'Lamination 02'::text,
+        10::numeric,
+        1100::numeric
+      ),
+      (
+        'LAM3'::text,
+        'Lamination 03'::text,
+        10::numeric,
+        1100::numeric
+      ),
+      (
+        'DIEOFFSET'::text,
+        'Die Cutting - Offset'::text,
+        30::numeric,
+        2400::numeric
+      ),
+      (
+        'DICORR'::text,
+        'Die Cutting - Corrugation'::text,
+        30::numeric,
+        1600::numeric
+      ),
+      (
+        'DIE1'::text,
+        'Die Cutting 01'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE2'::text,
+        'Die Cutting 02'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE3'::text,
+        'Die Cutting 03'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE4'::text,
+        'Die Cutting 04'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'DIE5'::text,
+        'Die Cutting 05'::text,
+        30::numeric,
+        880::numeric
+      ),
+      (
+        'FLEXOPRINT'::text,
+        'Markany Flexo E5'::text,
+        30::numeric,
+        55::numeric
+      ),
+      (
+        'FLEXODIE'::text,
+        'Flexo Die Cutting Offline'::text,
+        30::numeric,
+        44::numeric
+      ),
+      (
+        'FLEXOSLIT'::text,
+        'Rhyguan'::text,
+        30::numeric,
+        88::numeric
+      ),
+      (
+        'DIGITAL'::text,
+        'Canon Digital Printing'::text,
+        10::numeric,
+        660::numeric
+      ),
+      (
+        '2PLY'::text,
+        '2 Ply Making Machine'::text,
+        15::numeric,
+        2000::numeric
+      ),
+      (
+        'ROTARY'::text,
+        'Rotary Cutting'::text,
+        0::numeric,
+        650::numeric
+      ),
+      (
+        'MSP1'::text,
+        'Manual Sheet Pasting'::text,
+        0::numeric,
+        750::numeric
+      ),
+      (
+        'MSP2'::text,
+        'Manual Pasting'::text,
+        0::numeric,
+        600::numeric
+      ),
+      (
+        'FMZ'::text,
+        'Flute Laminator'::text,
+        0::numeric,
+        2000::numeric
+      ),
+      (
+        'DCMAN1'::text,
+        'Manual Die Cutting 04'::text,
+        45::numeric,
+        800::numeric
+      ),
+      (
+        'DCMAN2'::text,
+        'Manual Die Cutting 05'::text,
+        45::numeric,
+        800::numeric
+      ),
+      (
+        'DCAUTO'::text,
+        'Automatic Die Cutting'::text,
+        90::numeric,
+        2500::numeric
+      ),
+      (
+        'STMAN1'::text,
+        'Stitching Manual 01'::text,
+        0::numeric,
+        250::numeric
+      ),
+      (
+        'STMAN2'::text,
+        'Stitching Manual 02'::text,
+        0::numeric,
+        250::numeric
+      ),
+      (
+        'STAUTO'::text,
+        'Auto Stitching'::text,
+        0::numeric,
+        200::numeric
+      ),
+      (
+        'FOLDER'::text,
+        'Folder Gluer'::text,
+        45::numeric,
+        15000::numeric
+      ),
+      (
+        'RS4'::text,
+        'RS4 Printing'::text,
+        60::numeric,
+        1500::numeric
+      )
+  ),
+  job_status_base as (
+    select
+      woj.wo_id,
+      woj.so_number,
+      woj.line_no,
+      woj.artwork_no,
+      woj.client_name,
+      woj.product_name,
+      woj.expected_delivery,
+      COALESCE(woj.qty, 0::numeric) as job_qty,
+      case
+        when (
+          upper(COALESCE(so.status, 'OPEN'::text)) <> all (array['CLOSED'::text, 'CANCELLED'::text])
+        )
+        and (
+          upper(COALESCE(sol.status, 'OPEN'::text)) <> all (array['CLOSED'::text, 'CANCELLED'::text])
+        ) then true
+        else false
+      end as is_open_job
+    from
+      work_order_jobs woj
+      left join sales_orders so on so.so_number = woj.so_number
+      left join sales_order_lines sol on sol.so_id = so.id
+      and sol.line_no::text = woj.line_no::text
+  ),
+  job_scope as (
+    select
+      job_status_base.wo_id,
+      count(*) as total_job_count,
+      count(*) filter (
+        where
+          job_status_base.is_open_job
+      ) as open_job_count,
+      COALESCE(sum(job_status_base.job_qty), 0::numeric) as total_job_qty,
+      COALESCE(
+        sum(job_status_base.job_qty) filter (
+          where
+            job_status_base.is_open_job
+        ),
+        0::numeric
+      ) as open_job_qty,
+      string_agg(
+        distinct job_status_base.so_number,
+        ', '::text
+        order by
+          job_status_base.so_number
+      ) filter (
+        where
+          job_status_base.is_open_job
+          and COALESCE(job_status_base.so_number, ''::text) <> ''::text
+      ) as open_so_numbers,
+      string_agg(
+        distinct job_status_base.line_no::text,
+        ', '::text
+        order by
+          (job_status_base.line_no::text)
+      ) filter (
+        where
+          job_status_base.is_open_job
+          and job_status_base.line_no is not null
+      ) as open_line_nos,
+      string_agg(
+        distinct job_status_base.artwork_no,
+        ', '::text
+        order by
+          job_status_base.artwork_no
+      ) filter (
+        where
+          job_status_base.is_open_job
+          and COALESCE(job_status_base.artwork_no, ''::text) <> ''::text
+      ) as open_artwork_nos,
+      max(NULLIF(job_status_base.client_name, ''::text)) filter (
+        where
+          job_status_base.is_open_job
+      ) as open_client_name,
+      string_agg(
+        distinct job_status_base.product_name,
+        ' / '::text
+        order by
+          job_status_base.product_name
+      ) filter (
+        where
+          job_status_base.is_open_job
+          and COALESCE(job_status_base.product_name, ''::text) <> ''::text
+      ) as open_product_names,
+      max(job_status_base.expected_delivery) filter (
+        where
+          job_status_base.is_open_job
+      ) as open_expected_delivery
+    from
+      job_status_base
+    group by
+      job_status_base.wo_id
+  ),
+  queue_base as (
+    select
+      q.routing_id,
+      q.wo_id,
+      q.wo_number,
+      q.wo_date,
+      COALESCE(
+        NULLIF(js.open_so_numbers, ''::text),
+        q.so_numbers
+      ) as so_numbers,
+      COALESCE(NULLIF(js.open_line_nos, ''::text), q.line_nos) as line_nos,
+      COALESCE(
+        NULLIF(js.open_artwork_nos, ''::text),
+        q.artwork_nos
+      ) as artwork_nos,
+      COALESCE(
+        NULLIF(js.open_client_name, ''::text),
+        q.client_name
+      ) as client_name,
+      COALESCE(
+        NULLIF(js.open_product_names, ''::text),
+        q.product_names
+      ) as product_names,
+      q.department_category,
+      q.process_name,
+      q.department,
+      q.planned_machine,
+      q.sequence_no,
+      COALESCE(js.open_expected_delivery, q.expected_delivery) as expected_delivery,
+      q.job_priority,
+      round(
+        COALESCE(q.planned_qty, 0::numeric) * case
+          when COALESCE(js.total_job_qty, 0::numeric) > 0::numeric
+          and COALESCE(js.open_job_qty, 0::numeric) > 0::numeric then js.open_job_qty / NULLIF(js.total_job_qty, 0::numeric)
+          else 1::numeric
+        end,
+        2
+      ) as planned_qty,
+      round(
+        COALESCE(q.produced_qty, 0::numeric) * case
+          when COALESCE(js.total_job_qty, 0::numeric) > 0::numeric
+          and COALESCE(js.open_job_qty, 0::numeric) > 0::numeric then js.open_job_qty / NULLIF(js.total_job_qty, 0::numeric)
+          else 1::numeric
+        end,
+        2
+      ) as produced_qty,
+      round(
+        COALESCE(q.balance_qty, 0::numeric) * case
+          when COALESCE(js.total_job_qty, 0::numeric) > 0::numeric
+          and COALESCE(js.open_job_qty, 0::numeric) > 0::numeric then js.open_job_qty / NULLIF(js.total_job_qty, 0::numeric)
+          else 1::numeric
+        end,
+        2
+      ) as balance_qty,
+      q.status,
+      COALESCE(su.plan_unit, ''::text) as plan_unit,
+      COALESCE(fm.flexo_total_rm, 0::numeric) as flexo_total_rm,
+      COALESCE(fm.flexo_total_job_qty, 0::numeric) as flexo_total_job_qty,
+      COALESCE(
+        NULLIF(q.planned_machine, ''::text),
+        NULLIF(q.process_name, ''::text),
+        NULLIF(q.department, ''::text),
+        'Unassigned'::text
+      ) as raw_machine,
+      upper(
+        COALESCE(
+          NULLIF(q.planned_machine, ''::text),
+          NULLIF(q.process_name, ''::text),
+          NULLIF(q.department, ''::text),
+          'UNASSIGNED'::text
+        )
+      ) as raw_machine_upper,
+      upper(
+        COALESCE(
+          NULLIF(q.process_name, ''::text),
+          NULLIF(q.department, ''::text),
+          ''::text
+        )
+      ) as raw_process_upper,
+      upper(
+        COALESCE(NULLIF(q.department_category, ''::text), ''::text)
+      ) as raw_category_upper
+    from
+      v_production_stage_queue_fast q
+      left join (
+        select
+          v_production_stage_rows_fast.routing_id,
+          string_agg(
+            distinct NULLIF(v_production_stage_rows_fast.plan_unit, ''::text),
+            ', '::text
+            order by
+              (
+                NULLIF(v_production_stage_rows_fast.plan_unit, ''::text)
+              )
+          ) as plan_unit
+        from
+          v_production_stage_rows_fast
+        group by
+          v_production_stage_rows_fast.routing_id
+      ) su on su.routing_id = q.routing_id
+      left join (
+        select
+          wf.wo_id,
+          wf.flexo_total_rm,
+          COALESCE(jt.flexo_total_job_qty, 0::numeric) as flexo_total_job_qty
+        from
+          (
+            select
+              wo.id as wo_id,
+              COALESCE(
+                case
+                  when (
+                    wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}'::text[]
+                  ) ~ '^[0-9]+([.][0-9]+)?$'::text then (
+                    wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}'::text[]
+                  )::numeric
+                  else null::numeric
+                end,
+                case
+                  when (
+                    wo.snapshot_json #>> '{flexoDetails,baseRunningMeter}'::text[]
+                  ) ~ '^[0-9]+([.][0-9]+)?$'::text then (
+                    wo.snapshot_json #>> '{flexoDetails,baseRunningMeter}'::text[]
+                  )::numeric
+                  else null::numeric
+                end,
+                0::numeric
+              ) as flexo_total_rm
+            from
+              work_orders wo
+          ) wf
+          left join (
+            select
+              work_order_jobs.wo_id,
+              COALESCE(sum(work_order_jobs.qty), 0::numeric) as flexo_total_job_qty
+            from
+              work_order_jobs
+            group by
+              work_order_jobs.wo_id
+          ) jt on jt.wo_id = wf.wo_id
+      ) fm on fm.wo_id = q.wo_id
+      left join job_scope js on js.wo_id = q.wo_id
+    where
+      upper(COALESCE(q.status, 'PENDING'::text)) <> 'COMPLETED'::text
+      and COALESCE(q.balance_qty, 0::numeric) > 0::numeric
+      and (
+        js.wo_id is null
+        or COALESCE(js.open_job_count, 0::bigint) > 0
+      )
+  ),
+  queue_normalized as (
+    select
+      qb.routing_id,
+      qb.wo_id,
+      qb.wo_number,
+      qb.wo_date,
+      qb.so_numbers,
+      qb.line_nos,
+      qb.artwork_nos,
+      qb.client_name,
+      qb.product_names,
+      qb.department_category,
+      qb.process_name,
+      qb.department,
+      qb.planned_machine,
+      qb.sequence_no,
+      qb.expected_delivery,
+      qb.job_priority,
+      qb.planned_qty,
+      qb.produced_qty,
+      qb.balance_qty,
+      qb.status,
+      qb.plan_unit,
+      qb.flexo_total_rm,
+      qb.flexo_total_job_qty,
+      qb.raw_machine,
+      qb.raw_machine_upper,
+      qb.raw_process_upper,
+      qb.raw_category_upper,
+      case
+        when qb.raw_machine_upper ~~ '%SM74%'::text
+        or qb.raw_machine_upper ~~ '%SM-74%'::text
+        or qb.raw_machine_upper ~~ '%HEIDELBERG%'::text then 'SM74'::text
+        when qb.raw_machine_upper ~~ '%CD102%'::text
+        or qb.raw_machine_upper ~~ '%CD-102%'::text
+        or qb.raw_machine_upper ~~ '%CD 102%'::text then 'CD102'::text
+        when qb.raw_machine_upper ~~ '%LAMINATION 01%'::text
+        or qb.raw_machine_upper ~~ '%LAMINATION 1%'::text
+        or qb.raw_machine_upper ~~ '%LAMINATION ROLL-1%'::text
+        or qb.raw_machine_upper ~~ '%LAMINATION ROLL 1%'::text
+        or qb.raw_machine_upper ~~ '%LAM-1%'::text
+        or qb.raw_machine_upper = 'LAM1'::text
+        or qb.raw_machine_upper ~~ '%LAMINATION 02%'::text
+        or qb.raw_machine_upper ~~ '%LAMINATION 2%'::text
+        or qb.raw_machine_upper ~~ '%LAM-2%'::text
+        or qb.raw_machine_upper = 'LAM2'::text
+        or qb.raw_machine_upper = 'LAMINATION'::text
+        or qb.raw_process_upper = 'LAMINATION'::text then 'LAMINATION'::text
+        when qb.raw_machine_upper ~~ '%LAMINATION 03%'::text
+        or qb.raw_machine_upper ~~ '%LAMINATION 3%'::text
+        or qb.raw_machine_upper ~~ '%LAM-3%'::text
+        or qb.raw_machine_upper = 'LAM3'::text then 'LAM3'::text
+        when qb.raw_machine_upper ~~ '%RHYGUAN%'::text
+        or qb.raw_process_upper ~~ '%INSPECTION%'::text
+        or qb.raw_process_upper ~~ '%SLITTING%'::text
+        or qb.raw_process_upper ~~ '%SLIT%'::text then 'FLEXOSLIT'::text
+        when qb.raw_process_upper ~~ '%FLEXO%'::text
+        and (
+          qb.raw_process_upper ~~ '%DIE%'::text
+          or qb.raw_process_upper ~~ '%CUT%'::text
+        )
+        or qb.raw_machine_upper ~~ '%FLEXO%'::text
+        and (
+          qb.raw_machine_upper ~~ '%DIE%'::text
+          or qb.raw_machine_upper ~~ '%CUT%'::text
+        ) then 'FLEXODIE'::text
+        when qb.raw_process_upper ~~ '%FLEXO%'::text
+        or qb.raw_machine_upper ~~ '%FLEXO%'::text
+        or qb.raw_machine_upper ~~ '%MARKANY%'::text then 'FLEXOPRINT'::text
+        when qb.raw_machine_upper ~~ '%DIGITAL%'::text
+        or qb.raw_machine_upper ~~ '%CANON%'::text then 'DIGITAL'::text
+        when (
+          qb.raw_machine_upper = 'PRINTING'::text
+          or qb.raw_machine_upper = 'OFFSET PRINTING'::text
+          or qb.raw_process_upper = 'PRINTING'::text
+          or qb.raw_process_upper = 'OFFSET PRINTING'::text
+        )
+        and qb.raw_category_upper ~~ '%CORRUGATION%'::text then 'CD102'::text
+        when qb.raw_machine_upper = 'PRINTING'::text
+        or qb.raw_machine_upper = 'OFFSET PRINTING'::text
+        or qb.raw_process_upper = 'PRINTING'::text
+        or qb.raw_process_upper = 'OFFSET PRINTING'::text then 'SM74'::text
+        when qb.raw_machine_upper = 'AUTOMATIC'::text
+        or qb.raw_machine_upper = 'AUTO'::text then '2PLY'::text
+        when qb.raw_machine_upper ~~ '%2 PLY%'::text
+        or qb.raw_machine_upper ~~ '%TWO PLY%'::text
+        or qb.raw_machine_upper ~~ '%PLY MAKING%'::text then '2PLY'::text
+        when qb.raw_machine_upper ~~ '%ROTARY%'::text
+        or qb.raw_process_upper ~~ '%ROTARY%'::text then 'ROTARY'::text
+        when qb.raw_machine_upper ~~ '%FMZ%'::text
+        or qb.raw_machine_upper ~~ '%FLUTE%'::text then 'FMZ'::text
+        when qb.raw_machine_upper ~~ '%MANUAL SHEET PASTING%'::text then 'MSP1'::text
+        when qb.raw_machine_upper = 'PASTING'::text
+        or qb.raw_machine_upper = 'SIDE PASTING'::text
+        or qb.raw_process_upper = 'PASTING'::text
+        or qb.raw_process_upper = 'SIDE PASTING'::text then 'FOLDER'::text
+        when qb.raw_machine_upper ~~ '%MANUAL PASTING%'::text
+        or qb.raw_machine_upper ~~ '%MANUAL SHEET PASTING 2%'::text
+        or qb.raw_machine_upper ~~ '%MANUAL SHEET PASTING - 2%'::text then 'MSP2'::text
+        when (
+          qb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 05%'::text
+          or qb.raw_machine_upper ~~ '%DIE CUTTING MANUAL 2%'::text
+          or qb.raw_machine_upper ~~ '%DIE CUTTING MANUAL - 2%'::text
+          or qb.raw_machine_upper ~~ '%MANUAL DIE%'::text
+          or qb.raw_machine_upper ~~ '%DIE CUTTING MANUAL%'::text
+          or qb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 04%'::text
+        )
+        and qb.raw_category_upper ~~ '%CORRUGATION%'::text then 'DICORR'::text
+        when qb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 05%'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING MANUAL 2%'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING MANUAL - 2%'::text then 'DCMAN2'::text
+        when qb.raw_machine_upper ~~ '%MANUAL DIE%'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING MANUAL%'::text
+        or qb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 04%'::text then 'DCMAN1'::text
+        when qb.raw_process_upper ~~ '%FLEXO%'::text
+        and qb.raw_machine_upper ~~ '%AUTOMATIC DIE%'::text then 'FLEXODIE'::text
+        when qb.raw_machine_upper ~~ '%AUTOMATIC DIE%'::text
+        or qb.raw_machine_upper ~~ '%AUTO DIE%'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING AUTO%'::text then 'DCAUTO'::text
+        when (
+          qb.raw_machine_upper = 'DIE CUTTING'::text
+          or qb.raw_process_upper = 'DIE CUTTING'::text
+          or qb.raw_machine_upper ~~ '%DIE CUTTING 01%'::text
+          or qb.raw_machine_upper ~~ '%DIE CUTTING-01%'::text
+          or qb.raw_machine_upper ~~ '%DIE-CUTTING-01%'::text
+          or qb.raw_machine_upper ~~ '%DIE-1%'::text
+          or qb.raw_machine_upper ~~ '%DYE-1%'::text
+          or qb.raw_machine_upper ~~ '%DIE CUTTING 02%'::text
+          or qb.raw_machine_upper ~~ '%DIE CUTTING-02%'::text
+          or qb.raw_machine_upper ~~ '%DIE-CUTTING-02%'::text
+          or qb.raw_machine_upper ~~ '%DIE-2%'::text
+          or qb.raw_machine_upper ~~ '%DYE-2%'::text
+          or qb.raw_machine_upper ~~ '%DIE CUTTING 03%'::text
+          or qb.raw_machine_upper ~~ '%DIE CUTTING-03%'::text
+          or qb.raw_machine_upper ~~ '%DIE-CUTTING-03%'::text
+          or qb.raw_machine_upper ~~ '%DIE-3%'::text
+          or qb.raw_machine_upper ~~ '%DYE-3%'::text
+        )
+        and qb.raw_category_upper ~~ '%CORRUGATION%'::text then 'DICORR'::text
+        when qb.raw_machine_upper = 'DIE CUTTING'::text
+        or qb.raw_process_upper = 'DIE CUTTING'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING 01%'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING-01%'::text
+        or qb.raw_machine_upper ~~ '%DIE-CUTTING-01%'::text
+        or qb.raw_machine_upper ~~ '%DIE-1%'::text
+        or qb.raw_machine_upper ~~ '%DYE-1%'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING 02%'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING-02%'::text
+        or qb.raw_machine_upper ~~ '%DIE-CUTTING-02%'::text
+        or qb.raw_machine_upper ~~ '%DIE-2%'::text
+        or qb.raw_machine_upper ~~ '%DYE-2%'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING 03%'::text
+        or qb.raw_machine_upper ~~ '%DIE CUTTING-03%'::text
+        or qb.raw_machine_upper ~~ '%DIE-CUTTING-03%'::text
+        or qb.raw_machine_upper ~~ '%DIE-3%'::text
+        or qb.raw_machine_upper ~~ '%DYE-3%'::text then 'DIEOFFSET'::text
+        when qb.raw_machine_upper ~~ '%DIE CUTTING 04%'::text
+        or qb.raw_machine_upper ~~ '%DIE-4%'::text
+        or qb.raw_machine_upper ~~ '%DYE-4%'::text then 'DIE4'::text
+        when qb.raw_machine_upper ~~ '%DIE CUTTING 05%'::text
+        or qb.raw_machine_upper ~~ '%DIE-5%'::text
+        or qb.raw_machine_upper ~~ '%DYE-5%'::text then 'DIE5'::text
+        when qb.raw_machine_upper ~~ '%STITCHING MANUAL 02%'::text
+        or qb.raw_machine_upper ~~ '%STITCHING MANUAL - 2%'::text then 'STMAN2'::text
+        when qb.raw_machine_upper ~~ '%STITCHING MANUAL%'::text
+        or qb.raw_machine_upper ~~ '%STITCHING MANUAL 01%'::text
+        or qb.raw_machine_upper ~~ '%STITCHING MANUAL - 1%'::text then 'STMAN1'::text
+        when qb.raw_machine_upper ~~ '%AUTO STITCH%'::text
+        or qb.raw_machine_upper ~~ '%STITCHING AUTO%'::text then 'STAUTO'::text
+        when qb.raw_machine_upper ~~ '%FOLDER GLUER%'::text then 'FOLDER'::text
+        when qb.raw_machine_upper ~~ '%RS4%'::text then 'RS4'::text
+        else regexp_replace(
+          qb.raw_machine_upper,
+          '[^A-Z0-9]+'::text,
+          ''::text,
+          'g'::text
+        )
+      end as machine_key
+    from
+      queue_base qb
+  ),
+  load_base as (
+    select
+      qn.routing_id,
+      qn.wo_id,
+      qn.wo_number,
+      qn.wo_date,
+      qn.so_numbers,
+      qn.line_nos,
+      qn.artwork_nos,
+      qn.client_name,
+      qn.product_names,
+      qn.department_category,
+      qn.process_name,
+      qn.department,
+      qn.planned_machine,
+      qn.sequence_no,
+      qn.expected_delivery,
+      qn.job_priority,
+      qn.planned_qty,
+      qn.produced_qty,
+      qn.balance_qty,
+      qn.status,
+      qn.plan_unit,
+      qn.flexo_total_rm,
+      qn.flexo_total_job_qty,
+      qn.raw_machine,
+      qn.raw_machine_upper,
+      qn.raw_process_upper,
+      qn.raw_category_upper,
+      qn.machine_key,
+      COALESCE(
+        ms.machine,
+        NULLIF(qn.planned_machine, ''::text),
+        qn.raw_machine
+      ) as normalized_machine,
+      COALESCE(ms.standard_make_ready_minutes, 0::numeric) as standard_make_ready_minutes,
+      COALESCE(ms.target_output, 0::numeric) as target_output,
+      case
+        when qn.machine_key = any (
+          array[
+            'FLEXOPRINT'::text,
+            'FLEXODIE'::text,
+            'FLEXOSLIT'::text
+          ]
+        ) then 'meter/min'::text
+        else 'qty/hour'::text
+      end as target_unit,
+      case
+        when qn.machine_key = any (
+          array[
+            'FLEXOPRINT'::text,
+            'FLEXODIE'::text,
+            'FLEXOSLIT'::text
+          ]
+        ) then COALESCE(ms.target_output, 0::numeric) * 60::numeric
+        else COALESCE(ms.target_output, 0::numeric)
+      end as target_hourly_capacity,
+      case
+        when COALESCE(qn.balance_qty, 0::numeric) > 0::numeric then COALESCE(qn.balance_qty, 0::numeric)
+        else COALESCE(qn.planned_qty, 0::numeric)
+      end as base_load_qty
+    from
+      queue_normalized qn
+      left join machine_standards ms on ms.machine_key = qn.machine_key
+  ),
+  load_unit_calc as (
+    select
+      lb.routing_id,
+      lb.wo_id,
+      lb.wo_number,
+      lb.wo_date,
+      lb.so_numbers,
+      lb.line_nos,
+      lb.artwork_nos,
+      lb.client_name,
+      lb.product_names,
+      lb.department_category,
+      lb.process_name,
+      lb.department,
+      lb.planned_machine,
+      lb.sequence_no,
+      lb.expected_delivery,
+      lb.job_priority,
+      lb.planned_qty,
+      lb.produced_qty,
+      lb.balance_qty,
+      lb.status,
+      lb.plan_unit,
+      lb.flexo_total_rm,
+      lb.flexo_total_job_qty,
+      lb.raw_machine,
+      lb.raw_machine_upper,
+      lb.raw_process_upper,
+      lb.raw_category_upper,
+      lb.machine_key,
+      lb.normalized_machine,
+      lb.standard_make_ready_minutes,
+      lb.target_output,
+      lb.target_unit,
+      lb.target_hourly_capacity,
+      lb.base_load_qty,
+      case
+        when lb.machine_key = any (
+          array[
+            'FLEXOPRINT'::text,
+            'FLEXODIE'::text,
+            'FLEXOSLIT'::text
+          ]
+        ) then 'meter'::text
+        when upper(COALESCE(lb.plan_unit, ''::text)) <> ''::text then lower(lb.plan_unit)
+        else 'qty'::text
+      end as load_qty_unit,
+      case
+        when (
+          lb.machine_key = any (
+            array[
+              'FLEXOPRINT'::text,
+              'FLEXODIE'::text,
+              'FLEXOSLIT'::text
+            ]
+          )
+        )
+        and COALESCE(lb.flexo_total_rm, 0::numeric) > 0::numeric
+        and COALESCE(lb.flexo_total_job_qty, 0::numeric) > 0::numeric
+        and (
+          upper(COALESCE(lb.plan_unit, ''::text)) ~~ '%PCS%'::text
+          or upper(COALESCE(lb.plan_unit, ''::text)) ~~ '%UNIT%'::text
+          or upper(COALESCE(lb.plan_unit, ''::text)) ~~ '%SHEET%'::text
+          or COALESCE(lb.base_load_qty, 0::numeric) > COALESCE(lb.flexo_total_rm, 0::numeric)
+          or lb.machine_key = 'FLEXODIE'::text
+        ) then round(
+          COALESCE(lb.base_load_qty, 0::numeric) * lb.flexo_total_rm / NULLIF(lb.flexo_total_job_qty, 0::numeric),
+          2
+        )
+        else COALESCE(lb.base_load_qty, 0::numeric)
+      end as load_qty
+    from
+      load_base lb
+  ),
+  load_calc as (
+    select
+      luc.routing_id,
+      luc.wo_id,
+      luc.wo_number,
+      luc.wo_date,
+      luc.so_numbers,
+      luc.line_nos,
+      luc.artwork_nos,
+      luc.client_name,
+      luc.product_names,
+      luc.department_category,
+      luc.process_name,
+      luc.department,
+      luc.planned_machine,
+      luc.sequence_no,
+      luc.expected_delivery,
+      luc.job_priority,
+      luc.planned_qty,
+      luc.produced_qty,
+      luc.balance_qty,
+      luc.status,
+      luc.plan_unit,
+      luc.flexo_total_rm,
+      luc.flexo_total_job_qty,
+      luc.raw_machine,
+      luc.raw_machine_upper,
+      luc.raw_process_upper,
+      luc.raw_category_upper,
+      luc.machine_key,
+      luc.normalized_machine,
+      luc.standard_make_ready_minutes,
+      luc.target_output,
+      luc.target_unit,
+      luc.target_hourly_capacity,
+      luc.base_load_qty,
+      luc.load_qty_unit,
+      luc.load_qty,
+      round(
+        COALESCE(luc.standard_make_ready_minutes, 0::numeric) / 60.0,
+        2
+      ) as make_ready_hours,
+      round(
+        COALESCE(luc.load_qty, 0::numeric) / NULLIF(luc.target_hourly_capacity, 0::numeric),
+        2
+      ) as running_load_hours
+    from
+      load_unit_calc luc
+  )
+select
+  routing_id,
+  wo_id,
+  wo_number,
+  wo_date,
+  so_numbers,
+  line_nos,
+  artwork_nos,
+  client_name,
+  product_names,
+  department_category,
+  process_name,
+  department,
+  planned_machine,
+  machine_key,
+  normalized_machine as machine,
+  expected_delivery,
+  planned_qty,
+  produced_qty,
+  balance_qty,
+  plan_unit,
+  base_load_qty,
+  load_qty,
+  load_qty_unit,
+  flexo_total_rm,
+  flexo_total_job_qty,
+  status,
+  standard_make_ready_minutes,
+  target_output,
+  target_unit,
+  round(target_hourly_capacity, 2) as target_hourly_capacity,
+  make_ready_hours,
+  COALESCE(running_load_hours, 0::numeric) as running_load_hours,
+  round(
+    COALESCE(running_load_hours, 0::numeric) + COALESCE(make_ready_hours, 0::numeric),
+    2
+  ) as total_load_hours,
+  round(
+    (
+      COALESCE(running_load_hours, 0::numeric) + COALESCE(make_ready_hours, 0::numeric)
+    ) / 8.0,
+    2
+  ) as load_days,
+  case
+    when COALESCE(target_hourly_capacity, 0::numeric) <= 0::numeric then 'NO_TARGET'::text
+    else 'OPEN_LOAD'::text
+  end as load_status
+from
+  load_calc;
+
+
+create view public.v_report_machine_load_machine_cleanup as
+select
+  v_report_machine_load_missing_targets.routing_id,
+  v_report_machine_load_missing_targets.wo_id,
+  v_report_machine_load_missing_targets.wo_number,
+  v_report_machine_load_missing_targets.wo_date,
+  v_report_machine_load_missing_targets.so_numbers,
+  v_report_machine_load_missing_targets.line_nos,
+  v_report_machine_load_missing_targets.artwork_nos,
+  v_report_machine_load_missing_targets.client_name,
+  v_report_machine_load_missing_targets.product_names,
+  v_report_machine_load_missing_targets.department_category,
+  v_report_machine_load_missing_targets.department,
+  v_report_machine_load_missing_targets.process_name,
+  v_report_machine_load_missing_targets.current_planned_machine,
+  v_report_machine_load_missing_targets.normalized_machine_key,
+  v_report_machine_load_missing_targets.report_machine_label,
+  v_report_machine_load_missing_targets.planned_qty,
+  v_report_machine_load_missing_targets.produced_qty,
+  v_report_machine_load_missing_targets.balance_qty,
+  v_report_machine_load_missing_targets.load_qty,
+  v_report_machine_load_missing_targets.status,
+  v_report_machine_load_missing_targets.expected_delivery,
+  case
+    when upper(
+      COALESCE(
+        v_report_machine_load_missing_targets.current_planned_machine,
+        v_report_machine_load_missing_targets.report_machine_label,
+        ''::text
+      )
+    ) = any (array['AUTOMATIC'::text, 'AUTO'::text]) then '2 Ply Making Machine'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_missing_targets.current_planned_machine,
+        v_report_machine_load_missing_targets.report_machine_label,
+        ''::text
+      )
+    ) = any (array['PASTING'::text, 'SIDE PASTING'::text]) then 'Folder Gluer'::text
+    when (
+      upper(
+        COALESCE(
+          v_report_machine_load_missing_targets.current_planned_machine,
+          v_report_machine_load_missing_targets.process_name,
+          v_report_machine_load_missing_targets.department,
+          ''::text
+        )
+      ) = any (array['PRINTING'::text, 'OFFSET PRINTING'::text])
+    )
+    and upper(
+      COALESCE(
+        v_report_machine_load_missing_targets.department_category,
+        ''::text
+      )
+    ) ~~ '%CORRUGATION%'::text then 'CD102'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_missing_targets.current_planned_machine,
+        v_report_machine_load_missing_targets.process_name,
+        v_report_machine_load_missing_targets.department,
+        ''::text
+      )
+    ) = any (array['PRINTING'::text, 'OFFSET PRINTING'::text]) then 'Heidelberg SM74'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_missing_targets.current_planned_machine,
+        v_report_machine_load_missing_targets.process_name,
+        v_report_machine_load_missing_targets.department,
+        ''::text
+      )
+    ) ~~ '%ROTARY%'::text then 'Rotary Cutting'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_missing_targets.current_planned_machine,
+        v_report_machine_load_missing_targets.process_name,
+        v_report_machine_load_missing_targets.department,
+        ''::text
+      )
+    ) = 'LAMINATION'::text then 'Review: report bucket is Lamination; keep/select actual lamination machine if scheduling requires it'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_missing_targets.current_planned_machine,
+        v_report_machine_load_missing_targets.process_name,
+        v_report_machine_load_missing_targets.department,
+        ''::text
+      )
+    ) = 'DIE CUTTING'::text then 'Review: report separates Die Cutting by article department; keep generic only if this is intentional'::text
+    when v_report_machine_load_missing_targets.load_status = 'NO_TARGET'::text then 'Review and select a valid planned_machine with target'::text
+    else ''::text
+  end as suggested_planned_machine_update,
+  'work_order_routing'::text as update_table,
+  'planned_machine'::text as update_column,
+  'Update work_order_routing.planned_machine where id = routing_id after review'::text as update_instruction
+from
+  v_report_machine_load_missing_targets
+union
+select
+  v_report_machine_load_lines.routing_id,
+  v_report_machine_load_lines.wo_id,
+  v_report_machine_load_lines.wo_number,
+  v_report_machine_load_lines.wo_date,
+  v_report_machine_load_lines.so_numbers,
+  v_report_machine_load_lines.line_nos,
+  v_report_machine_load_lines.artwork_nos,
+  v_report_machine_load_lines.client_name,
+  v_report_machine_load_lines.product_names,
+  v_report_machine_load_lines.department_category,
+  v_report_machine_load_lines.department,
+  v_report_machine_load_lines.process_name,
+  v_report_machine_load_lines.planned_machine as current_planned_machine,
+  v_report_machine_load_lines.machine_key as normalized_machine_key,
+  v_report_machine_load_lines.machine as report_machine_label,
+  v_report_machine_load_lines.planned_qty,
+  v_report_machine_load_lines.produced_qty,
+  v_report_machine_load_lines.balance_qty,
+  v_report_machine_load_lines.load_qty,
+  v_report_machine_load_lines.status,
+  v_report_machine_load_lines.expected_delivery,
+  case
+    when upper(
+      COALESCE(
+        v_report_machine_load_lines.planned_machine,
+        v_report_machine_load_lines.process_name,
+        v_report_machine_load_lines.department,
+        ''::text
+      )
+    ) = any (array['AUTOMATIC'::text, 'AUTO'::text]) then '2 Ply Making Machine'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_lines.planned_machine,
+        v_report_machine_load_lines.process_name,
+        v_report_machine_load_lines.department,
+        ''::text
+      )
+    ) = any (array['PASTING'::text, 'SIDE PASTING'::text]) then 'Folder Gluer'::text
+    when (
+      upper(
+        COALESCE(
+          v_report_machine_load_lines.planned_machine,
+          v_report_machine_load_lines.process_name,
+          v_report_machine_load_lines.department,
+          ''::text
+        )
+      ) = any (array['PRINTING'::text, 'OFFSET PRINTING'::text])
+    )
+    and upper(
+      COALESCE(
+        v_report_machine_load_lines.department_category,
+        ''::text
+      )
+    ) ~~ '%CORRUGATION%'::text then 'CD102'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_lines.planned_machine,
+        v_report_machine_load_lines.process_name,
+        v_report_machine_load_lines.department,
+        ''::text
+      )
+    ) = any (array['PRINTING'::text, 'OFFSET PRINTING'::text]) then 'Heidelberg SM74'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_lines.planned_machine,
+        v_report_machine_load_lines.process_name,
+        v_report_machine_load_lines.department,
+        ''::text
+      )
+    ) ~~ '%ROTARY%'::text then 'Rotary Cutting'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_lines.planned_machine,
+        v_report_machine_load_lines.process_name,
+        v_report_machine_load_lines.department,
+        ''::text
+      )
+    ) = 'LAMINATION'::text then 'Review: report bucket is Lamination; keep/select actual lamination machine if scheduling requires it'::text
+    when upper(
+      COALESCE(
+        v_report_machine_load_lines.planned_machine,
+        v_report_machine_load_lines.process_name,
+        v_report_machine_load_lines.department,
+        ''::text
+      )
+    ) = 'DIE CUTTING'::text then 'Review: report separates Die Cutting by article department; keep generic only if this is intentional'::text
+    else ''::text
+  end as suggested_planned_machine_update,
+  'work_order_routing'::text as update_table,
+  'planned_machine'::text as update_column,
+  'Update work_order_routing.planned_machine where id = routing_id after review'::text as update_instruction
+from
+  v_report_machine_load_lines
+where
+  (
+    upper(
+      COALESCE(
+        v_report_machine_load_lines.planned_machine,
+        v_report_machine_load_lines.process_name,
+        v_report_machine_load_lines.department,
+        ''::text
+      )
+    ) = any (
+      array[
+        'AUTOMATIC'::text,
+        'AUTO'::text,
+        'PASTING'::text,
+        'SIDE PASTING'::text,
+        'PRINTING'::text,
+        'OFFSET PRINTING'::text,
+        'LAMINATION'::text,
+        'DIE CUTTING'::text
+      ]
+    )
+  )
+  or upper(
+    COALESCE(
+      v_report_machine_load_lines.planned_machine,
+      v_report_machine_load_lines.process_name,
+      v_report_machine_load_lines.department,
+      ''::text
+    )
+  ) ~~ '%ROTARY%'::text;
+
+
+create view public.v_report_machine_load_missing_targets as
+select
+  routing_id,
+  wo_id,
+  wo_number,
+  wo_date,
+  so_numbers,
+  line_nos,
+  artwork_nos,
+  client_name,
+  product_names,
+  department_category,
+  department,
+  process_name,
+  planned_machine as current_planned_machine,
+  machine_key as normalized_machine_key,
+  machine as report_machine_label,
+  planned_qty,
+  produced_qty,
+  balance_qty,
+  load_qty,
+  status,
+  load_status,
+  expected_delivery,
+  case
+    when upper(
+      COALESCE(
+        planned_machine,
+        process_name,
+        department,
+        ''::text
+      )
+    ) ~~ '%PRINT%'::text
+    or upper(
+      COALESCE(
+        department,
+        process_name,
+        planned_machine,
+        ''::text
+      )
+    ) ~~ '%PRINT%'::text then 'Heidelberg SM74 | CD102 | RS4 Printing | Canon Digital Printing | Markany Flexo E5'::text
+    when upper(
+      COALESCE(
+        planned_machine,
+        process_name,
+        department,
+        ''::text
+      )
+    ) ~~ '%LAMINATION%'::text
+    or upper(
+      COALESCE(
+        department,
+        process_name,
+        planned_machine,
+        ''::text
+      )
+    ) ~~ '%LAMINATION%'::text then 'Lamination Roll-1 | Lamination 02 | Lamination 03'::text
+    when upper(
+      COALESCE(
+        planned_machine,
+        process_name,
+        department,
+        ''::text
+      )
+    ) ~~ '%DIE%'::text
+    or upper(
+      COALESCE(
+        department,
+        process_name,
+        planned_machine,
+        ''::text
+      )
+    ) ~~ '%DIE%'::text
+    or upper(
+      COALESCE(
+        planned_machine,
+        process_name,
+        department,
+        ''::text
+      )
+    ) ~~ '%AUTOMATIC%'::text then 'Die Cutting 01 | Die Cutting 02 | Die Cutting 03 | Automatic Die Cutting | Manual Die Cutting 04 | Manual Die Cutting 05'::text
+    when upper(
+      COALESCE(
+        planned_machine,
+        process_name,
+        department,
+        ''::text
+      )
+    ) ~~ '%PAST%'::text
+    or upper(
+      COALESCE(
+        department,
+        process_name,
+        planned_machine,
+        ''::text
+      )
+    ) ~~ '%PAST%'::text then 'Manual Sheet Pasting | Manual Pasting | Flute Laminator | Folder Gluer'::text
+    when upper(
+      COALESCE(
+        planned_machine,
+        process_name,
+        department,
+        ''::text
+      )
+    ) ~~ '%STITCH%'::text
+    or upper(
+      COALESCE(
+        department,
+        process_name,
+        planned_machine,
+        ''::text
+      )
+    ) ~~ '%STITCH%'::text then 'Stitching Manual 01 | Stitching Manual 02 | Auto Stitching'::text
+    else 'Review routing department/process and assign a machine that has a Machine Load target'::text
+  end as suggested_target_machines,
+  'work_order_routing'::text as update_table,
+  'planned_machine'::text as update_column,
+  'Update work_order_routing.planned_machine where id = routing_id'::text as update_instruction
+from
+  v_report_machine_load_lines
+where
+  load_status = 'NO_TARGET'::text;
+
+
+create view public.v_report_planning_material_status as
+with
+  job_qty as (
+    select
+      woj.wo_id,
+      woj.so_number,
+      woj.line_no,
+      sum(COALESCE(woj.qty, 0::numeric)) as line_qty
+    from
+      work_order_jobs woj
+    group by
+      woj.wo_id,
+      woj.so_number,
+      woj.line_no
+  ),
+  job_share as (
+    select
+      jq.wo_id,
+      jq.so_number,
+      jq.line_no,
+      jq.line_qty,
+      case
+        when sum(jq.line_qty) over (
+          partition by
+            jq.wo_id
+        ) > 0::numeric then jq.line_qty / NULLIF(
+          sum(jq.line_qty) over (
+            partition by
+              jq.wo_id
+          ),
+          0::numeric
+        )
+        else 1.0 / NULLIF(
+          count(*) over (
+            partition by
+              jq.wo_id
+          ),
+          0
+        )::numeric
+      end as share_ratio
+    from
+      job_qty jq
+  ),
+  material_rows as (
+    select
+      wom.wo_id,
+      wom.material_key,
+      COALESCE(
+        NULLIF(max(wom.item_name), ''::text),
+        NULLIF(
+          split_part(wom.material_key, '|'::text, 1),
+          ''::text
+        ),
+        ''::text
+      ) as item_name,
+      max(wom.uom) as uom,
+      sum(COALESCE(wom.required_qty, 0::numeric)) as required_qty
+    from
+      work_order_materials wom
+    group by
+      wom.wo_id,
+      wom.material_key
+  ),
+  issued_rows as (
+    select
+      wo.id as wo_id,
+      il.remarks as material_key,
+      sum(COALESCE(il.qty_out, 0::numeric)) as issued_qty
+    from
+      inv_ledger il
+      join work_orders wo on wo.wo_number = il.ref_no
+    where
+      upper(COALESCE(il.ref_type, ''::text)) = 'ISSUE'::text
+      and COALESCE(il.qty_out, 0::numeric) > 0::numeric
+      and COALESCE(il.remarks, ''::text) <> ''::text
+      and not (
+        exists (
+          select
+            1
+          from
+            inv_ledger rev
+          where
+            rev.ref_no = il.id::text
+            and upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text
+        )
+      )
+    group by
+      wo.id,
+      il.remarks
+  ),
+  line_materials as (
+    select
+      js.so_number,
+      js.line_no,
+      mr.material_key,
+      mr.item_name,
+      mr.uom,
+      round(
+        COALESCE(mr.required_qty, 0::numeric) * COALESCE(js.share_ratio, 1::numeric),
+        3
+      ) as required_qty,
+      round(
+        COALESCE(ir.issued_qty, 0::numeric) * COALESCE(js.share_ratio, 1::numeric),
+        3
+      ) as issued_qty,
+      round(
+        GREATEST(
+          COALESCE(mr.required_qty, 0::numeric) - COALESCE(ir.issued_qty, 0::numeric),
+          0::numeric
+        ) * COALESCE(js.share_ratio, 1::numeric),
+        3
+      ) as pending_qty
+    from
+      job_share js
+      join material_rows mr on mr.wo_id = js.wo_id
+      left join issued_rows ir on ir.wo_id = mr.wo_id
+      and ir.material_key = mr.material_key
+  ),
+  stock_by_item as (
+    select
+      upper(COALESCE(inv_stock_mv.item_name, ''::text)) as item_key,
+      sum(COALESCE(inv_stock_mv.qty, 0::numeric)) as stock_qty
+    from
+      inv_stock_mv
+    group by
+      (upper(COALESCE(inv_stock_mv.item_name, ''::text)))
+  ),
+  receipt_by_line as (
+    select
+      purchase_po_receipts.po_line_id,
+      sum(COALESCE(purchase_po_receipts.qty, 0::numeric)) as received_qty,
+      max(purchase_po_receipts.receipt_date) as last_receipt_date,
+      string_agg(
+        distinct purchase_po_receipts.challan_no,
+        ', '::text
+        order by
+          purchase_po_receipts.challan_no
+      ) filter (
+        where
+          COALESCE(purchase_po_receipts.challan_no, ''::text) <> ''::text
+      ) as receipt_refs
+    from
+      purchase_po_receipts
+    group by
+      purchase_po_receipts.po_line_id
+  ),
+  open_po_by_item as (
+    select
+      upper(COALESCE(pol.item_name, ''::text)) as item_key,
+      sum(COALESCE(pol.qty, 0::numeric)) as ordered_qty,
+      sum(COALESCE(r.received_qty, 0::numeric)) as received_qty,
+      sum(
+        GREATEST(
+          COALESCE(pol.qty, 0::numeric) - COALESCE(r.received_qty, 0::numeric),
+          0::numeric
+        )
+      ) as pending_receipt_qty,
+      min(po.order_date) filter (
+        where
+          GREATEST(
+            COALESCE(pol.qty, 0::numeric) - COALESCE(r.received_qty, 0::numeric),
+            0::numeric
+          ) > 0::numeric
+      ) as first_open_po_date,
+      string_agg(
+        distinct pol.po_no,
+        ', '::text
+        order by
+          pol.po_no
+      ) filter (
+        where
+          GREATEST(
+            COALESCE(pol.qty, 0::numeric) - COALESCE(r.received_qty, 0::numeric),
+            0::numeric
+          ) > 0::numeric
+          and COALESCE(pol.po_no, ''::text) <> ''::text
+      ) as po_nos,
+      max(r.last_receipt_date) as latest_receipt_date,
+      string_agg(
+        distinct r.receipt_refs,
+        ', '::text
+        order by
+          r.receipt_refs
+      ) filter (
+        where
+          COALESCE(r.receipt_refs, ''::text) <> ''::text
+      ) as receipt_refs
+    from
+      purchase_order_lines pol
+      left join purchase_orders po on po.po_no = pol.po_no
+      left join receipt_by_line r on r.po_line_id = pol.id
+    where
+      upper(COALESCE(pol.source_type, ''::text)) <> all (
+        array[
+          'ARTWORK_PLATE'::text,
+          'ARTWORK_DIE'::text,
+          'DIRECT_PLATE'::text,
+          'DIRECT_DIE'::text
+        ]
+      )
+    group by
+      (upper(COALESCE(pol.item_name, ''::text)))
+  ),
+  open_pr_by_item as (
+    select
+      upper(
+        COALESCE(inv_purchase_requests.item_name, ''::text)
+      ) as item_key,
+      sum(
+        GREATEST(
+          COALESCE(inv_purchase_requests.requested_qty, 0::numeric) - COALESCE(inv_purchase_requests.received_qty, 0::numeric),
+          0::numeric
+        )
+      ) as pending_pr_qty,
+      string_agg(
+        distinct inv_purchase_requests.pr_no,
+        ', '::text
+        order by
+          inv_purchase_requests.pr_no
+      ) filter (
+        where
+          COALESCE(inv_purchase_requests.pr_no, ''::text) <> ''::text
+      ) as pr_nos
+    from
+      inv_purchase_requests
+    where
+      upper(
+        COALESCE(inv_purchase_requests.status, 'OPEN'::text)
+      ) <> 'CLOSED'::text
+    group by
+      (
+        upper(
+          COALESCE(inv_purchase_requests.item_name, ''::text)
+        )
+      )
+  ),
+  line_material_enriched as (
+    select
+      lm.so_number,
+      lm.line_no,
+      lm.material_key,
+      lm.item_name,
+      lm.uom,
+      lm.required_qty,
+      lm.issued_qty,
+      lm.pending_qty,
+      COALESCE(st.stock_qty, 0::numeric) as stock_qty,
+      COALESCE(po.ordered_qty, 0::numeric) as ordered_qty,
+      COALESCE(po.received_qty, 0::numeric) as received_qty,
+      COALESCE(po.pending_receipt_qty, 0::numeric) as pending_receipt_qty,
+      po.first_open_po_date,
+      COALESCE(po.po_nos, ''::text) as po_nos,
+      po.latest_receipt_date,
+      COALESCE(po.receipt_refs, ''::text) as receipt_refs,
+      COALESCE(pr.pending_pr_qty, 0::numeric) as pending_pr_qty,
+      COALESCE(pr.pr_nos, ''::text) as pr_nos,
+      case
+        when COALESCE(lm.pending_qty, 0::numeric) <= 0::numeric then 'ISSUED'::text
+        when COALESCE(st.stock_qty, 0::numeric) >= COALESCE(lm.pending_qty, 0::numeric) then 'IN_STOCK'::text
+        when COALESCE(po.pending_receipt_qty, 0::numeric) > 0::numeric then 'ORDERED_PENDING_RECEIPT'::text
+        when COALESCE(pr.pending_pr_qty, 0::numeric) > 0::numeric then 'PR_PENDING_PO'::text
+        else 'SHORTAGE'::text
+      end as material_line_status
+    from
+      line_materials lm
+      left join stock_by_item st on st.item_key = upper(COALESCE(lm.item_name, ''::text))
+      left join open_po_by_item po on po.item_key = upper(COALESCE(lm.item_name, ''::text))
+      left join open_pr_by_item pr on pr.item_key = upper(COALESCE(lm.item_name, ''::text))
+  )
+select
+  so_number,
+  line_no,
+  case
+    when sum(pending_qty) <= 0::numeric then 'ISSUED'::text
+    when bool_and(
+      material_line_status = any (array['ISSUED'::text, 'IN_STOCK'::text])
+    ) then 'IN_STOCK'::text
+    when bool_or(
+      material_line_status = 'ORDERED_PENDING_RECEIPT'::text
+    ) then 'ORDERED_PENDING_RECEIPT'::text
+    when bool_or(material_line_status = 'PR_PENDING_PO'::text) then 'PR_PENDING_PO'::text
+    else 'SHORTAGE'::text
+  end as rm_availability_status,
+  round(sum(required_qty), 3) as rm_required_qty,
+  round(sum(issued_qty), 3) as rm_issued_qty,
+  round(sum(pending_qty), 3) as rm_pending_qty,
+  round(sum(stock_qty), 3) as rm_in_stock_qty,
+  round(
+    sum(
+      GREATEST(
+        pending_qty - stock_qty - pending_receipt_qty,
+        0::numeric
+      )
+    ),
+    3
+  ) as rm_shortage_qty,
+  round(sum(pending_receipt_qty), 3) as rm_pending_receipt_qty,
+  string_agg(
+    distinct po_nos,
+    ', '::text
+    order by
+      po_nos
+  ) filter (
+    where
+      COALESCE(po_nos, ''::text) <> ''::text
+  ) as rm_po_nos,
+  min(first_open_po_date) as rm_first_po_date,
+  max(latest_receipt_date) as rm_latest_grn_date,
+  string_agg(
+    distinct receipt_refs,
+    ', '::text
+    order by
+      receipt_refs
+  ) filter (
+    where
+      COALESCE(receipt_refs, ''::text) <> ''::text
+  ) as rm_receipt_refs,
+  string_agg(
+    distinct pr_nos,
+    ', '::text
+    order by
+      pr_nos
+  ) filter (
+    where
+      COALESCE(pr_nos, ''::text) <> ''::text
+  ) as rm_pr_nos,
+  string_agg(
+    (
+      (
+        (
+          (
+            (
+              (
+                (
+                  (
+                    (item_name || ': Req '::text) || TRIM(
+                      both
+                      from
+                        to_char(required_qty, 'FM999999990.###'::text)
+                    )
+                  ) || ', Pending '::text
+                ) || TRIM(
+                  both
+                  from
+                    to_char(pending_qty, 'FM999999990.###'::text)
+                )
+              ) || ', Stock '::text
+            ) || TRIM(
+              both
+              from
+                to_char(stock_qty, 'FM999999990.###'::text)
+            )
+          ) || case
+            when COALESCE(po_nos, ''::text) <> ''::text then ', PO '::text || po_nos
+            else ''::text
+          end
+        ) || ' ['::text
+      ) || material_line_status
+    ) || ']'::text,
+    ' | '::text
+    order by
+      item_name,
+      material_key
+  ) as rm_detail
+from
+  line_material_enriched
+group by
+  so_number,
+  line_no;
+
+
+create view public.v_report_planning_tooling_status as
+with
+  artwork_ranked as (
+    select
+      so.so_number,
+      a.so_id,
+      a.line_no,
+      COALESCE(
+        NULLIF(a.artwork_no, ''::text),
+        (a.so_id::text || '||'::text) || a.line_no::text
+      ) as artwork_key,
+      a.artwork_no,
+      a.plate_status,
+      a.die_status,
+      row_number() over (
+        partition by
+          a.so_id,
+          a.line_no
+        order by
+          a.approved_at desc nulls last,
+          a.artwork_at desc nulls last,
+          a.id desc
+      ) as rn
+    from
+      artworks a
+      join sales_orders so on so.id = a.so_id
+  ),
+  artwork_base as (
+    select
+      artwork_ranked.so_number,
+      artwork_ranked.so_id,
+      artwork_ranked.line_no,
+      artwork_ranked.artwork_key,
+      artwork_ranked.artwork_no,
+      artwork_ranked.plate_status,
+      artwork_ranked.die_status,
+      artwork_ranked.rn
+    from
+      artwork_ranked
+    where
+      artwork_ranked.rn = 1
+  ),
+  manual_proc as (
+    select
+      purchase_artwork_procurement.artwork_key,
+      upper(
+        COALESCE(purchase_artwork_procurement.type, ''::text)
+      ) as tooling_type,
+      max(purchase_artwork_procurement.vendor) filter (
+        where
+          COALESCE(purchase_artwork_procurement.vendor, ''::text) <> ''::text
+      ) as vendor,
+      min(purchase_artwork_procurement.ordered_on) as ordered_on,
+      max(purchase_artwork_procurement.received_on) as received_on,
+      string_agg(
+        distinct purchase_artwork_procurement.challan_no,
+        ', '::text
+        order by
+          purchase_artwork_procurement.challan_no
+      ) filter (
+        where
+          COALESCE(purchase_artwork_procurement.challan_no, ''::text) <> ''::text
+      ) as challan_nos,
+      sum(
+        COALESCE(purchase_artwork_procurement.count, 0::numeric)
+      ) as manual_qty
+    from
+      purchase_artwork_procurement
+    where
+      upper(
+        COALESCE(
+          purchase_artwork_procurement.status,
+          'ACTIVE'::text
+        )
+      ) <> 'CANCELLED'::text
+    group by
+      purchase_artwork_procurement.artwork_key,
+      (
+        upper(
+          COALESCE(purchase_artwork_procurement.type, ''::text)
+        )
+      )
+  ),
+  receipt_by_line as (
+    select
+      purchase_po_receipts.po_line_id,
+      sum(COALESCE(purchase_po_receipts.qty, 0::numeric)) as received_qty,
+      max(purchase_po_receipts.receipt_date) as last_receipt_date,
+      string_agg(
+        distinct purchase_po_receipts.challan_no,
+        ', '::text
+        order by
+          purchase_po_receipts.challan_no
+      ) filter (
+        where
+          COALESCE(purchase_po_receipts.challan_no, ''::text) <> ''::text
+      ) as challan_nos
+    from
+      purchase_po_receipts
+    group by
+      purchase_po_receipts.po_line_id
+  ),
+  po_tooling_lines as (
+    select
+      pol.source_ref as artwork_key,
+      case
+        when upper(COALESCE(pol.source_type, ''::text)) = any (array['ARTWORK_DIE'::text, 'DIRECT_DIE'::text]) then 'DIE'::text
+        when upper(COALESCE(pol.source_type, ''::text)) = any (
+          array['ARTWORK_PLATE'::text, 'DIRECT_PLATE'::text]
+        ) then 'PLATE'::text
+        else ''::text
+      end as tooling_type,
+      pol.po_no,
+      po.order_date,
+      COALESCE(po.vendor_name, ''::text) as vendor_name,
+      COALESCE(pol.qty, 0::numeric) as ordered_qty,
+      COALESCE(r.received_qty, 0::numeric) as received_qty,
+      GREATEST(
+        COALESCE(pol.qty, 0::numeric) - COALESCE(r.received_qty, 0::numeric),
+        0::numeric
+      ) as pending_qty,
+      r.last_receipt_date,
+      r.challan_nos
+    from
+      purchase_order_lines pol
+      left join purchase_orders po on po.po_no = pol.po_no
+      left join receipt_by_line r on r.po_line_id = pol.id
+    where
+      upper(COALESCE(pol.source_type, ''::text)) = any (
+        array[
+          'ARTWORK_PLATE'::text,
+          'ARTWORK_DIE'::text,
+          'DIRECT_PLATE'::text,
+          'DIRECT_DIE'::text
+        ]
+      )
+  ),
+  po_tooling as (
+    select
+      po_tooling_lines.artwork_key,
+      po_tooling_lines.tooling_type,
+      sum(po_tooling_lines.ordered_qty) as ordered_qty,
+      sum(po_tooling_lines.received_qty) as received_qty,
+      sum(po_tooling_lines.pending_qty) as pending_qty,
+      min(po_tooling_lines.order_date) as first_order_date,
+      max(po_tooling_lines.last_receipt_date) as last_receipt_date,
+      string_agg(
+        distinct po_tooling_lines.po_no,
+        ', '::text
+        order by
+          po_tooling_lines.po_no
+      ) filter (
+        where
+          COALESCE(po_tooling_lines.po_no, ''::text) <> ''::text
+      ) as po_nos,
+      string_agg(
+        distinct po_tooling_lines.vendor_name,
+        ', '::text
+        order by
+          po_tooling_lines.vendor_name
+      ) filter (
+        where
+          COALESCE(po_tooling_lines.vendor_name, ''::text) <> ''::text
+      ) as vendors,
+      string_agg(
+        distinct po_tooling_lines.challan_nos,
+        ', '::text
+        order by
+          po_tooling_lines.challan_nos
+      ) filter (
+        where
+          COALESCE(po_tooling_lines.challan_nos, ''::text) <> ''::text
+      ) as challan_nos
+    from
+      po_tooling_lines
+    where
+      po_tooling_lines.tooling_type <> ''::text
+    group by
+      po_tooling_lines.artwork_key,
+      po_tooling_lines.tooling_type
+  )
+select
+  ab.so_number,
+  ab.line_no,
+  ab.artwork_key,
+  case
+    when COALESCE(pt.pending_qty, 0::numeric) <= 0::numeric
+    and (
+      COALESCE(pt.received_qty, 0::numeric) > 0::numeric
+      or mp.received_on is not null
+    ) then 'RECEIVED'::text
+    when COALESCE(pt.received_qty, 0::numeric) > 0::numeric then 'PARTIAL'::text
+    when COALESCE(pt.ordered_qty, 0::numeric) > 0::numeric
+    or mp.ordered_on is not null then 'ORDERED'::text
+    when upper(COALESCE(ab.plate_status, ''::text)) = any (
+      array[
+        'NEW'::text,
+        'YES'::text,
+        'REQUIRED'::text,
+        'SELECTED'::text
+      ]
+    ) then 'PENDING_ORDER'::text
+    else COALESCE(NULLIF(ab.plate_status, ''::text), 'NA'::text)
+  end as plate_procurement_status,
+  COALESCE(pt.po_nos, ''::text) as plate_po_nos,
+  COALESCE(pt.first_order_date, mp.ordered_on) as plate_ordered_on,
+  COALESCE(pt.last_receipt_date, mp.received_on) as plate_received_on,
+  COALESCE(pt.ordered_qty, mp.manual_qty, 0::numeric) as plate_ordered_qty,
+  COALESCE(
+    pt.received_qty,
+    case
+      when mp.received_on is not null then mp.manual_qty
+      else 0::numeric
+    end,
+    0::numeric
+  ) as plate_received_qty,
+  COALESCE(
+    pt.pending_qty,
+    GREATEST(
+      COALESCE(mp.manual_qty, 0::numeric) - case
+        when mp.received_on is not null then COALESCE(mp.manual_qty, 0::numeric)
+        else 0::numeric
+      end,
+      0::numeric
+    ),
+    0::numeric
+  ) as plate_pending_qty,
+  COALESCE(NULLIF(pt.vendors, ''::text), mp.vendor, ''::text) as plate_vendors,
+  COALESCE(
+    NULLIF(pt.challan_nos, ''::text),
+    mp.challan_nos,
+    ''::text
+  ) as plate_receipt_refs,
+  case
+    when COALESCE(dt.pending_qty, 0::numeric) <= 0::numeric
+    and (
+      COALESCE(dt.received_qty, 0::numeric) > 0::numeric
+      or md.received_on is not null
+    ) then 'RECEIVED'::text
+    when COALESCE(dt.received_qty, 0::numeric) > 0::numeric then 'PARTIAL'::text
+    when COALESCE(dt.ordered_qty, 0::numeric) > 0::numeric
+    or md.ordered_on is not null then 'ORDERED'::text
+    when upper(COALESCE(ab.die_status, ''::text)) = any (
+      array[
+        'NEW'::text,
+        'YES'::text,
+        'REQUIRED'::text,
+        'SELECTED'::text
+      ]
+    ) then 'PENDING_ORDER'::text
+    else COALESCE(NULLIF(ab.die_status, ''::text), 'NA'::text)
+  end as die_procurement_status,
+  COALESCE(dt.po_nos, ''::text) as die_po_nos,
+  COALESCE(dt.first_order_date, md.ordered_on) as die_ordered_on,
+  COALESCE(dt.last_receipt_date, md.received_on) as die_received_on,
+  COALESCE(dt.ordered_qty, md.manual_qty, 0::numeric) as die_ordered_qty,
+  COALESCE(
+    dt.received_qty,
+    case
+      when md.received_on is not null then md.manual_qty
+      else 0::numeric
+    end,
+    0::numeric
+  ) as die_received_qty,
+  COALESCE(
+    dt.pending_qty,
+    GREATEST(
+      COALESCE(md.manual_qty, 0::numeric) - case
+        when md.received_on is not null then COALESCE(md.manual_qty, 0::numeric)
+        else 0::numeric
+      end,
+      0::numeric
+    ),
+    0::numeric
+  ) as die_pending_qty,
+  COALESCE(NULLIF(dt.vendors, ''::text), md.vendor, ''::text) as die_vendors,
+  COALESCE(
+    NULLIF(dt.challan_nos, ''::text),
+    md.challan_nos,
+    ''::text
+  ) as die_receipt_refs
+from
+  artwork_base ab
+  left join po_tooling pt on pt.artwork_key = ab.artwork_key
+  and pt.tooling_type = 'PLATE'::text
+  left join po_tooling dt on dt.artwork_key = ab.artwork_key
+  and dt.tooling_type = 'DIE'::text
+  left join manual_proc mp on mp.artwork_key = ab.artwork_key
+  and mp.tooling_type = 'PLATE'::text
+  left join manual_proc md on md.artwork_key = ab.artwork_key
+  and md.tooling_type = 'DIE'::text;
