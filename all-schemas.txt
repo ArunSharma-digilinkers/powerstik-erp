@@ -8864,3 +8864,81 @@ from
   and mp.tooling_type = 'PLATE'::text
   left join manual_proc md on md.artwork_key = ab.artwork_key
   and md.tooling_type = 'DIE'::text;
+
+
+  create table if not exists public.production_entry_audit_log (
+  id uuid primary key default gen_random_uuid(),
+  production_entry_id uuid null,
+  wo_id uuid null,
+  routing_id uuid null,
+  action text not null,
+  reason text null,
+  changed_by text null,
+  before_json jsonb null,
+  after_json jsonb null,
+  changed_at timestamptz not null default now()
+);
+
+create index if not exists idx_production_entry_audit_log_entry
+  on public.production_entry_audit_log (production_entry_id, changed_at desc);
+
+create index if not exists idx_production_entry_audit_log_wo
+  on public.production_entry_audit_log (wo_id, changed_at desc);
+
+create index if not exists idx_production_entry_audit_log_routing
+  on public.production_entry_audit_log (routing_id, changed_at desc);
+
+
+create table if not exists public.packing_entry_log (
+  id uuid primary key default gen_random_uuid(),
+  pack_id uuid not null references public.packing_records(id) on delete cascade,
+  so_id uuid,
+  so_line_id uuid,
+  so_number text,
+  line_no text,
+  product_code text,
+  product_name text,
+  category text,
+  department_category text,
+  packed_qty numeric not null default 0,
+  packed_weight_kg numeric not null default 0,
+  ready_to_dispatch boolean not null default true,
+  source_stage text not null default 'PACKING',
+  remarks text not null default '',
+  posted_at timestamptz not null default now(),
+  posted_by text not null default '',
+  updated_at timestamptz,
+  updated_by text,
+  change_reason text
+);
+
+create index if not exists idx_packing_entry_log_pack
+  on public.packing_entry_log (pack_id, posted_at desc);
+
+create index if not exists idx_packing_entry_log_so_line
+  on public.packing_entry_log (so_line_id, posted_at desc);
+
+create index if not exists idx_packing_entry_log_posted
+  on public.packing_entry_log (posted_at desc);
+
+create table if not exists public.packing_entry_audit_log (
+  id uuid primary key default gen_random_uuid(),
+  packing_entry_id uuid,
+  pack_id uuid,
+  so_line_id uuid,
+  action text not null,
+  reason text not null default '',
+  changed_by text not null default '',
+  before_json jsonb,
+  after_json jsonb,
+  changed_at timestamptz not null default now()
+);
+
+create index if not exists idx_packing_entry_audit_entry
+  on public.packing_entry_audit_log (packing_entry_id, changed_at desc);
+
+create index if not exists idx_packing_entry_audit_pack
+  on public.packing_entry_audit_log (pack_id, changed_at desc);
+
+create index if not exists idx_packing_entry_audit_so_line
+  on public.packing_entry_audit_log (so_line_id, changed_at desc);
