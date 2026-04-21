@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stock Conversion</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+<style>
+  body { font-size: 0.9rem; background: #f4f6f9; }
+  .page-title { font-weight: 600; color: #1f2d3d; }
+  .card { box-shadow: 0 1px 3px rgba(0,0,0,.06); border: 1px solid #e5e7eb; }
+  .card-header { background: #fff; font-weight: 600; border-bottom: 1px solid #e5e7eb; }
+  .form-label { font-weight: 500; font-size: 0.85rem; margin-bottom: .2rem; color: #374151; }
+  .form-control, .form-select { font-size: 0.88rem; }
+  .autocomplete { position: relative; }
+  .autocomplete-results {
+    position: absolute; z-index: 1000; top: 100%; left: 0; right: 0;
+    max-height: 240px; overflow-y: auto; background: #fff;
+    border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 .25rem .25rem;
+    display: none;
+  }
+  .autocomplete-results.show { display: block; }
+  .autocomplete-item { padding: .4rem .75rem; cursor: pointer; border-bottom: 1px solid #f3f4f6; font-size: 0.85rem; }
+  .autocomplete-item:hover, .autocomplete-item.active { background: #eef2ff; }
+  .autocomplete-item .item-code { color: #6366f1; font-weight: 500; font-family: monospace; font-size: 0.78rem; }
+  .preview-strip {
+    background: #fef3c7; border: 1px solid #fde68a; border-radius: .375rem;
+    padding: .75rem 1rem; font-size: 0.88rem; color: #78350f;
+  }
+  .preview-strip.ready { background: #d1fae5; border-color: #6ee7b7; color: #065f46; }
+  .preview-strip code { background: rgba(0,0,0,.08); padding: 1px 6px; border-radius: 3px; }
+  .balance-pill {
+    display: inline-block; background: #dbeafe; color: #1e40af;
+    padding: 2px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 500;
+  }
+  .batch-row { padding: .35rem .5rem; border: 1px solid #e5e7eb; border-radius: .25rem; margin-bottom: .25rem; cursor: pointer; font-size: 0.82rem; }
+  .batch-row:hover { background: #eef2ff; border-color: #a5b4fc; }
+  .batch-row.active { background: #6366f1; color: #fff; border-color: #4f46e5; }
+  .target-tabs .nav-link { font-size: 0.85rem; padding: .4rem .85rem; }
+  table.compact th, table.compact td { font-size: 0.82rem; padding: .4rem .55rem; vertical-align: middle; }
+  .badge-conv-in { background: #d1fae5; color: #065f46; }
+  .badge-conv-out { background: #fee2e2; color: #991b1b; }
+  .badge-reversed { background: #e5e7eb; color: #6b7280; }
+  .btn-sm-icon { padding: 2px 7px; font-size: 0.78rem; line-height: 1.3; }
+  .toast-stack { position: fixed; top: 16px; right: 16px; z-index: 2000; min-width: 280px; }
+</style>
+</head>
+<body>
+
+<nav class="navbar navbar-expand-lg navbar-light bg-white shadow-sm border-bottom">
+  <div class="container-fluid">
+    <a class="navbar-brand fw-bold" href="?p=menu&token=<?= TOKEN ?>">
+      <i class="bi bi-arrow-left-circle"></i> Menu
+    </a>
+    <span class="navbar-text small">
+      <i class="bi bi-scissors"></i> Stock Conversion (Sheet Cutting)
+    </span>
+    <span class="navbar-text small ms-auto">
+      <i class="bi bi-person-circle"></i> <?= (CURRENT_USER && CURRENT_USER.name) || '' ?>
+    </span>
+  </div>
+</nav>
+
+<div class="container-fluid py-3">
+
+  <!-- Toasts -->
+  <div class="toast-stack" id="toastStack"></div>
+
+  <div class="row g-3">
+    <!-- LEFT: Form -->
+    <div class="col-lg-7">
+      <div class="card mb-3">
+        <div class="card-header d-flex align-items-center justify-content-between">
+          <span><i class="bi bi-scissors"></i> New Conversion</span>
+          <small class="text-muted">CNV number auto-assigned on submit</small>
+        </div>
+        <div class="card-body">
+          <form id="cnvForm" autocomplete="off">
+
+            <!-- Location -->
+            <div class="row g-2 mb-2">
+              <div class="col-md-3">
+                <label class="form-label">Location</label>
+                <select class="form-select form-select-sm" id="fLocation">
+                  <option value="MAIN" selected>MAIN</option>
+                </select>
+              </div>
+              <div class="col-md-9">
+                <label class="form-label">Cut request reference (optional)</label>
+                <input type="text" class="form-control form-control-sm" id="fCutRef" placeholder="e.g. WO-0456 / Ramesh for SO-0789">
+              </div>
+            </div>
+
+            <hr class="my-3">
+            <h6 class="fw-bold mb-2"><i class="bi bi-box-arrow-up-right text-danger"></i> Source (larger sheet to cut)</h6>
+
+            <div class="row g-2 mb-2">
+              <div class="col-md-8 autocomplete">
+                <label class="form-label">Source item</label>
+                <input type="text" class="form-control form-control-sm" id="fSourceSearch" placeholder="Search by name or code...">
+                <input type="hidden" id="fSourceCode">
+                <div class="autocomplete-results" id="sourceResults"></div>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Qty to cut</label>
+                <input type="number" step="0.001" min="0.001" class="form-control form-control-sm" id="fSourceQty" placeholder="0.00">
+              </div>
+            </div>
+
+            <div class="mb-2" id="batchWrap" style="display: none;">
+              <label class="form-label d-flex justify-content-between">
+                <span>Source batch (optional — leave blank for FIFO)</span>
+                <span class="balance-pill" id="srcBalance">—</span>
+              </label>
+              <div id="batchList"></div>
+            </div>
+
+            <hr class="my-3">
+            <h6 class="fw-bold mb-2"><i class="bi bi-box-arrow-in-down-left text-success"></i> Target (smaller sheet after cut)</h6>
+
+            <ul class="nav nav-pills target-tabs mb-2" id="targetTabs">
+              <li class="nav-item"><button type="button" class="nav-link active" data-mode="existing">Pick existing</button></li>
+              <li class="nav-item"><button type="button" class="nav-link" data-mode="new">Create new</button></li>
+            </ul>
+
+            <!-- Pick existing -->
+            <div id="targetExisting">
+              <div class="row g-2 mb-2">
+                <div class="col-md-8 autocomplete">
+                  <label class="form-label">Target item</label>
+                  <input type="text" class="form-control form-control-sm" id="fTargetSearch" placeholder="Search by name or code...">
+                  <input type="hidden" id="fTargetCode">
+                  <div class="autocomplete-results" id="targetResults"></div>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Target qty (pieces produced)</label>
+                  <input type="number" step="0.001" min="0.001" class="form-control form-control-sm" id="fTargetQty" placeholder="0.00">
+                </div>
+              </div>
+            </div>
+
+            <!-- Create new -->
+            <div id="targetNew" style="display: none;">
+              <div class="row g-2 mb-2">
+                <div class="col-md-12">
+                  <label class="form-label">New item name (include size for clarity)</label>
+                  <input type="text" class="form-control form-control-sm" id="nName" placeholder="e.g. 80GSM Maplitho 440x305mm">
+                </div>
+              </div>
+              <div class="row g-2 mb-2">
+                <div class="col-md-3">
+                  <label class="form-label">UOM</label>
+                  <input type="text" class="form-control form-control-sm" id="nUom" placeholder="SHT" value="SHT">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label">Category</label>
+                  <input type="text" class="form-control form-control-sm" id="nCategory" placeholder="(inherit from source)">
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label">Dept</label>
+                  <input type="text" class="form-control form-control-sm" id="nDept" placeholder="STORE">
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label">Target qty</label>
+                  <input type="number" step="0.001" min="0.001" class="form-control form-control-sm" id="fTargetQtyNew" placeholder="0.00">
+                </div>
+              </div>
+            </div>
+
+            <hr class="my-3">
+
+            <div class="row g-2 mb-2">
+              <div class="col-md-3">
+                <label class="form-label">Waste qty (optional)</label>
+                <input type="number" step="0.001" min="0" value="0" class="form-control form-control-sm" id="fWasteQty">
+              </div>
+              <div class="col-md-9">
+                <label class="form-label">Remarks</label>
+                <input type="text" class="form-control form-control-sm" id="fRemarks" placeholder="Any note for audit / reversal context">
+              </div>
+            </div>
+
+            <!-- Preview -->
+            <div class="preview-strip mb-2" id="previewStrip">
+              <i class="bi bi-info-circle"></i> Select source + target to preview the conversion.
+            </div>
+
+            <div class="d-flex justify-content-between align-items-center">
+              <small class="text-muted"><i class="bi bi-shield-check"></i> Rate carried from source FIFO → target lot. Two linked ledger rows will be written.</small>
+              <div>
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="btnReset">Reset</button>
+                <button type="submit" class="btn btn-primary btn-sm" id="btnSubmit" disabled>
+                  <i class="bi bi-scissors"></i> Post Conversion
+                </button>
+              </div>
+            </div>
+
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: Recent conversions -->
+    <div class="col-lg-5">
+      <div class="card">
+        <div class="card-header d-flex align-items-center justify-content-between">
+          <span><i class="bi bi-clock-history"></i> Recent Conversions</span>
+          <button class="btn btn-sm btn-outline-secondary btn-sm-icon" id="btnRefreshList"><i class="bi bi-arrow-clockwise"></i></button>
+        </div>
+        <div class="card-body p-2">
+          <div class="table-responsive" style="max-height: 620px;">
+            <table class="table table-sm table-hover compact mb-0" id="recentTable">
+              <thead class="table-light sticky-top">
+                <tr>
+                  <th>CNV #</th>
+                  <th>Date</th>
+                  <th>Source → Target</th>
+                  <th class="text-end">Qty</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="recentBody">
+                <tr><td colspan="5" class="text-center text-muted py-3">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Reverse modal -->
+<div class="modal fade" id="reverseModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title">Reverse Conversion <span id="revCnvLabel" class="text-muted"></span></h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small mb-2">This will write REV-CONVERT-IN + REV-CONVERT-OUT ledger rows, deduct the target lot (must still have full qty available), and restore source stock.</p>
+        <div class="alert alert-warning py-2 small mb-2" id="revPreview"></div>
+        <label class="form-label">Reversal reason</label>
+        <textarea class="form-control form-control-sm" id="revReason" rows="2" placeholder="Why is this being reversed?"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-sm btn-danger" id="btnConfirmReverse">Confirm Reverse</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+(function(){
+  const TOKEN = "<?= TOKEN ?>";
+  let targetMode = 'existing';
+  let selectedSource = null;
+  let selectedTarget = null;
+  let selectedBatch = '';
+  let sourceLots = [];
+
+  // ---------- Helpers ----------
+  function $(id){ return document.getElementById(id); }
+  function fmt(n, d){ const v = Number(n||0); return v.toLocaleString(undefined, {minimumFractionDigits: d||0, maximumFractionDigits: d||3}); }
+  function fmtDate(iso){
+    if(!iso) return '';
+    const d = new Date(iso);
+    if(isNaN(d)) return iso;
+    return d.toLocaleDateString(undefined, {day:'2-digit', month:'short', year:'numeric'}) +
+           ' ' + d.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+  }
+  function toast(msg, type){
+    const t = document.createElement('div');
+    t.className = 'toast show text-bg-' + (type||'primary') + ' mb-2';
+    t.style.minWidth = '260px';
+    t.innerHTML = '<div class="toast-body d-flex justify-content-between align-items-center">' +
+                  '<span>' + msg + '</span>' +
+                  '<button class="btn-close btn-close-white ms-2" data-bs-dismiss="toast"></button>' +
+                  '</div>';
+    $('toastStack').appendChild(t);
+    setTimeout(function(){ t.remove(); }, 4500);
+  }
+  function debounce(fn, ms){
+    let h; return function(){ const args = arguments; clearTimeout(h); h = setTimeout(function(){ fn.apply(null, args); }, ms); };
+  }
+
+  // ---------- Autocomplete ----------
+  function bindAutocomplete(inputId, resultsId, codeInputId, onPick){
+    const input = $(inputId), results = $(resultsId), codeInput = $(codeInputId);
+
+    const search = debounce(function(q){
+      if (!q || q.length < 2) {
+        results.innerHTML = ''; results.classList.remove('show'); return;
+      }
+      google.script.run
+        .withSuccessHandler(function(res){
+          const rows = (res && res.rows) || [];
+          if (!rows.length) {
+            results.innerHTML = '<div class="autocomplete-item text-muted">No matches</div>';
+            results.classList.add('show');
+            return;
+          }
+          results.innerHTML = rows.map(function(r){
+            return '<div class="autocomplete-item" data-code="' + (r.itemCode||'') + '" data-name="' + (r.itemName||'') +
+                   '" data-uom="' + (r.uom||'') + '" data-cat="' + (r.category||'') + '" data-dept="' + (r.department||'') + '">' +
+                   '<span class="item-code">' + (r.itemCode||'') + '</span> &middot; ' + (r.itemName||'') +
+                   ' <small class="text-muted">(' + (r.uom||'') + ')</small>' +
+                   '</div>';
+          }).join('');
+          results.classList.add('show');
+          results.querySelectorAll('.autocomplete-item').forEach(function(el){
+            el.addEventListener('click', function(){
+              codeInput.value = el.dataset.code;
+              input.value = el.dataset.code + ' — ' + el.dataset.name;
+              results.innerHTML = ''; results.classList.remove('show');
+              onPick && onPick({
+                itemCode: el.dataset.code,
+                itemName: el.dataset.name,
+                uom: el.dataset.uom,
+                category: el.dataset.cat,
+                department: el.dataset.dept
+              });
+            });
+          });
+        })
+        .withFailureHandler(function(err){ toast(err && err.message || 'Search failed', 'danger'); })
+        .invSearchItemsJSON(q);
+    }, 260);
+
+    input.addEventListener('input', function(){
+      codeInput.value = '';
+      if (inputId === 'fSourceSearch') onPick && onPick(null);
+      if (inputId === 'fTargetSearch') onPick && onPick(null);
+      search(input.value.trim());
+    });
+
+    document.addEventListener('click', function(e){
+      if (!results.contains(e.target) && e.target !== input) {
+        results.classList.remove('show');
+      }
+    });
+  }
+
+  // ---------- Batch picker ----------
+  function loadSourceLots(){
+    sourceLots = []; selectedBatch = '';
+    $('batchList').innerHTML = '';
+    $('srcBalance').textContent = '—';
+    if (!selectedSource) { $('batchWrap').style.display = 'none'; return; }
+
+    google.script.run
+      .withSuccessHandler(function(res){
+        sourceLots = (res && res.rows) || [];
+        const total = sourceLots.reduce(function(s, r){ return s + Number(r.qtyAvailable || 0); }, 0);
+        $('srcBalance').textContent = 'Available: ' + fmt(total, 2) + ' ' + (selectedSource.uom || '');
+        $('batchWrap').style.display = '';
+
+        if (!sourceLots.length) {
+          $('batchList').innerHTML = '<div class="text-muted small">No open batches — stock unavailable.</div>';
+          return;
+        }
+        $('batchList').innerHTML =
+          '<div class="batch-row" data-batch="">' +
+            '<i class="bi bi-layers"></i> <strong>Auto (FIFO)</strong> — system picks oldest first' +
+          '</div>' +
+          sourceLots.map(function(r){
+            return '<div class="batch-row" data-batch="' + (r.batchNo||'') + '">' +
+                   '<strong>' + (r.batchNo||'') + '</strong> — ' +
+                   'Avail <strong>' + fmt(r.qtyAvailable, 2) + '</strong> @ ₹' + fmt(r.rate, 2) +
+                   ' <small class="text-muted">· ' + (r.ageingDays == null ? '' : (r.ageingDays + ' days')) + '</small>' +
+                   '</div>';
+          }).join('');
+
+        $('batchList').querySelectorAll('.batch-row').forEach(function(el){
+          el.addEventListener('click', function(){
+            $('batchList').querySelectorAll('.batch-row').forEach(function(x){ x.classList.remove('active'); });
+            el.classList.add('active');
+            selectedBatch = el.dataset.batch || '';
+            refreshPreview();
+          });
+        });
+        $('batchList').querySelector('.batch-row').classList.add('active'); // default FIFO
+      })
+      .withFailureHandler(function(err){ toast(err && err.message || 'Batch load failed', 'danger'); })
+      .invListAvailableLotsJSON(selectedSource.itemCode, $('fLocation').value);
+  }
+
+  // ---------- Target mode tabs ----------
+  document.querySelectorAll('#targetTabs .nav-link').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      document.querySelectorAll('#targetTabs .nav-link').forEach(function(b){ b.classList.remove('active'); });
+      btn.classList.add('active');
+      targetMode = btn.dataset.mode;
+      $('targetExisting').style.display = targetMode === 'existing' ? '' : 'none';
+      $('targetNew').style.display = targetMode === 'new' ? '' : 'none';
+      refreshPreview();
+    });
+  });
+
+  // ---------- Preview ----------
+  function refreshPreview(){
+    const srcQty = Number($('fSourceQty').value || 0);
+    const tgtQty = Number((targetMode === 'existing' ? $('fTargetQty').value : $('fTargetQtyNew').value) || 0);
+    const waste = Number($('fWasteQty').value || 0);
+    const strip = $('previewStrip');
+    strip.classList.remove('ready');
+
+    if (!selectedSource) {
+      strip.innerHTML = '<i class="bi bi-info-circle"></i> Select a source item to continue.'; $('btnSubmit').disabled = true; return;
+    }
+    if (srcQty <= 0) {
+      strip.innerHTML = '<i class="bi bi-info-circle"></i> Enter source qty to cut.'; $('btnSubmit').disabled = true; return;
+    }
+    if (targetMode === 'existing' && !selectedTarget) {
+      strip.innerHTML = '<i class="bi bi-info-circle"></i> Pick an existing target item, or switch to "Create new".'; $('btnSubmit').disabled = true; return;
+    }
+    if (targetMode === 'new' && !$('nName').value.trim()) {
+      strip.innerHTML = '<i class="bi bi-info-circle"></i> Enter the new item name to create inline.'; $('btnSubmit').disabled = true; return;
+    }
+    if (tgtQty <= 0) {
+      strip.innerHTML = '<i class="bi bi-info-circle"></i> Enter target qty (pieces produced).'; $('btnSubmit').disabled = true; return;
+    }
+
+    const total = sourceLots.reduce(function(s, r){ return s + Number(r.qtyAvailable || 0); }, 0);
+    if (srcQty > total + 0.0001) {
+      strip.innerHTML = '<i class="bi bi-exclamation-triangle text-danger"></i> Only <strong>' + fmt(total, 2) + '</strong> available in ' +
+                       selectedSource.itemCode + '. Cut qty exceeds stock.';
+      $('btnSubmit').disabled = true; return;
+    }
+
+    const tgtLabel = targetMode === 'existing'
+      ? (selectedTarget ? (selectedTarget.itemCode + ' — ' + selectedTarget.itemName) : '')
+      : ('NEW: ' + $('nName').value.trim());
+    const batchLabel = selectedBatch || 'Auto-FIFO';
+    strip.classList.add('ready');
+    strip.innerHTML =
+      '<i class="bi bi-check-circle"></i> Ready to cut <code>' + fmt(srcQty, 2) + '</code> of <strong>' + selectedSource.itemCode +
+      '</strong> (batch: <code>' + batchLabel + '</code>) → <code>' + fmt(tgtQty, 2) + '</code> of <strong>' + tgtLabel + '</strong>' +
+      (waste > 0 ? ' · waste <code>' + fmt(waste, 2) + '</code>' : '') + '.';
+
+    $('btnSubmit').disabled = false;
+  }
+
+  ['fSourceQty','fTargetQty','fTargetQtyNew','fWasteQty','nName','nUom','nCategory','nDept','fLocation']
+    .forEach(function(id){ const el = $(id); if (el) el.addEventListener('input', refreshPreview); });
+
+  // ---------- Autocomplete wire-up ----------
+  bindAutocomplete('fSourceSearch', 'sourceResults', 'fSourceCode', function(pick){
+    selectedSource = pick;
+    if (pick) loadSourceLots(); else { $('batchWrap').style.display = 'none'; sourceLots = []; }
+    refreshPreview();
+  });
+  bindAutocomplete('fTargetSearch', 'targetResults', 'fTargetCode', function(pick){
+    selectedTarget = pick; refreshPreview();
+  });
+
+  // ---------- Submit ----------
+  $('cnvForm').addEventListener('submit', function(e){
+    e.preventDefault();
+    const payload = {
+      sourceItemCode: selectedSource.itemCode,
+      sourceBatchNo: selectedBatch || '',
+      sourceQty: Number($('fSourceQty').value || 0),
+      targetQty: Number((targetMode === 'existing' ? $('fTargetQty').value : $('fTargetQtyNew').value) || 0),
+      wasteQty: Number($('fWasteQty').value || 0),
+      location: $('fLocation').value,
+      cutRequestRef: $('fCutRef').value.trim(),
+      remarks: $('fRemarks').value.trim()
+    };
+    if (targetMode === 'existing') {
+      payload.targetItemCode = selectedTarget.itemCode;
+    } else {
+      payload.newTarget = {
+        itemName: $('nName').value.trim(),
+        category: $('nCategory').value.trim() || selectedSource.category || '',
+        uom: $('nUom').value.trim() || 'NOS',
+        department: $('nDept').value.trim() || selectedSource.department || ''
+      };
+    }
+
+    $('btnSubmit').disabled = true;
+    $('btnSubmit').innerHTML = '<span class="spinner-border spinner-border-sm"></span> Posting...';
+    google.script.run
+      .withSuccessHandler(function(res){
+        $('btnSubmit').innerHTML = '<i class="bi bi-scissors"></i> Post Conversion';
+        if (res && res.ok) {
+          toast('Conversion ' + res.conversionNo + ' posted successfully' + (res.targetMasterCreated ? ' (new master created)' : ''), 'success');
+          resetForm();
+          loadRecent();
+        } else {
+          toast('Post failed', 'danger');
+          $('btnSubmit').disabled = false;
+        }
+      })
+      .withFailureHandler(function(err){
+        $('btnSubmit').innerHTML = '<i class="bi bi-scissors"></i> Post Conversion';
+        $('btnSubmit').disabled = false;
+        toast(err && err.message || 'Post failed', 'danger');
+      })
+      .invPostConversion(payload);
+  });
+
+  function resetForm(){
+    $('cnvForm').reset();
+    $('fSourceCode').value = ''; $('fTargetCode').value = '';
+    $('fSourceSearch').value = ''; $('fTargetSearch').value = '';
+    selectedSource = null; selectedTarget = null; selectedBatch = '';
+    $('batchWrap').style.display = 'none';
+    refreshPreview();
+  }
+  $('btnReset').addEventListener('click', resetForm);
+
+  // ---------- Recent list ----------
+  function loadRecent(){
+    $('recentBody').innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">Loading...</td></tr>';
+    google.script.run
+      .withSuccessHandler(function(res){
+        const rows = (res && res.rows) || [];
+        if (!rows.length) {
+          $('recentBody').innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3">No conversions yet.</td></tr>';
+          return;
+        }
+        $('recentBody').innerHTML = rows.map(function(r){
+          const badge = r.reversed
+            ? '<span class="badge badge-reversed">Reversed</span>'
+            : '<span class="badge bg-success">Active</span>';
+          const action = r.reversed
+            ? ''
+            : '<button class="btn btn-outline-danger btn-sm-icon" data-cnv="' + r.conversionNo + '"' +
+              ' data-src="' + r.sourceItemCode + '" data-tgt="' + r.targetItemCode + '"' +
+              ' data-sq="' + r.sourceQty + '" data-tq="' + r.targetQty + '"' +
+              ' onclick="window._openReverse(this)" title="Reverse"><i class="bi bi-arrow-counterclockwise"></i></button>';
+          return '<tr>' +
+            '<td><strong>' + r.conversionNo + '</strong><br>' + badge + '</td>' +
+            '<td><small>' + fmtDate(r.conversionDate) + '</small><br><small class="text-muted">' + (r.doneBy||'') + '</small></td>' +
+            '<td><small><span class="text-danger">' + r.sourceItemCode + '</span> → <span class="text-success">' + r.targetItemCode + '</span>' +
+              (r.targetMasterCreated ? ' <span class="badge bg-info">new</span>' : '') + '</small>' +
+              (r.cutRequestRef ? '<br><small class="text-muted">' + r.cutRequestRef + '</small>' : '') + '</td>' +
+            '<td class="text-end"><small>' + fmt(r.sourceQty, 2) + ' → ' + fmt(r.targetQty, 2) + '</small>' +
+              (r.wasteQty > 0 ? '<br><small class="text-warning">w ' + fmt(r.wasteQty, 2) + '</small>' : '') + '</td>' +
+            '<td class="text-end">' + action + '</td>' +
+          '</tr>';
+        }).join('');
+      })
+      .withFailureHandler(function(err){
+        $('recentBody').innerHTML = '<tr><td colspan="5" class="text-center text-danger py-3">' + (err && err.message || 'Load failed') + '</td></tr>';
+      })
+      .invListConversionsJSON({ limit: 50 });
+  }
+  $('btnRefreshList').addEventListener('click', loadRecent);
+
+  // ---------- Reverse ----------
+  window._openReverse = function(btn){
+    const data = btn.dataset;
+    $('revCnvLabel').textContent = data.cnv;
+    $('revPreview').innerHTML = 'Will restore <strong>' + fmt(data.sq, 2) + '</strong> of <strong>' + data.src +
+      '</strong> and remove <strong>' + fmt(data.tq, 2) + '</strong> of <strong>' + data.tgt + '</strong>.';
+    $('revReason').value = '';
+    const modal = new bootstrap.Modal($('reverseModal'));
+    modal.show();
+    $('btnConfirmReverse').onclick = function(){
+      const reason = $('revReason').value.trim();
+      if (!reason) { toast('Reason required', 'warning'); return; }
+      $('btnConfirmReverse').disabled = true;
+      google.script.run
+        .withSuccessHandler(function(res){
+          $('btnConfirmReverse').disabled = false;
+          modal.hide();
+          toast('Conversion ' + data.cnv + ' reversed', 'success');
+          loadRecent();
+        })
+        .withFailureHandler(function(err){
+          $('btnConfirmReverse').disabled = false;
+          toast(err && err.message || 'Reverse failed', 'danger');
+        })
+        .invReverseConversion(data.cnv, reason);
+    };
+  };
+
+  // ---------- Init ----------
+  loadRecent();
+  refreshPreview();
+
+})();
+</script>
+
+</body>
+</html>
