@@ -17651,12 +17651,35 @@ function billingGetInvoiceEditor(invoiceId, token) {
   const inv = payload.inv || {};
   const lines = payload.lines || [];
   const lineRows = lines.map(function(row) {
+    const sourceMode = _billingNormalizeMode_(row.source_mode || inv.billing_mode || 'DISPATCH');
+    const qty = _billingRound2_(row.qty);
+    const orderedQty = _billingRound2_(row.ordered_qty_snapshot || qty);
+    const dispatchedQty = _billingRound2_(row.dispatch_qty_snapshot);
+    const billedQty = _billingRound2_(row.billed_qty_snapshot || qty);
     return {
       soLineId: String(row.so_line_id || '').trim(),
-      qty: _billingRound2_(row.qty),
+      soId: String(row.so_id || '').trim(),
+      soNumber: row.so_number || '',
+      lineNo: Number(row.line_no || 0),
+      productCode: row.product_code || '',
+      productName: row.product_name || '',
+      hsn: row.hsn || '',
+      unit: row.unit || 'Nos',
+      qty: qty,
       rate: _billingRound2_(row.rate),
       gstPct: _billingRound2_(row.gst_pct),
-      sourceMode: _billingNormalizeMode_(row.source_mode || inv.billing_mode || 'DISPATCH')
+      sourceMode: sourceMode,
+      orderQty: orderedQty > 0 ? orderedQty : qty,
+      dispatchedQty: dispatchedQty > 0 ? dispatchedQty : (sourceMode === 'DISPATCH' ? qty : 0),
+      packedQty: sourceMode === 'FG' ? (dispatchedQty > 0 ? dispatchedQty : qty) : 0,
+      billedQty: billedQty,
+      postedQty: billedQty,
+      draftQty: 0,
+      billableQty: qty,
+      invoiceRefs: inv.invoice_no ? [inv.invoice_no] : [],
+      poNumber: '',
+      dispatchNo: '',
+      jobReference: ''
     };
   }).filter(function(row) { return row.soLineId && String(row.sourceMode || '').toUpperCase() !== 'MANUAL'; });
   const manualLines = lines.map(function(row, idx) {
@@ -17680,6 +17703,7 @@ function billingGetInvoiceEditor(invoiceId, token) {
     documentType: _billingInferDocumentType_(inv),
     status: inv.status || '',
     clientCode: inv.client_code || '',
+    clientName: inv.client_name || '',
     billToId: String(inv.bill_to_party_id || (inv.bill_to_address ? 'MANUAL' : '')).trim(),
     billToLabel: inv.bill_to_label || '',
     billToName: inv.bill_to_name || '',
@@ -18634,6 +18658,92 @@ function _prodHydrateEntryIdentityFromNotes_(entry) {
     }
   });
   return row;
+}
+
+function _prodParseDowntimeReasonParts_(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return { downtimeMinutes: 0, downtimeReason: '' };
+  }
+  const match = raw.match(/^(\d+(?:\.\d+)?)\s*min(?:ute)?s?(?:\s*-\s*(.*))?$/i);
+  if (!match) {
+    return {
+      downtimeMinutes: 0,
+      downtimeReason: raw
+    };
+  }
+  return {
+    downtimeMinutes: Number(match[1] || 0) || 0,
+    downtimeReason: String(match[2] || '').trim()
+  };
+}
+
+function _prodParseEntryNotes_(entry) {
+  const row = _prodHydrateEntryIdentityFromNotes_(entry || {});
+  const out = {
+    soNumber: String(row.so_number || '').trim(),
+    lineNo: String(row.line_no || '').trim(),
+    jobReference: String(row.job_reference || '').trim(),
+    startDateTime: '',
+    endDateTime: '',
+    downtimeMinutes: 0,
+    downtimeReason: ''
+  };
+  const notes = String(row.downtime_reason || '').split('|').map(function(part) {
+    return String(part || '').trim();
+  }).filter(Boolean);
+  notes.forEach(function(part) {
+    if (part.indexOf('START:') === 0) {
+      out.startDateTime = String(part.slice(6)).trim();
+      return;
+    }
+    if (part.indexOf('END:') === 0) {
+      out.endDateTime = String(part.slice(4)).trim();
+      return;
+    }
+    if (part.indexOf('DOWN:') === 0) {
+      const down = _prodParseDowntimeReasonParts_(part.slice(5));
+      out.downtimeMinutes = down.downtimeMinutes;
+      out.downtimeReason = down.downtimeReason;
+    }
+  });
+  return out;
+}
+
+function _prodIsoDateInput_(isoValue) {
+  const raw = String(isoValue || '').trim();
+  if (!raw) return '';
+  const dt = new Date(raw);
+  if (isNaN(dt.getTime())) {
+    const match = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : '';
+  }
+  return Utilities.formatDate(dt, 'Asia/Kolkata', 'yyyy-MM-dd');
+}
+
+function _prodIsoTimeInput_(isoValue) {
+  const raw = String(isoValue || '').trim();
+  if (!raw) return '';
+  const dt = new Date(raw);
+  if (isNaN(dt.getTime())) {
+    const match = raw.match(/(\d{2}:\d{2})/);
+    return match ? match[1] : '';
+  }
+  return Utilities.formatDate(dt, 'Asia/Kolkata', 'HH:mm');
+}
+
+function _prodEntryMatchesRowIdentity_(entry, rowIdentity) {
+  const rowKind = String(rowIdentity?.rowKind || 'COMBINED').trim().toUpperCase();
+  if (rowKind !== 'JOB') return true;
+  const parsed = _prodParseEntryNotes_(entry || {});
+  const jobReference = String(parsed.jobReference || '').trim();
+  const soNumber = String(parsed.soNumber || '').trim();
+  const lineNo = String(parsed.lineNo || '').trim();
+  const targetJobReference = String(rowIdentity?.jobReference || '').trim();
+  const targetSoNumber = String(rowIdentity?.soNumber || '').trim();
+  const targetLineNo = String(rowIdentity?.lineNo || '').trim();
+  if (targetJobReference && jobReference) return jobReference === targetJobReference;
+  return soNumber === targetSoNumber && lineNo === targetLineNo;
 }
 
 function _prodQueueVersion_() {
@@ -19806,6 +19916,46 @@ function _prodGetProducedEntryRowsForRoutingIds_(routingIds) {
   }
 }
 
+function _prodGetDetailedEntryRowsForRoutingIds_(routingIds) {
+  const ids = Array.isArray(routingIds) ? routingIds.filter(Boolean) : [];
+  if (!ids.length) return [];
+  try {
+    return _selectInBatches_(
+      'production_entries',
+      'id,wo_id,routing_id,so_number,line_no,job_reference,entry_datetime,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
+      'routing_id',
+      ids,
+      'entry_datetime.desc'
+    );
+  } catch (err) {
+    return _selectInBatches_(
+      'production_entries',
+      'id,wo_id,routing_id,entry_datetime,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
+      'routing_id',
+      ids,
+      'entry_datetime.desc'
+    ).map(_prodHydrateEntryIdentityFromNotes_);
+  }
+}
+
+function _prodGetDetailedEntryRowById_(entryId) {
+  const id = String(entryId || '').trim();
+  if (!id) return null;
+  try {
+    return (supabaseSelect('production_entries', {
+      select: 'id,wo_id,routing_id,so_number,line_no,job_reference,entry_datetime,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
+      filters: { id: 'eq.' + id },
+      limit: 1
+    }) || [])[0] || null;
+  } catch (err) {
+    return ((supabaseSelect('production_entries', {
+      select: 'id,wo_id,routing_id,entry_datetime,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
+      filters: { id: 'eq.' + id },
+      limit: 1
+    }) || []).map(_prodHydrateEntryIdentityFromNotes_))[0] || null;
+  }
+}
+
 function _supabaseBulkInsertInChunks_(table, rows, maxRows, maxPayloadChars) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return [];
@@ -20490,6 +20640,404 @@ function saveProductionBulk(entries, token) {
 /* ==============================
    5️⃣ SHORT CLOSE STAGE
 ================================= */
+
+function _prodGetCorr2PlyDetailsByEntryIds_(entryIds) {
+  const ids = [...new Set((entryIds || []).map(function(id) {
+    return String(id || '').trim();
+  }).filter(Boolean))];
+  if (!ids.length) return {};
+  try {
+    const rows = _selectInBatches_(
+      'corrugation_2ply_entry_details',
+      'id,production_entry_id,set_numbers,flute,liner_actual_item_name,fluting_actual_item_name,total_consumed_kg,produced_sheets,rejected_sheets,cut_size_mm,liner_reel_width_mm,fluting_reel_width_mm,liner_actual_gsm,fluting_actual_gsm',
+      'production_entry_id',
+      ids
+    ) || [];
+    const out = {};
+    rows.forEach(function(row) {
+      const key = String(row.production_entry_id || '');
+      if (!key) return;
+      if (!out[key]) out[key] = [];
+      out[key].push(row);
+    });
+    return out;
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'corrugation_2ply_entry_details')) return {};
+    throw err;
+  }
+}
+
+function _prodBuildAdminEntryView_(entry, detailRows) {
+  const row = _prodHydrateEntryIdentityFromNotes_(entry || {});
+  const parsed = _prodParseEntryNotes_(row);
+  const startValue = parsed.startDateTime || row.entry_datetime || '';
+  const endValue = parsed.endDateTime || row.entry_datetime || '';
+  const details = Array.isArray(detailRows) ? detailRows : [];
+  return {
+    id: row.id || '',
+    woId: row.wo_id || '',
+    routingId: row.routing_id || '',
+    soNumber: parsed.soNumber || '',
+    lineNo: parsed.lineNo || '',
+    jobReference: parsed.jobReference || '',
+    entryDate: _prodIsoDateInput_(endValue || startValue),
+    startTime: _prodIsoTimeInput_(startValue),
+    endTime: _prodIsoTimeInput_(endValue),
+    machine: row.machine || '',
+    operator: row.operator_name || '',
+    producedQty: Number(row.produced_qty || 0),
+    rejectedQty: Number(row.rejected_qty || 0),
+    okQty: _getProductionEntryGoodQty_(row),
+    downtimeMinutes: Number(parsed.downtimeMinutes || 0),
+    downtimeReason: parsed.downtimeReason || '',
+    entryDateTime: row.entry_datetime || '',
+    createdBy: row.created_by || '',
+    hasCorrugation2PlyDetails: details.length > 0,
+    corrugation2PlySummary: details.map(function(detail) {
+      const setNo = String(detail.set_numbers || '').trim();
+      const liner = String(detail.liner_actual_item_name || '').trim();
+      const fluting = String(detail.fluting_actual_item_name || '').trim();
+      return [setNo, fluting, liner].filter(Boolean).join(' | ');
+    }).filter(Boolean).join(' / '),
+    totalConsumedKg: details.reduce(function(sum, detail) {
+      return sum + Number(detail.total_consumed_kg || 0);
+    }, 0)
+  };
+}
+
+function _prodBuildEntryAuditPayload_(entry) {
+  const row = _prodHydrateEntryIdentityFromNotes_(entry || {});
+  const parsed = _prodParseEntryNotes_(row);
+  return {
+    id: row.id || '',
+    wo_id: row.wo_id || '',
+    routing_id: row.routing_id || '',
+    so_number: parsed.soNumber || '',
+    line_no: parsed.lineNo || '',
+    job_reference: parsed.jobReference || '',
+    entry_datetime: row.entry_datetime || '',
+    machine: row.machine || '',
+    operator_name: row.operator_name || '',
+    produced_qty: Number(row.produced_qty || 0),
+    rejected_qty: Number(row.rejected_qty || 0),
+    ok_qty: _getProductionEntryGoodQty_(row),
+    downtime_reason: row.downtime_reason || '',
+    created_by: row.created_by || ''
+  };
+}
+
+function _prodAuditEntryChange_(action, beforeRow, afterRow, changedBy, reason) {
+  try {
+    supabaseInsertMinimal('production_entry_audit_log', {
+      production_entry_id: beforeRow?.id || afterRow?.id || null,
+      wo_id: beforeRow?.wo_id || afterRow?.wo_id || null,
+      routing_id: beforeRow?.routing_id || afterRow?.routing_id || null,
+      action: String(action || '').trim().toUpperCase(),
+      reason: String(reason || '').trim(),
+      changed_by: String(changedBy || '').trim(),
+      before_json: beforeRow ? _prodBuildEntryAuditPayload_(beforeRow) : null,
+      after_json: afterRow ? _prodBuildEntryAuditPayload_(afterRow) : null,
+      changed_at: new Date().toISOString()
+    });
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'production_entry_audit_log')) return;
+    throw err;
+  }
+}
+
+function _prodUpdateCorr2PlyDetailsForEntry_(entryId, producedQty, rejectedQty) {
+  const id = String(entryId || '').trim();
+  if (!id) return;
+  try {
+    const rows = supabaseSelect('corrugation_2ply_entry_details', {
+      select: 'id,flute,cut_size_mm,liner_reel_width_mm,fluting_reel_width_mm,liner_actual_gsm,fluting_actual_gsm',
+      filters: { production_entry_id: 'eq.' + id },
+      limit: 50
+    }) || [];
+    rows.forEach(function(row) {
+      const producedSheets = Number(producedQty || 0);
+      const rejectedSheets = Number(rejectedQty || 0);
+      const linerKg = _prodCorrRound3_(producedSheets * Number(row.liner_reel_width_mm || 0) * Number(row.cut_size_mm || 0) * Number(row.liner_actual_gsm || 0) / 1000000000);
+      const flutingKg = _prodCorrRound3_(producedSheets * Number(row.fluting_reel_width_mm || 0) * Number(row.cut_size_mm || 0) * Number(row.fluting_actual_gsm || 0) * _prodCorrFluteFactor_(row.flute || '') / 1000000000);
+      supabaseUpdateMinimal('corrugation_2ply_entry_details', {
+        id: 'eq.' + String(row.id || '')
+      }, {
+        produced_sheets: producedSheets,
+        rejected_sheets: rejectedSheets,
+        liner_consumed_kg: linerKg,
+        fluting_consumed_kg: flutingKg,
+        total_consumed_kg: _prodCorrRound3_(linerKg + flutingKg)
+      });
+    });
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'corrugation_2ply_entry_details')) return;
+    throw err;
+  }
+}
+
+function _prodGetStageInfoForExistingEntry_(entryRow, routingRow) {
+  const routing = routingRow || {};
+  const woId = String(routing.wo_id || entryRow?.wo_id || '').trim();
+  if (!woId) {
+    return { plannedQty: 0, producedQty: 0, balanceQty: 0, rowKind: 'COMBINED', jobKey: '' };
+  }
+  const workOrder = (supabaseSelect('work_orders', {
+    select: 'id,wo_number,snapshot_json',
+    filters: { id: 'eq.' + woId },
+    limit: 1
+  }) || [])[0] || {};
+  const routingRows = _selectInBatches_(
+    'work_order_routing',
+    'id,wo_id,sequence_no,process_name,department,planned_machine,status',
+    'wo_id',
+    [woId],
+    'sequence_no.asc'
+  ) || [];
+  const jobs = _selectInBatches_(
+    'work_order_jobs',
+    'wo_id,so_number,line_no,product_name,qty,ups,group_ups,job_reference',
+    'wo_id',
+    [woId]
+  ) || [];
+  const entryRows = _prodGetDetailedEntryRowsForRoutingIds_(routingRows.map(function(row) {
+    return row.id;
+  })).filter(function(row) {
+    return String(row.id || '') !== String(entryRow?.id || '');
+  });
+  const totals = _prodBuildTotalsFromEntryRows_(entryRows);
+  const parsed = _prodParseEntryNotes_(entryRow || {});
+  return _prodGetPlannedAndProducedForEntry_({
+    routingId: routing.id,
+    soNumber: parsed.soNumber || '',
+    lineNo: parsed.lineNo || '',
+    jobReference: parsed.jobReference || ''
+  }, routing, routingRows, workOrder.snapshot_json || {}, workOrder, jobs,
+    totals.combinedProducedTotals || {},
+    totals.combinedTotals || {},
+    totals.jobProducedTotals || {},
+    totals.jobTotals || {}
+  );
+}
+
+function _prodGetEntryMutationBlockReason_(entryRow, routingRow) {
+  const routing = routingRow || {};
+  const woId = String(routing.wo_id || entryRow?.wo_id || '').trim();
+  if (!woId) return 'Work order reference is missing for this production entry.';
+  const currentSequence = Number(routing.sequence_no || 0);
+  const routingRows = _selectInBatches_(
+    'work_order_routing',
+    'id,wo_id,sequence_no,process_name,department',
+    'wo_id',
+    [woId],
+    'sequence_no.asc'
+  ) || [];
+  const downstreamRouting = routingRows.filter(function(row) {
+    return Number(row.sequence_no || 0) > currentSequence &&
+      !_prodIsExcludedProcess_(row.process_name || row.department || '');
+  });
+  if (downstreamRouting.length) {
+    const producedRows = _prodGetProducedEntryRowsForRoutingIds_(downstreamRouting.map(function(row) {
+      return row.id;
+    }));
+    const totals = _prodBuildTotalsFromEntryRows_(producedRows).combinedProducedTotals || {};
+    const blockingStage = downstreamRouting.find(function(row) {
+      return Number(totals[String(row.id || '')] || 0) > 0;
+    });
+    if (blockingStage) {
+      return 'Downstream stage "' + String(blockingStage.process_name || blockingStage.department || 'Next Process') + '" already has posted quantity.';
+    }
+  }
+
+  const jobs = _selectInBatches_(
+    'work_order_jobs',
+    'so_number,line_no',
+    'wo_id',
+    [woId]
+  ) || [];
+  const lineKeys = {};
+  const soNumbers = [];
+  jobs.forEach(function(job) {
+    const soNumber = String(job.so_number || '').trim();
+    const lineNo = String(job.line_no || '').trim();
+    if (!soNumber || !lineNo) return;
+    lineKeys[soNumber + '||' + lineNo] = true;
+    soNumbers.push(soNumber);
+  });
+  const uniqueSoNumbers = [...new Set(soNumbers)];
+  if (!uniqueSoNumbers.length) return '';
+
+  try {
+    const packingRows = _selectInBatches_(
+      'packing_records',
+      'so_number,line_no,packed_qty',
+      'so_number',
+      uniqueSoNumbers
+    ) || [];
+    const packingHit = packingRows.find(function(row) {
+      const key = String(row.so_number || '').trim() + '||' + String(row.line_no || '').trim();
+      return lineKeys[key] && Number(row.packed_qty || 0) > 0;
+    });
+    if (packingHit) {
+      return 'Packing has already been posted for this work order.';
+    }
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'packing_records')) throw err;
+  }
+
+  try {
+    const dispatchRows = _selectInBatches_(
+      'dispatch_records',
+      'so_number,line_no,dispatch_qty',
+      'so_number',
+      uniqueSoNumbers
+    ) || [];
+    const dispatchHit = dispatchRows.find(function(row) {
+      const key = String(row.so_number || '').trim() + '||' + String(row.line_no || '').trim();
+      return lineKeys[key] && Number(row.dispatch_qty || 0) > 0;
+    });
+    if (dispatchHit) {
+      return 'Dispatch has already been posted for this work order.';
+    }
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'dispatch_records')) throw err;
+  }
+
+  return '';
+}
+
+function prodAdminListStageEntries(payload, token) {
+  _requireAdmin_(token);
+  const routingId = String(payload?.routingId || '').trim();
+  if (!routingId) throw new Error('Routing id is required');
+  const rowIdentity = {
+    rowKind: payload?.rowKind || 'COMBINED',
+    soNumber: payload?.soNumber || '',
+    lineNo: payload?.lineNo || '',
+    jobReference: payload?.jobReference || ''
+  };
+  const entries = _prodGetDetailedEntryRowsForRoutingIds_([routingId]).filter(function(entry) {
+    return String(entry.routing_id || '') === routingId && _prodEntryMatchesRowIdentity_(entry, rowIdentity);
+  }).sort(function(a, b) {
+    return String(b.entry_datetime || '').localeCompare(String(a.entry_datetime || ''));
+  });
+  const corrDetailsByEntry = _prodGetCorr2PlyDetailsByEntryIds_(entries.map(function(entry) {
+    return entry.id;
+  }));
+  return entries.map(function(entry) {
+    return _prodBuildAdminEntryView_(entry, corrDetailsByEntry[String(entry.id || '')] || []);
+  });
+}
+
+function prodAdminUpdateEntry(payload, token) {
+  const admin = _requireAdmin_(token);
+  const id = String(payload?.id || '').trim();
+  if (!id) throw new Error('Production entry id is required');
+  const existing = _prodGetDetailedEntryRowById_(id);
+  if (!existing) throw new Error('Production entry not found');
+  const routingId = String(existing.routing_id || '').trim();
+  const routing = (supabaseSelect('work_order_routing', {
+    select: 'id,wo_id,sequence_no,process_name,department',
+    filters: { id: 'eq.' + routingId },
+    limit: 1
+  }) || [])[0] || null;
+  if (!routing) throw new Error('Routing row not found for this production entry');
+  const blockReason = _prodGetEntryMutationBlockReason_(existing, routing);
+  if (blockReason) throw new Error(blockReason);
+  const stageInfo = _prodGetStageInfoForExistingEntry_(existing, routing);
+
+  const entryDate = String(payload?.entryDate || '').trim();
+  const startTime = String(payload?.startTime || '').trim();
+  const endTime = String(payload?.endTime || '').trim();
+  const machine = String(payload?.machine || '').trim();
+  const operator = String(payload?.operator || '').trim();
+  const producedQty = Number(payload?.producedQty || 0);
+  const rejectedQty = Number(payload?.rejectedQty || 0);
+  const downtimeMinutes = Number(payload?.downtimeMinutes || 0);
+  const downtimeReason = String(payload?.downtimeReason || '').trim();
+  const changeReason = String(payload?.changeReason || '').trim();
+
+  if (!entryDate) throw new Error('Entry date is required');
+  if (!startTime) throw new Error('Start time is required');
+  if (!endTime) throw new Error('End time is required');
+  if (!machine) throw new Error('Machine is required');
+  if (!(producedQty > 0)) throw new Error('Produced quantity must be greater than zero');
+  if (rejectedQty > producedQty) throw new Error('Reject exceeds produced');
+  if (!changeReason) throw new Error('Change reason is required');
+  if (producedQty > Number(stageInfo.balanceQty || 0)) {
+    throw new Error('Produced quantity cannot exceed the remaining stage balance for this correction');
+  }
+
+  const startDateTime = new Date(entryDate + 'T' + startTime + ':00');
+  const endDateTime = new Date(entryDate + 'T' + endTime + ':00');
+  if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
+    throw new Error('Enter valid date and time values');
+  }
+  if (endDateTime.getTime() < startDateTime.getTime()) {
+    throw new Error('Job end time cannot be earlier than start time');
+  }
+
+  const parsed = _prodParseEntryNotes_(existing);
+  const updatedPayload = {
+    soNumber: parsed.soNumber || '',
+    lineNo: parsed.lineNo || '',
+    jobReference: parsed.jobReference || '',
+    startDate: startDateTime.toISOString(),
+    endDate: endDateTime.toISOString(),
+    downtimeMinutes: downtimeMinutes,
+    downtimeReason: downtimeReason
+  };
+  const goodQty = Math.max(producedQty - rejectedQty, 0);
+  const updatedNotes = _prodBuildEntryNotes_(updatedPayload);
+  supabaseUpdateMinimal('production_entries', {
+    id: 'eq.' + id
+  }, {
+    entry_datetime: endDateTime.toISOString(),
+    machine: machine,
+    operator_name: operator,
+    produced_qty: producedQty,
+    rejected_qty: rejectedQty,
+    ok_qty: goodQty,
+    downtime_reason: updatedNotes
+  });
+  _prodUpdateCorr2PlyDetailsForEntry_(id, producedQty, rejectedQty);
+  const updated = _prodGetDetailedEntryRowById_(id) || Object.assign({}, existing, {
+    entry_datetime: endDateTime.toISOString(),
+    machine: machine,
+    operator_name: operator,
+    produced_qty: producedQty,
+    rejected_qty: rejectedQty,
+    ok_qty: goodQty,
+    downtime_reason: updatedNotes
+  });
+  _prodAuditEntryChange_('UPDATE', existing, updated, admin.userId || admin.displayName || 'ADMIN', changeReason);
+  _prodBumpQueueVersion_();
+  _opsBumpDatasetVersion_();
+  return { ok: true };
+}
+
+function prodAdminDeleteEntry(entryId, reason, token) {
+  const admin = _requireAdmin_(token);
+  const id = String(entryId || '').trim();
+  const deleteReason = String(reason || '').trim();
+  if (!id) throw new Error('Production entry id is required');
+  if (!deleteReason) throw new Error('Delete reason is required');
+  const existing = _prodGetDetailedEntryRowById_(id);
+  if (!existing) throw new Error('Production entry not found');
+  const routingId = String(existing.routing_id || '').trim();
+  const routing = (supabaseSelect('work_order_routing', {
+    select: 'id,wo_id,sequence_no,process_name,department',
+    filters: { id: 'eq.' + routingId },
+    limit: 1
+  }) || [])[0] || null;
+  if (!routing) throw new Error('Routing row not found for this production entry');
+  const blockReason = _prodGetEntryMutationBlockReason_(existing, routing);
+  if (blockReason) throw new Error(blockReason);
+  _prodAuditEntryChange_('DELETE', existing, null, admin.userId || admin.displayName || 'ADMIN', deleteReason);
+  supabaseDeleteMinimal('production_entries', { id: 'eq.' + id });
+  _prodBumpQueueVersion_();
+  _opsBumpDatasetVersion_();
+  return { ok: true };
+}
 
 function shortCloseStage(routingId, reason, token) {
   _requireModuleAccess_(token, 'PRODUCTION', 'can_edit');
