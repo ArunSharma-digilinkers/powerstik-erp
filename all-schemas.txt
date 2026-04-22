@@ -1887,20 +1887,19 @@ create table public.users (
 ) TABLESPACE pg_default;
 
 
-create view public.v_artwork_jobs
-with
-  (security_invoker = on) as
+create or replace view public.v_artwork_jobs
+with (security_invoker = on) as
 select
   a.id,
   so.so_number,
   so.so_date,
   so.created_at as so_created_at,
   to_char(
-    COALESCE(
+    coalesce(
       so.created_at,
       so.so_date::timestamp without time zone
     ),
-    'HH24:MI'::text
+    'HH24:MI'
   ) as so_time,
   so.sales_rep,
   sol.line_no,
@@ -1936,16 +1935,20 @@ select
   a.artwork_at,
   a.approved_at,
   sol.accounts_status,
-  sol.business_status
-from
-  artworks a
-  join sales_order_lines sol on sol.so_id = a.so_id
-  and sol.line_no = a.line_no
-  join sales_orders so on so.id = a.so_id
-  left join clients c on c.client_code = so.client_code;
+  sol.business_status,
+  coalesce(a.stock_qty_to_bill, 0::numeric) as stock_qty_to_bill,
+  coalesce(sol.job_type, ''::text) as job_type
+from public.artworks a
+join public.sales_order_lines sol
+  on sol.so_id = a.so_id
+ and sol.line_no = a.line_no
+join public.sales_orders so
+  on so.id = a.so_id
+left join public.clients c
+  on c.client_code = so.client_code;
 
 
-create view public.v_artwork_jobs_active as
+create or replace view public.v_artwork_jobs_active as
 select
   aj.id,
   aj.so_number,
@@ -1986,17 +1989,265 @@ select
   aj.artwork_at,
   aj.approved_at,
   aj.accounts_status,
-  aj.business_status
-from
-  v_artwork_jobs aj
-  join sales_orders so on so.so_number = aj.so_number
-  join sales_order_lines sol on sol.so_id = so.id
-  and sol.line_no::text = aj.line_no::text
-where
-  upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text
-  and (
-    upper(COALESCE(sol.status, 'OPEN'::text)) <> all (array['CLOSED'::text, 'CANCELLED'::text])
-  );
+  aj.business_status,
+  aj.stock_qty_to_bill,
+  aj.job_type
+from public.v_artwork_jobs aj
+join public.sales_orders so
+  on so.so_number = aj.so_number
+join public.sales_order_lines sol
+  on sol.so_id = so.id
+ and sol.line_no::text = aj.line_no::text
+where upper(coalesce(so.status, 'OPEN')) <> 'CANCELLED'
+  and upper(coalesce(sol.status, 'OPEN')) not in ('CLOSED', 'CANCELLED');
+
+
+create or replace view public.v_artwork_groups as
+with base as (
+  select *
+  from public.v_artwork_jobs
+  where nullif(trim(artwork_no), '') is not null
+),
+rollup as (
+  select
+    b.artwork_no,
+    min(b.so_date) as so_date,
+    max(nullif(b.product_type, '')) as product_type,
+    max(nullif(b.plate_status, '')) as plate_status,
+    max(nullif(b.die_status, '')) as die_status,
+    max(nullif(b.plate_size, '')) as plate_size,
+    max(b.plate_count) as plate_count,
+    bool_or(coalesce(b.has_hybrid_plate, false)) as has_hybrid_plate,
+    max(nullif(b.hybrid_plate_size, '')) as hybrid_plate_size,
+    max(b.hybrid_plate_count) as hybrid_plate_count,
+    max(b.die_count) as die_count,
+    max(b.sheet_length) as sheet_length,
+    max(b.sheet_width) as sheet_width,
+    max(nullif(b.printing_colors, '')) as printing_colors,
+    max(b.across_ups) as across_ups,
+    max(b.along_ups) as along_ups,
+    max(b.total_ups) as total_ups,
+    max(b.across_width) as across_width,
+    max(b.teeth) as teeth,
+    max(b.across_gap_mm) as across_gap_mm,
+    max(b.along_gap_mm) as along_gap_mm,
+    case
+      when bool_and(upper(coalesce(b.status, 'NO_ART')) = 'APPROVED') then 'APPROVED'
+      when bool_or(upper(coalesce(b.status, 'NO_ART')) = 'PENDING_APPROVAL') then 'PENDING_APPROVAL'
+      when bool_or(upper(coalesce(b.status, 'NO_ART')) = 'APPROVED') then 'PENDING_APPROVAL'
+      else 'NO_ART'
+    end as status,
+    min(b.artwork_at) as artwork_at,
+    max(b.approved_at) as approved_at,
+    count(*)::bigint as job_count,
+    coalesce(sum(coalesce(b.qty, 0::numeric)), 0::numeric) as total_qty,
+    min(coalesce(b.sheet_ups, 0::numeric)) as min_sheet_ups,
+    array_remove(array_agg(distinct nullif(b.so_number, '') order by nullif(b.so_number, '')), null) as so_list,
+    array_remove(array_agg(distinct nullif(b.client_name, '') order by nullif(b.client_name, '')), null) as client_list,
+    array_remove(array_agg(distinct nullif(b.division, '') order by nullif(b.division, '')), null) as division_list,
+    array_remove(array_agg(distinct nullif(b.sales_rep, '') order by nullif(b.sales_rep, '')), null) as sales_rep_list,
+    array_remove(array_agg(distinct nullif(b.job_type, '') order by nullif(b.job_type, '')), null) as job_type_list
+  from base b
+  group by b.artwork_no
+)
+select
+  artwork_no,
+  so_date,
+  product_type,
+  plate_status,
+  die_status,
+  plate_size,
+  plate_count,
+  has_hybrid_plate,
+  hybrid_plate_size,
+  hybrid_plate_count,
+  die_count,
+  sheet_length,
+  sheet_width,
+  printing_colors,
+  across_ups,
+  along_ups,
+  total_ups,
+  across_width,
+  teeth,
+  across_gap_mm,
+  along_gap_mm,
+  status,
+  artwork_at,
+  approved_at,
+  job_count,
+  total_qty,
+  so_list,
+  client_list,
+  division_list,
+  sales_rep_list,
+  job_type_list,
+  case
+  when upper(coalesce(product_type, '')) = 'DIGITAL' then
+    product_type is not null
+    and min_sheet_ups > 0
+  when upper(coalesce(product_type, '')) = 'FLEXO' then
+    product_type is not null
+    and plate_status is not null
+    and die_status is not null
+    and printing_colors is not null
+    and coalesce(across_ups, 0) > 0
+    and coalesce(along_ups, 0) > 0
+    and coalesce(total_ups, 0) > 0
+    and coalesce(across_width, 0) > 0
+    and coalesce(teeth, 0) > 0
+    and coalesce(across_gap_mm, 0) > 0
+    and coalesce(along_gap_mm, 0) > 0
+    and (upper(coalesce(plate_status, '')) <> 'NEW' or coalesce(plate_count, 0) > 0)
+    and (upper(coalesce(die_status, '')) <> 'NEW' or coalesce(die_count, 0) > 0)
+    and min_sheet_ups > 0
+  else
+    product_type is not null
+    and plate_status is not null
+    and die_status is not null
+    and printing_colors is not null
+    and coalesce(sheet_length, 0) > 0
+    and coalesce(sheet_width, 0) > 0
+    and (
+      upper(coalesce(plate_status, '')) <> 'NEW'
+      or (
+        plate_size is not null
+        and coalesce(plate_count, 0) > 0
+        and (
+          not has_hybrid_plate
+          or (hybrid_plate_size is not null and coalesce(hybrid_plate_count, 0) > 0)
+        )
+      )
+    )
+    and (upper(coalesce(die_status, '')) <> 'NEW' or coalesce(die_count, 0) > 0)
+    and min_sheet_ups > 0
+  end as is_ready
+from rollup;
+
+create or replace view public.v_artwork_groups_active as
+with base as (
+  select *
+  from public.v_artwork_jobs_active
+  where nullif(trim(artwork_no), '') is not null
+),
+rollup as (
+  select
+    b.artwork_no,
+    min(b.so_date) as so_date,
+    max(nullif(b.product_type, '')) as product_type,
+    max(nullif(b.plate_status, '')) as plate_status,
+    max(nullif(b.die_status, '')) as die_status,
+    max(nullif(b.plate_size, '')) as plate_size,
+    max(b.plate_count) as plate_count,
+    bool_or(coalesce(b.has_hybrid_plate, false)) as has_hybrid_plate,
+    max(nullif(b.hybrid_plate_size, '')) as hybrid_plate_size,
+    max(b.hybrid_plate_count) as hybrid_plate_count,
+    max(b.die_count) as die_count,
+    max(b.sheet_length) as sheet_length,
+    max(b.sheet_width) as sheet_width,
+    max(nullif(b.printing_colors, '')) as printing_colors,
+    max(b.across_ups) as across_ups,
+    max(b.along_ups) as along_ups,
+    max(b.total_ups) as total_ups,
+    max(b.across_width) as across_width,
+    max(b.teeth) as teeth,
+    max(b.across_gap_mm) as across_gap_mm,
+    max(b.along_gap_mm) as along_gap_mm,
+    case
+      when bool_and(upper(coalesce(b.status, 'NO_ART')) = 'APPROVED') then 'APPROVED'
+      when bool_or(upper(coalesce(b.status, 'NO_ART')) = 'PENDING_APPROVAL') then 'PENDING_APPROVAL'
+      when bool_or(upper(coalesce(b.status, 'NO_ART')) = 'APPROVED') then 'PENDING_APPROVAL'
+      else 'NO_ART'
+    end as status,
+    min(b.artwork_at) as artwork_at,
+    max(b.approved_at) as approved_at,
+    count(*)::bigint as job_count,
+    coalesce(sum(coalesce(b.qty, 0::numeric)), 0::numeric) as total_qty,
+    min(coalesce(b.sheet_ups, 0::numeric)) as min_sheet_ups,
+    array_remove(array_agg(distinct nullif(b.so_number, '') order by nullif(b.so_number, '')), null) as so_list,
+    array_remove(array_agg(distinct nullif(b.client_name, '') order by nullif(b.client_name, '')), null) as client_list,
+    array_remove(array_agg(distinct nullif(b.division, '') order by nullif(b.division, '')), null) as division_list,
+    array_remove(array_agg(distinct nullif(b.sales_rep, '') order by nullif(b.sales_rep, '')), null) as sales_rep_list,
+    array_remove(array_agg(distinct nullif(b.job_type, '') order by nullif(b.job_type, '')), null) as job_type_list
+  from base b
+  group by b.artwork_no
+)
+select
+  artwork_no,
+  so_date,
+  product_type,
+  plate_status,
+  die_status,
+  plate_size,
+  plate_count,
+  has_hybrid_plate,
+  hybrid_plate_size,
+  hybrid_plate_count,
+  die_count,
+  sheet_length,
+  sheet_width,
+  printing_colors,
+  across_ups,
+  along_ups,
+  total_ups,
+  across_width,
+  teeth,
+  across_gap_mm,
+  along_gap_mm,
+  status,
+  artwork_at,
+  approved_at,
+  job_count,
+  total_qty,
+  so_list,
+  client_list,
+  division_list,
+  sales_rep_list,
+  job_type_list,
+  case
+  when upper(coalesce(product_type, '')) = 'DIGITAL' then
+    product_type is not null
+    and min_sheet_ups > 0
+  when upper(coalesce(product_type, '')) = 'FLEXO' then
+    product_type is not null
+    and plate_status is not null
+    and die_status is not null
+    and printing_colors is not null
+    and coalesce(across_ups, 0) > 0
+    and coalesce(along_ups, 0) > 0
+    and coalesce(total_ups, 0) > 0
+    and coalesce(across_width, 0) > 0
+    and coalesce(teeth, 0) > 0
+    and coalesce(across_gap_mm, 0) > 0
+    and coalesce(along_gap_mm, 0) > 0
+    and (upper(coalesce(plate_status, '')) <> 'NEW' or coalesce(plate_count, 0) > 0)
+    and (upper(coalesce(die_status, '')) <> 'NEW' or coalesce(die_count, 0) > 0)
+    and min_sheet_ups > 0
+  else
+    product_type is not null
+    and plate_status is not null
+    and die_status is not null
+    and printing_colors is not null
+    and coalesce(sheet_length, 0) > 0
+    and coalesce(sheet_width, 0) > 0
+    and (
+      upper(coalesce(plate_status, '')) <> 'NEW'
+      or (
+        plate_size is not null
+        and coalesce(plate_count, 0) > 0
+        and (
+          not has_hybrid_plate
+          or (hybrid_plate_size is not null and coalesce(hybrid_plate_count, 0) > 0)
+        )
+      )
+    )
+    and (upper(coalesce(die_status, '')) <> 'NEW' or coalesce(die_count, 0) > 0)
+    and min_sheet_ups > 0
+  end as is_ready
+from rollup;
+
+select pg_notify('pgrst', 'reload schema');
+
 
 
 create view public.v_billing_dispatch_summary
