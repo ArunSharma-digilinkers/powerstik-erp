@@ -1375,7 +1375,7 @@ CREATE FUNCTION public.inv_stock_snapshot(p_location text, p_search text) RETURN
         SUM(l.qty_in)
     END AS avgrate,
 
-    -- Stock value = current qty Ã— avg rate
+    -- Stock value = current qty × avg rate
     SUM(l.qty_in - l.qty_out)
     *
     CASE
@@ -5464,7 +5464,7 @@ CREATE TABLE public.work_order_materials (
 -- Name: COLUMN work_order_materials.sheets; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.work_order_materials.sheets IS 'DEPRECATED â€“ do not use. required_qty + uom is canonical.';
+COMMENT ON COLUMN public.work_order_materials.sheets IS 'DEPRECATED – do not use. required_qty + uom is canonical.';
 
 
 --
@@ -5512,6 +5512,9 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
             wo.wo_number,
             wo.status,
             wo.snapshot_json,
+            NULLIF(upper(TRIM(BOTH FROM COALESCE((wo.snapshot_json #>> '{flexoDetails,itemCode}'::text[]), ''::text))), ''::text) AS flexo_item_code,
+            NULLIF(upper(TRIM(BOTH FROM COALESCE((wo.snapshot_json #>> '{flexoDetails,itemName}'::text[]), ''::text))), ''::text) AS flexo_item_name,
+            COALESCE((NULLIF((wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}'::text[]), ''::text))::numeric, (0)::numeric) AS flexo_running_meter,
             COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text) AS raw_department
            FROM public.work_orders wo
           WHERE (COALESCE(upper(wo.status), ''::text) <> 'CLOSED'::text)
@@ -5533,8 +5536,14 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
             mr.gsm,
             COALESCE(NULLIF(mr.deckle, (0)::numeric), NULLIF((NULLIF(split_part(mr.material_key, '|'::text, 3), ''::text))::numeric, (0)::numeric), (0)::numeric) AS deckle_mm,
             COALESCE(NULLIF(mr.cut_size, (0)::numeric), NULLIF((NULLIF(split_part(mr.material_key, '|'::text, 4), ''::text))::numeric, (0)::numeric), (0)::numeric) AS cut_mm,
-            COALESCE(NULLIF(mr.uom, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 5), ''::text), ''::text) AS uom,
-            COALESCE(mr.required_qty, (0)::numeric) AS required_qty,
+                CASE
+                    WHEN ((upper(wb.raw_department) ~~ '%FLEXO%'::text) AND (wb.flexo_running_meter > (0)::numeric) AND ((upper(COALESCE(NULLIF(mr.item_name, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 1), ''::text), ''::text)) = COALESCE(wb.flexo_item_code, '##'::text)) OR (upper(COALESCE(NULLIF(mr.item_name, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 1), ''::text), ''::text)) = COALESCE(wb.flexo_item_name, '##'::text)))) THEN 'RM'::text
+                    ELSE COALESCE(NULLIF(mr.uom, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 5), ''::text), ''::text)
+                END AS uom,
+                CASE
+                    WHEN ((upper(wb.raw_department) ~~ '%FLEXO%'::text) AND (wb.flexo_running_meter > (0)::numeric) AND ((upper(COALESCE(NULLIF(mr.item_name, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 1), ''::text), ''::text)) = COALESCE(wb.flexo_item_code, '##'::text)) OR (upper(COALESCE(NULLIF(mr.item_name, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 1), ''::text), ''::text)) = COALESCE(wb.flexo_item_name, '##'::text)))) THEN wb.flexo_running_meter
+                    ELSE COALESCE(mr.required_qty, (0)::numeric)
+                END AS required_qty,
             COALESCE(ir.issued_qty, (0)::numeric) AS issued_qty
            FROM ((wo_base wb
              JOIN material_rows mr ON ((mr.wo_id = wb.id)))
@@ -7924,6 +7933,144 @@ CREATE VIEW public.v_packing_board WITH (security_invoker='on') AS
      LEFT JOIN prod ON (((prod.wo_id = woj.wo_id) AND (prod.rn = 1))))
      LEFT JOIN pack ON (((pack.so_number = woj.so_number) AND (pack.line_no = woj.line_no))))
   WHERE (COALESCE(prod.produced_qty, (0)::numeric) > COALESCE(pack.packed_qty, (0)::numeric));
+
+
+--
+-- Name: v_pr_po_receipt_cycle; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_pr_po_receipt_cycle WITH (security_invoker='on') AS
+ WITH receipt_by_line AS (
+         SELECT r_1.po_line_id,
+            (count(*))::integer AS receipt_count,
+            (sum(COALESCE(r_1.qty, (0)::numeric)))::numeric(14,4) AS line_received_qty,
+            max(r_1.receipt_date) AS latest_receipt_date,
+            jsonb_agg(jsonb_build_object('receiptId', (r_1.id)::text, 'poId', COALESCE((r_1.po_id)::text, ''::text), 'poNo', COALESCE(r_1.po_no, ''::text), 'poLineId', COALESCE((r_1.po_line_id)::text, ''::text), 'lineNo', COALESCE(r_1.line_no, 0), 'sourceType', COALESCE(r_1.source_type, ''::text), 'receiptDate', r_1.receipt_date, 'challanNo', COALESCE(r_1.challan_no, ''::text), 'qty', COALESCE(r_1.qty, (0)::numeric), 'rate', COALESCE(r_1.rate, (0)::numeric), 'remarks', COALESCE(r_1.remarks, ''::text), 'createdAt', r_1.created_at) ORDER BY r_1.receipt_date DESC, r_1.created_at DESC, r_1.id DESC) AS receipt_entries
+           FROM public.purchase_po_receipts r_1
+          GROUP BY r_1.po_line_id
+        ), po_by_pr AS (
+         SELECT pol_1.source_ref AS pr_no,
+            (count(DISTINCT pol_1.po_id))::integer AS po_count,
+            (count(*))::integer AS po_line_count,
+            string_agg(DISTINCT pol_1.po_no, ', '::text ORDER BY pol_1.po_no) FILTER (WHERE (COALESCE(pol_1.po_no, ''::text) <> ''::text)) AS po_refs,
+            (sum(COALESCE(pol_1.qty, (0)::numeric)))::numeric(14,4) AS total_ordered_qty,
+            (sum(COALESCE(rbl_1.line_received_qty, (0)::numeric)))::numeric(14,4) AS total_po_received_qty,
+            max(rbl_1.latest_receipt_date) AS latest_po_receipt_date
+           FROM (public.purchase_order_lines pol_1
+             LEFT JOIN receipt_by_line rbl_1 ON ((rbl_1.po_line_id = pol_1.id)))
+          WHERE ((upper(COALESCE(pol_1.source_type, ''::text)) = 'INVENTORY_PR'::text) AND (COALESCE(pol_1.source_ref, ''::text) <> ''::text))
+          GROUP BY pol_1.source_ref
+        ), direct_pr_receipts AS (
+         SELECT l.ref_no AS pr_no,
+            (count(*))::integer AS direct_receipt_count,
+            (sum(COALESCE(l.qty_in, (0)::numeric)))::numeric(14,4) AS direct_received_qty,
+            max(l.created_at) AS latest_direct_receipt_at
+           FROM public.inv_ledger l
+          WHERE ((upper(COALESCE(l.ref_type, ''::text)) = 'PR-RECEIPT'::text) AND (COALESCE(l.ref_no, ''::text) <> ''::text) AND (COALESCE(l.qty_in, (0)::numeric) > (0)::numeric))
+          GROUP BY l.ref_no
+        )
+ SELECT (pr.id)::text AS pr_id,
+    pr.pr_no,
+    pr.created_at AS pr_created_at,
+    pr.closed_at AS pr_closed_at,
+    COALESCE(pr.status, 'OPEN'::text) AS pr_status,
+    COALESCE(pr.item_code, i.item_code, ''::text) AS pr_item_code,
+    COALESCE(pr.item_name, i.item_name, ''::text) AS pr_item_name,
+    COALESCE(i.category, ''::text) AS item_category,
+    COALESCE(i.uom, ''::text) AS uom,
+    COALESCE(pr.department, ''::text) AS pr_department,
+    COALESCE(pr.job_ref, ''::text) AS pr_job_ref,
+    COALESCE(pr.remarks, ''::text) AS pr_remarks,
+    (COALESCE(pr.requested_qty, (0)::numeric))::numeric(14,4) AS pr_requested_qty,
+    (COALESCE(pr.received_qty, (0)::numeric))::numeric(14,4) AS pr_received_qty,
+    (GREATEST((COALESCE(pr.requested_qty, (0)::numeric) - COALESCE(pr.received_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS pr_pending_receipt_qty,
+    (COALESCE(pbp.total_ordered_qty, (0)::numeric))::numeric(14,4) AS pr_ordered_qty,
+    (GREATEST((COALESCE(pr.requested_qty, (0)::numeric) - COALESCE(pbp.total_ordered_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS pr_pending_to_order_qty,
+    (COALESCE(pbp.total_po_received_qty, (0)::numeric))::numeric(14,4) AS pr_po_received_qty,
+    (GREATEST((COALESCE(pbp.total_ordered_qty, (0)::numeric) - COALESCE(pbp.total_po_received_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS pr_open_po_qty,
+    (COALESCE(dpr.direct_received_qty, (0)::numeric))::numeric(14,4) AS pr_direct_received_qty,
+    COALESCE(pbp.po_count, 0) AS pr_po_count,
+    COALESCE(pbp.po_line_count, 0) AS pr_po_line_count,
+    COALESCE(dpr.direct_receipt_count, 0) AS pr_direct_receipt_count,
+    COALESCE(pbp.po_refs, ''::text) AS pr_po_refs,
+    pbp.latest_po_receipt_date AS pr_latest_po_receipt_date,
+    dpr.latest_direct_receipt_at AS pr_latest_direct_receipt_at,
+    (po.id)::text AS po_id,
+    po.po_no,
+    po.order_date AS po_order_date,
+    COALESCE(po.status, ''::text) AS po_status,
+    (po.vendor_id)::text AS vendor_id,
+    COALESCE(po.vendor_name, v.vendor_name, ''::text) AS vendor_name,
+    COALESCE(v.vendor_code, ''::text) AS vendor_code,
+    COALESCE(v.gstin, ''::text) AS vendor_gstin,
+    COALESCE(po.payment_terms, ''::text) AS payment_terms,
+    COALESCE(po.delivery_terms, ''::text) AS delivery_terms,
+    COALESCE(po.freight_terms, ''::text) AS freight_terms,
+    (COALESCE(po.freight_value, (0)::numeric))::numeric(18,2) AS freight_value,
+    COALESCE(po.created_by, ''::text) AS po_created_by,
+    po.created_at AS po_created_at,
+    po.updated_at AS po_updated_at,
+    (pol.id)::text AS po_line_id,
+    pol.line_no AS po_line_no,
+    COALESCE(pol.source_type, ''::text) AS po_source_type,
+    COALESCE(pol.source_ref, ''::text) AS po_source_ref,
+    COALESCE(pol.item_code, ''::text) AS po_item_code,
+    COALESCE(pol.item_name, ''::text) AS po_item_name,
+    COALESCE(pol.department, ''::text) AS po_line_department,
+    COALESCE(pol.job_ref, ''::text) AS po_line_job_ref,
+    COALESCE(pol.remarks, ''::text) AS po_line_remarks,
+    (COALESCE(pol.qty, (0)::numeric))::numeric(14,4) AS po_line_ordered_qty,
+    (COALESCE(pol.rate, (0)::numeric))::numeric(18,2) AS po_line_rate,
+    (COALESCE(pol.tax_pct, (0)::numeric))::numeric(8,2) AS po_line_tax_pct,
+    (COALESCE(pol.amount, (0)::numeric))::numeric(18,2) AS po_line_amount,
+    (COALESCE(pol.tax_amount, (0)::numeric))::numeric(18,2) AS po_line_tax_amount,
+    (COALESCE(pol.total_amount, pol.amount, (0)::numeric))::numeric(18,2) AS po_line_total_amount,
+    (COALESCE(rbl.line_received_qty, (0)::numeric))::numeric(14,4) AS po_line_received_qty,
+    (GREATEST((COALESCE(pol.qty, (0)::numeric) - COALESCE(rbl.line_received_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS po_line_pending_qty,
+    (GREATEST((COALESCE(rbl.line_received_qty, (0)::numeric) - COALESCE(pol.qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS po_line_over_received_qty,
+    COALESCE(rbl.receipt_count, 0) AS po_line_receipt_count,
+    rbl.latest_receipt_date AS po_line_latest_receipt_date,
+    COALESCE(rbl.receipt_entries, '[]'::jsonb) AS po_line_receipt_entries,
+    (r.id)::text AS receipt_id,
+    r.receipt_date,
+    r.created_at AS receipt_created_at,
+    COALESCE(r.challan_no, ''::text) AS receipt_challan_no,
+    (COALESCE(r.qty, (0)::numeric))::numeric(14,4) AS receipt_qty,
+    (COALESCE(r.rate, (0)::numeric))::numeric(18,2) AS receipt_rate,
+    ((COALESCE(r.qty, (0)::numeric) * COALESCE(r.rate, (0)::numeric)))::numeric(18,2) AS receipt_value,
+    COALESCE(r.remarks, ''::text) AS receipt_remarks,
+        CASE
+            WHEN (pol.id IS NULL) THEN 'PR_PENDING_PO'::text
+            WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) <= (0)::numeric) THEN 'PO_PENDING_RECEIPT'::text
+            WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) < COALESCE(pol.qty, (0)::numeric)) THEN 'PO_PARTIAL_RECEIPT'::text
+            WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) = COALESCE(pol.qty, (0)::numeric)) THEN 'PO_RECEIVED'::text
+            WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) > COALESCE(pol.qty, (0)::numeric)) THEN 'PO_OVER_RECEIVED'::text
+            ELSE 'UNKNOWN'::text
+        END AS cycle_status,
+        CASE
+            WHEN (pol.id IS NULL) THEN 1
+            WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) <= (0)::numeric) THEN 2
+            WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) < COALESCE(pol.qty, (0)::numeric)) THEN 3
+            WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) = COALESCE(pol.qty, (0)::numeric)) THEN 4
+            WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) > COALESCE(pol.qty, (0)::numeric)) THEN 5
+            ELSE 9
+        END AS cycle_status_rank
+   FROM ((((((((public.inv_purchase_requests pr
+     LEFT JOIN public.inv_items i ON ((i.id = pr.item_id)))
+     LEFT JOIN po_by_pr pbp ON ((pbp.pr_no = pr.pr_no)))
+     LEFT JOIN direct_pr_receipts dpr ON ((dpr.pr_no = pr.pr_no)))
+     LEFT JOIN public.purchase_order_lines pol ON (((upper(COALESCE(pol.source_type, ''::text)) = 'INVENTORY_PR'::text) AND (pol.source_ref = pr.pr_no))))
+     LEFT JOIN public.purchase_orders po ON ((po.id = pol.po_id)))
+     LEFT JOIN public.purchase_vendors v ON ((v.id = po.vendor_id)))
+     LEFT JOIN receipt_by_line rbl ON ((rbl.po_line_id = pol.id)))
+     LEFT JOIN public.purchase_po_receipts r ON ((r.po_line_id = pol.id)));
+
+
+--
+-- Name: VIEW v_pr_po_receipt_cycle; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_pr_po_receipt_cycle IS 'End-to-end inventory purchase traceability from PR to PO line to PO receipt, preserving PRs without PO and PO lines without receipt.';
 
 
 --
