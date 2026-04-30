@@ -6705,7 +6705,7 @@ CREATE VIEW public.v_artwork_jobs WITH (security_invoker='on') AS
     so.so_number,
     so.so_date,
     so.created_at AS so_created_at,
-    to_char(COALESCE(so.created_at, (so.so_date)::timestamp without time zone), 'HH24:MI'::text) AS so_time,
+    to_char(COALESCE(((so.created_at AT TIME ZONE 'UTC'::text) AT TIME ZONE 'Asia/Kolkata'::text), (so.so_date)::timestamp without time zone), 'HH24:MI'::text) AS so_time,
     so.sales_rep,
     sol.line_no,
     c.client_name,
