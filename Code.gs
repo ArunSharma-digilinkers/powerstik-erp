@@ -622,7 +622,7 @@ const DEFAULT_MASTERS = {
   units: ['Pcs','Kgs','Meter'],
   rateTypes: ['Unit','Per Unit','Unit Cost','1000 Unit','100 Unit','Per 1000','Per 100','TOTAL'],
   currencies: ['INR','USD'],
-  jobTypes: ['New','Old','Old-Revised','Repeat','Reprint'],
+  jobTypes: ['New','Repeat'],
   jobRefs: ['Approved Dummy','Approved Ferrow','Approved Shade Card','As per Old Sample','Customer Sample','Existing Printed Sample','Shade Card'],
   jobPrios: ['Normal','Low','Medium','High'],
   companyState: COMPANY_STATE,
@@ -1959,11 +1959,35 @@ const PURCHASE_COMPANY = {
   receiverName: 'DESIGN INDIA',
   deliveryName: 'DESIGN INDIA'
 };
+const PURCHASE_FREIGHT_GST_PCT = 18;
+
+function _purchaseFreightTaxBreakup_(vendorState, freightValue) {
+  const amount = Math.max(0, Number(freightValue || 0));
+  const gstPct = amount > 0 ? PURCHASE_FREIGHT_GST_PCT : 0;
+  const intra = String(vendorState || '').trim().toLowerCase() === String(PURCHASE_COMPANY.state || '').trim().toLowerCase();
+  const cgstPct = intra ? gstPct / 2 : 0;
+  const sgstPct = intra ? gstPct / 2 : 0;
+  const igstPct = intra ? 0 : gstPct;
+  const cgstAmt = +(amount * cgstPct / 100).toFixed(2);
+  const sgstAmt = +(amount * sgstPct / 100).toFixed(2);
+  const igstAmt = +(amount * igstPct / 100).toFixed(2);
+  return {
+    gstPct: gstPct,
+    cgstPct: cgstPct,
+    sgstPct: sgstPct,
+    igstPct: igstPct,
+    cgstAmt: cgstAmt,
+    sgstAmt: sgstAmt,
+    igstAmt: igstAmt,
+    taxAmount: +(cgstAmt + sgstAmt + igstAmt).toFixed(2),
+    totalAmount: +(amount + cgstAmt + sgstAmt + igstAmt).toFixed(2)
+  };
+}
 
 function _purchaseListVendors_() {
-  return (supabaseSelect('purchase_vendors', {
+  return (_supabaseSelectAll_('purchase_vendors', {
     order: 'vendor_name.asc'
-  }) || []).map(v => ({
+  }, 1000, 50000) || []).map(v => ({
     id: v.id,
     vendorCode: v.vendor_code || '',
     vendorName: v.vendor_name || '',
@@ -1983,9 +2007,9 @@ function _purchaseListVendors_() {
 }
 
 function _purchaseListPOHeaders_() {
-  return (supabaseSelect('purchase_orders', {
+  return (_supabaseSelectAll_('purchase_orders', {
     order: 'order_date.desc,created_at.desc'
-  }) || []).map(h => ({
+  }, 1000, 50000) || []).map(h => ({
     id: h.id,
     poNo: h.po_no,
     orderDate: h.order_date,
@@ -2011,9 +2035,9 @@ function _purchaseListPOHeaders_() {
 }
 
 function _purchaseListPOLines_() {
-  return (supabaseSelect('purchase_order_lines', {
+  return (_supabaseSelectAll_('purchase_order_lines', {
     order: 'po_no.asc,line_no.asc'
-  }) || []).map(l => ({
+  }, 1000, 50000) || []).map(l => ({
     id: l.id,
     poId: l.po_id,
     poNo: l.po_no,
@@ -2035,11 +2059,61 @@ function _purchaseListPOLines_() {
   }));
 }
 
-function _purchaseListPOReceipts_() {
+function _purchaseIsCancelledStatus_(status) {
+  return String(status || '').trim().toUpperCase() === 'CANCELLED';
+}
+
+function _purchaseBuildActivePRPoLineMap_(prNos, receiptSeed) {
+  const wanted = Array.isArray(prNos)
+    ? new Set(prNos.map(function(v) { return String(v || '').trim(); }).filter(Boolean))
+    : null;
+  const headerMap = {};
+  const headerByNo = {};
+  _purchaseListPOHeaders_().forEach(function(header) {
+    if (header.id) headerMap[String(header.id)] = header;
+    if (header.poNo) headerByNo[String(header.poNo)] = header;
+  });
+
+  const receiptPool = Object.assign({}, receiptSeed || {});
+  const result = {};
+  _purchaseListPOLines_()
+    .filter(function(line) {
+      if (String(line.sourceType || '').toUpperCase() !== 'INVENTORY_PR') return false;
+      const prNo = String(line.sourceRef || '').trim();
+      if (!prNo) return false;
+      if (wanted && !wanted.has(prNo)) return false;
+      const header = headerMap[String(line.poId || '')] || headerByNo[String(line.poNo || '')] || {};
+      return !_purchaseIsCancelledStatus_(header.status);
+    })
+    .sort(function(a, b) {
+      return String(a.createdAt || '').localeCompare(String(b.createdAt || '')) ||
+        Number(a.lineNo || 0) - Number(b.lineNo || 0);
+    })
+    .forEach(function(line) {
+      const prNo = String(line.sourceRef || '').trim();
+      const poolQty = Number(receiptPool[prNo] || 0);
+      const allocated = Math.min(Number(line.qty || 0), poolQty);
+      receiptPool[prNo] = Math.max(0, poolQty - allocated);
+      if (!result[prNo]) {
+        result[prNo] = { orderedQty: 0, openPOQty: 0, refs: [], latestRate: 0, latestTaxPct: 0 };
+      }
+      result[prNo].orderedQty += Number(line.qty || 0);
+      result[prNo].openPOQty += Math.max(0, Number(line.qty || 0) - allocated);
+      result[prNo].latestRate = Number(line.rate || 0) || result[prNo].latestRate;
+      result[prNo].latestTaxPct = Number(line.taxPct || 0) || result[prNo].latestTaxPct;
+      if (line.poNo && result[prNo].refs.indexOf(line.poNo) === -1) {
+        result[prNo].refs.push(line.poNo);
+      }
+    });
+  return result;
+}
+
+function _purchaseListPOReceipts_(opts) {
+  opts = opts || {};
   try {
-    return (supabaseSelect('purchase_po_receipts', {
+    const rows = (_supabaseSelectAll_('purchase_po_receipts', {
       order: 'receipt_date.desc,created_at.desc'
-    }) || []).map(r => ({
+    }, 1000, 50000) || []).map(r => ({
       id: r.id,
       poId: r.po_id || '',
       poNo: r.po_no || '',
@@ -2053,6 +2127,73 @@ function _purchaseListPOReceipts_() {
       remarks: r.remarks || '',
       createdAt: r.created_at || ''
     }));
+    if (opts.includeReversed === true) {
+      return rows;
+    }
+
+    const reversedRows = _supabaseSelectAll_('inv_ledger', {
+      select: 'id,ref_no,ref_type,created_at',
+      filters: { ref_type: 'eq.REV-PO-RECEIPT' },
+      order: 'created_at.desc'
+    }, 1000, 20000) || [];
+    const originalIds = [...new Set(reversedRows.map(function(row) {
+      return String(row.ref_no || '').trim();
+    }).filter(Boolean))];
+    if (!originalIds.length || !rows.length) {
+      return rows;
+    }
+
+    const originalLedgerRows = [];
+    const chunkSize = 200;
+    for (let i = 0; i < originalIds.length; i += chunkSize) {
+      const chunk = originalIds.slice(i, i + chunkSize);
+      const chunkRows = supabaseSelect('inv_ledger', {
+        select: `
+          id,
+          item_id,
+          created_at,
+          ref_type,
+          ref_no,
+          qty_in,
+          rate,
+          department,
+          inv_items!inv_ledger_item_id_fkey (
+            item_code
+          )
+        `,
+        filters: { id: _supabaseInFilter_(chunk) },
+        order: 'created_at.asc',
+        limit: 5000
+      }) || [];
+      chunkRows.forEach(function(row) {
+        if (String(row.ref_type || '').trim().toUpperCase() === 'PO-RECEIPT') {
+          originalLedgerRows.push(row);
+        }
+      });
+    }
+    if (!originalLedgerRows.length) {
+      return rows;
+    }
+
+    const lineRows = _purchaseListPOLines_();
+    const consumedReceiptIds = {};
+    originalLedgerRows.forEach(function(ledgerRow) {
+      const itemCode = String(ledgerRow?.inv_items?.item_code || '').trim();
+      const candidateRows = rows.filter(function(receiptRow) {
+        return !consumedReceiptIds[String(receiptRow.id || '').trim()];
+      });
+      const match = invFindMatchingPOReceiptRecord_(ledgerRow, itemCode, {
+        receiptRows: candidateRows,
+        lineRows: lineRows
+      });
+      if (match?.row?.id) {
+        consumedReceiptIds[String(match.row.id || '').trim()] = true;
+      }
+    });
+
+    return rows.filter(function(row) {
+      return !consumedReceiptIds[String(row.id || '').trim()];
+    });
   } catch (e) {
     Logger.log('purchase_po_receipts lookup failed: ' + e.message);
     return [];
@@ -2094,7 +2235,8 @@ function _purchasePlateDieTypeFromSource_(sourceType) {
   return '';
 }
 
-function _purchaseNormalizeDirectLine_(line, fallbackSourceType, lineNo, poNo, now) {
+function _purchaseNormalizeDirectLine_(line, fallbackSourceType, lineNo, poNo, now, opts) {
+  opts = opts || {};
   const qty = Number(line.qty || 0);
   const rate = Number(line.rate || 0);
   const taxPct = Number(line.taxPct || 0);
@@ -2107,7 +2249,7 @@ function _purchaseNormalizeDirectLine_(line, fallbackSourceType, lineNo, poNo, n
   const taxAmount = Number((basicAmount * taxPct / 100).toFixed(2));
   const totalAmount = Number((basicAmount + taxAmount).toFixed(2));
   return {
-    id: String(line.id || Utilities.getUuid()),
+    id: opts.keepId ? String(line.id || Utilities.getUuid()) : Utilities.getUuid(),
     poNo: poNo,
     lineNo: lineNo,
     sourceType: String(line.sourceType || fallbackSourceType || 'DIRECT').trim().toUpperCase(),
@@ -2406,10 +2548,13 @@ function purchaseSaveLeadTimeBulk(payload) {
 function purchaseListInventoryRequestsJSON(opts = {}) {
   const filters = {};
   const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
+  const forceRefresh = opts.forceRefresh === true;
   const targetPrNos = Array.isArray(opts.prNos)
     ? [...new Set(opts.prNos.map(function(v) { return String(v || '').trim(); }).filter(Boolean))]
     : [];
-  const requestLimit = Math.max(targetPrNos.length || 0, Math.max(1, Number(opts.limit || 300) || 300));
+  const hasDateFilter = !!(opts.fromDate || opts.toDate);
+  const defaultLimit = hasDateFilter ? 50000 : 1000;
+  const requestLimit = Math.max(targetPrNos.length || 0, Math.max(1, Number(opts.limit || defaultLimit) || defaultLimit));
   const cacheKey = _cacheKeyHash_('PURCHASE_REQUESTS_OPEN', JSON.stringify({
     v: purchaseCacheVersion,
     status: String(opts.status || ''),
@@ -2420,12 +2565,14 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
     limit: requestLimit
   }));
   const cache = CacheService.getScriptCache();
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    try {
-      return JSON.parse(cached);
-    } catch (err) {
-      cache.remove(cacheKey);
+  if (!forceRefresh) {
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      try {
+        return JSON.parse(cached);
+      } catch (err) {
+        cache.remove(cacheKey);
+      }
     }
   }
 
@@ -2440,38 +2587,57 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
   }
 
   let viewRows = null;
-  try {
-    viewRows = supabaseSelect('v_purchase_requests_open', {
-      filters: filters,
-      order: 'created_at.desc',
-      limit: requestLimit
-    }) || [];
-  } catch (err) {
-    viewRows = null;
+  if (opts.pendingOnly !== true) {
+    try {
+      viewRows = _supabaseSelectAll_('v_purchase_requests_open', {
+        filters: filters,
+        order: 'created_at.desc'
+      }, 1000, requestLimit) || [];
+    } catch (err) {
+      viewRows = null;
+    }
   }
   if (viewRows !== null) {
+    const itemCodes = [...new Set(viewRows.map(function(r) {
+      return String(r.item_code || '').trim();
+    }).filter(Boolean))];
+    const itemUomMap = {};
+    if (itemCodes.length) {
+      (_supabaseSelectByKeyInBatches_('inv_items', 'item_code,uom', 'item_code', itemCodes, null, 40) || []).forEach(function(item) {
+        itemUomMap[item.item_code] = String(item.uom || '').trim();
+      });
+    }
+    const receiptSeed = {};
+    viewRows.forEach(function(r) {
+      if (r.pr_no) receiptSeed[r.pr_no] = Number(r.received_qty || 0);
+    });
+    const activePoLineMap = _purchaseBuildActivePRPoLineMap_(viewRows.map(function(r) {
+      return r.pr_no;
+    }), receiptSeed);
     const normalized = viewRows.map(function(r) {
-      const poRefs = String(r.po_refs || '').trim()
-        ? String(r.po_refs).split(',').map(function(v) { return String(v || '').trim(); }).filter(Boolean)
-        : [];
+      const linked = activePoLineMap[r.pr_no] || { orderedQty: 0, openPOQty: 0, refs: [], latestRate: 0, latestTaxPct: 0 };
+      const requestedQty = Number(r.requested_qty || 0);
+      const receivedQty = Number(r.received_qty || 0);
+      const pendingReceiptQty = Math.max(0, requestedQty - receivedQty);
       return {
         prNo: r.pr_no,
         date: r.created_at,
         itemCode: r.item_code,
         itemName: r.item_name,
-        requestedQty: Number(r.requested_qty || 0),
-        receivedQty: Number(r.received_qty || 0),
-        pendingReceiptQty: Math.max(0, Number(r.requested_qty || 0) - Number(r.received_qty || 0)),
-        orderedQty: Number(r.ordered_qty || r.pending_qty || 0),
-        openPOQty: Number(r.open_po_qty || 0),
-        poRate: Number(r.po_rate || 0),
-        taxPct: Number(r.tax_pct || 0),
-        availableToOrderQty: Number(r.available_to_order_qty || 0),
+        requestedQty: requestedQty,
+        receivedQty: receivedQty,
+        pendingReceiptQty: pendingReceiptQty,
+        orderedQty: Number(linked.orderedQty || 0),
+        openPOQty: Number(linked.openPOQty || 0),
+        uom: String(r.uom || itemUomMap[r.item_code] || '').trim(),
+        poRate: Number(linked.latestRate || 0),
+        taxPct: Number(linked.latestTaxPct || r.tax_pct || 0),
+        availableToOrderQty: Math.max(0, pendingReceiptQty - Number(linked.openPOQty || 0)),
         department: r.department || '',
         jobRef: r.job_ref || '',
         remarks: r.remarks || '',
         status: r.status || 'OPEN',
-        poRefs: poRefs
+        poRefs: linked.refs || []
       };
     });
 
@@ -2484,10 +2650,6 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
     _putCachedJson_(cacheKey, result, 120);
     return result;
   }
-
-  const poLinesSorted = _purchaseListPOLines_()
-    .slice()
-    .sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')) || Number(a.lineNo || 0) - Number(b.lineNo || 0));
 
   const rows = supabaseSelect('inv_purchase_requests', {
     select: `
@@ -2509,9 +2671,11 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
 
   const itemCodes = [...new Set(rows.map(r => r.item_code).filter(Boolean))];
   const itemTaxMap = {};
+  const itemUomMap = {};
   if (itemCodes.length) {
     (_supabaseSelectByKeyInBatches_('inv_items', '*', 'item_code', itemCodes, null, 40) || []).forEach(item => {
       itemTaxMap[item.item_code] = _purchaseItemTaxPct_(item);
+      itemUomMap[item.item_code] = String(item.uom || item.unit || '').trim();
     });
   }
 
@@ -2520,24 +2684,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
     prReceiptMap[r.pr_no] = Number(r.received_qty || 0);
   });
 
-  const poLineMap = {};
-  poLinesSorted.forEach(line => {
-    if (!line.sourceRef) return;
-    const receiptPool = Number(prReceiptMap[line.sourceRef] || 0);
-    const allocated = Math.min(Number(line.qty || 0), receiptPool);
-    prReceiptMap[line.sourceRef] = Math.max(0, receiptPool - allocated);
-
-    if (!poLineMap[line.sourceRef]) {
-      poLineMap[line.sourceRef] = { orderedQty: 0, openPOQty: 0, refs: [], latestRate: 0 };
-    }
-
-    poLineMap[line.sourceRef].orderedQty += Number(line.qty || 0);
-    poLineMap[line.sourceRef].openPOQty += Math.max(0, Number(line.qty || 0) - allocated);
-    poLineMap[line.sourceRef].latestRate = Number(line.rate || 0) || poLineMap[line.sourceRef].latestRate;
-    if (line.poNo && !poLineMap[line.sourceRef].refs.includes(line.poNo)) {
-      poLineMap[line.sourceRef].refs.push(line.poNo);
-    }
-  });
+  const poLineMap = _purchaseBuildActivePRPoLineMap_(rows.map(function(r) { return r.pr_no; }), prReceiptMap);
 
   const normalized = rows.map(r => {
       const linked = poLineMap[r.pr_no] || { orderedQty: 0, openPOQty: 0, refs: [], latestRate: 0 };
@@ -2556,6 +2703,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
         pendingReceiptQty: pendingReceiptQty,
         orderedQty: orderedQty,
         openPOQty: openPOQty,
+        uom: String(itemUomMap[r.item_code] || '').trim(),
         poRate: Number(linked.latestRate || 0),
         taxPct: Number(itemTaxMap[r.item_code] || 0),
         availableToOrderQty: Math.max(0, pendingReceiptQty - openPOQty),
@@ -2577,9 +2725,13 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
 }
 
 function purchaseListPOsJSON(opts = {}) {
-  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { opts: opts || {} });
-  const cached = _getCachedJson_(cacheKey);
-  if (cached) return cached;
+  const forceRefresh = opts.forceRefresh === true;
+  const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
+  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { v: purchaseCacheVersion, opts: opts || {} });
+  if (!forceRefresh) {
+    const cached = _getCachedJson_(cacheKey);
+    if (cached) return cached;
+  }
 
   const receiptRows = _purchaseListPOReceipts_();
   const receiptEntriesByLine = {};
@@ -2590,10 +2742,10 @@ function purchaseListPOsJSON(opts = {}) {
     receiptEntriesByLine[lineId].push(row);
   });
 
-  const prRows = supabaseSelect('inv_purchase_requests', {
+  const prRows = _supabaseSelectAll_('inv_purchase_requests', {
     select: 'pr_no,received_qty',
     order: 'created_at.asc'
-  }) || [];
+  }, 1000, 50000) || [];
 
   const buildPrReceiptPool = function() {
     const pool = {};
@@ -2607,10 +2759,10 @@ function purchaseListPOsJSON(opts = {}) {
   try {
     const viewFilters = {};
     if (opts.poNo) viewFilters.po_no = 'eq.' + String(opts.poNo || '').trim();
-    viewRows = supabaseSelect('v_purchase_orders_read_model', {
+    viewRows = _supabaseSelectAll_('v_purchase_orders_read_model', {
       filters: viewFilters,
       order: 'order_date.desc,created_at.desc,line_no.asc'
-    }) || [];
+    }, 1000, 50000) || [];
   } catch (err) {
     viewRows = null;
   }
@@ -2636,6 +2788,7 @@ function purchaseListPOsJSON(opts = {}) {
           basicTotal: 0,
           taxTotal: 0,
           totalValue: 0,
+          storedTotalValue: Number(row.total_value || 0),
           buyerName: row.created_by || '',
           paymentTerms: row.payment_terms || '',
           freightTerms: row.freight_terms || '',
@@ -2661,12 +2814,10 @@ function purchaseListPOsJSON(opts = {}) {
         const poolQty = prNo ? Number(receiptPool[prNo] || 0) : 0;
         derivedReceived = prNo ? Math.min(Number(row.qty || 0), poolQty) : 0;
         if (prNo) receiptPool[prNo] = Math.max(0, poolQty - derivedReceived);
-      } else if (liveEntries.length) {
+      } else {
         derivedReceived = liveEntries.reduce(function(sum, entry) {
           return sum + Number(entry.qty || 0);
         }, 0);
-      } else {
-        derivedReceived = Number(row.received_qty || 0);
       }
       const pendingQty = Math.max(0, Number(row.qty || 0) - derivedReceived);
       const line = {
@@ -2691,7 +2842,7 @@ function purchaseListPOsJSON(opts = {}) {
         receivedQty: derivedReceived,
         pendingQty: pendingQty,
         overReceivedQty: Math.max(0, derivedReceived - Number(row.qty || 0)),
-        receiptEntries: liveEntries.length ? liveEntries : inlineEntries
+        receiptEntries: liveEntries.length ? liveEntries : []
       };
       group.lines.push(line);
       group.lineCount += 1;
@@ -2713,14 +2864,22 @@ function purchaseListPOsJSON(opts = {}) {
     const rows = Object.keys(grouped)
       .map(function(poNo) {
         const row = grouped[poNo];
-        row.status = _purchaseDerivePOStatus_(row.totalQty, row.receivedQty);
-        row.pendingQty = Math.max(0, row.totalQty - row.receivedQty);
-        row.totalValue = row.totalValue + Number(row.freightValue || 0);
+        if (_purchaseIsCancelledStatus_(row.storedStatus)) {
+          row.status = 'CANCELLED';
+          row.pendingQty = 0;
+          row.lines = (row.lines || []).map(function(line) {
+            return Object.assign({}, line, { pendingQty: 0 });
+          });
+        } else {
+          row.status = _purchaseDerivePOStatus_(row.totalQty, row.receivedQty);
+          row.pendingQty = Math.max(0, row.totalQty - row.receivedQty);
+        }
+        row.totalValue = Number(row.storedTotalValue || 0) || (row.totalValue + Number(row.freightValue || 0));
         return row;
       })
       .filter(function(row) {
         if (opts.poNo && String(row.poNo || '') !== String(opts.poNo || '').trim()) return false;
-        if (opts.pendingOnly) return Number(row.pendingQty || 0) > 0;
+        if (opts.pendingOnly) return !_purchaseIsCancelledStatus_(row.status) && Number(row.pendingQty || 0) > 0;
         const rowDate = row.orderDate ? new Date(row.orderDate) : null;
         if (opts.fromDate && rowDate && rowDate < new Date(opts.fromDate + 'T00:00:00')) return false;
         if (opts.toDate && rowDate && rowDate > new Date(opts.toDate + 'T23:59:59')) return false;
@@ -2775,11 +2934,14 @@ function purchaseListPOsJSON(opts = {}) {
       const basicTotal = normalizedLines.reduce((sum, line) => sum + Number(line.amount || 0), 0);
       const taxTotal = normalizedLines.reduce((sum, line) => sum + Number(line.taxAmount || 0), 0);
       const freightValue = Number(header.freightValue || 0);
-      const totalValue = normalizedLines.reduce((sum, line) => sum + Number(line.totalAmount || line.amount || 0), 0) + freightValue;
+      const vendor = vendors[header.vendorId] || {};
+      const freightTax = _purchaseFreightTaxBreakup_(vendor.state, freightValue);
+      const totalValue = normalizedLines.reduce((sum, line) => sum + Number(line.totalAmount || line.amount || 0), 0) + freightValue + freightTax.taxAmount;
       const receivedQty = normalizedLines.reduce((sum, line) => sum + Number(line.receivedQty || 0), 0);
       const pendingQty = Math.max(0, totalQty - receivedQty);
-      const liveStatus = _purchaseDerivePOStatus_(totalQty, receivedQty);
-      const vendor = vendors[header.vendorId] || {};
+      const liveStatus = _purchaseIsCancelledStatus_(header.status)
+        ? 'CANCELLED'
+        : _purchaseDerivePOStatus_(totalQty, receivedQty);
       const isArtworkPO = normalizedLines.some(line => _purchaseIsPlateDieSource_(line.sourceType));
       const hasDieLines = normalizedLines.some(line => _purchasePlateDieTypeFromSource_(line.sourceType) === 'DIE');
       const hasPlateLines = normalizedLines.some(line => _purchasePlateDieTypeFromSource_(line.sourceType) === 'PLATE');
@@ -2798,9 +2960,9 @@ function purchaseListPOsJSON(opts = {}) {
         lineCount: lines.length,
         totalQty: totalQty,
         receivedQty: receivedQty,
-        pendingQty: pendingQty,
+        pendingQty: _purchaseIsCancelledStatus_(header.status) ? 0 : pendingQty,
         basicTotal: basicTotal,
-        taxTotal: taxTotal,
+        taxTotal: taxTotal + freightTax.taxAmount,
         totalValue: totalValue,
         buyerName: header.createdBy || '',
         paymentTerms: header.paymentTerms || '',
@@ -2810,11 +2972,13 @@ function purchaseListPOsJSON(opts = {}) {
         notes: header.notes || '',
         workflow: isArtworkPO ? 'ARTWORK_PROCUREMENT' : 'INVENTORY_PR',
         artworkType: artworkType,
-        lines: normalizedLines
+        lines: _purchaseIsCancelledStatus_(header.status)
+          ? normalizedLines.map(function(line) { return Object.assign({}, line, { pendingQty: 0 }); })
+          : normalizedLines
       };
     })
     .filter(row => {
-      if (opts.pendingOnly) return Number(row.pendingQty || 0) > 0;
+      if (opts.pendingOnly) return !_purchaseIsCancelledStatus_(row.status) && Number(row.pendingQty || 0) > 0;
       const rowDate = row.orderDate ? new Date(row.orderDate) : null;
       if (opts.fromDate && rowDate && rowDate < new Date(opts.fromDate + 'T00:00:00')) return false;
       if (opts.toDate && rowDate && rowDate > new Date(opts.toDate + 'T23:59:59')) return false;
@@ -2828,6 +2992,8 @@ function purchaseListPOsJSON(opts = {}) {
 }
 
 function _purchaseNormalizePOSummaryRow_(row) {
+  const status = row.status || 'OPEN';
+  const cancelled = _purchaseIsCancelledStatus_(status);
   return {
     poNo: row.po_no || row.poNo || '',
     poId: row.po_id || row.poId || '',
@@ -2835,12 +3001,12 @@ function _purchaseNormalizePOSummaryRow_(row) {
     vendorId: row.vendor_id || row.vendorId || '',
     vendorName: row.vendor_name || row.vendorName || '',
     vendorGstin: row.vendor_gstin || row.vendorGstin || '',
-    status: row.status || 'OPEN',
+    status: cancelled ? 'CANCELLED' : status,
     storedStatus: row.status || row.storedStatus || 'OPEN',
     lineCount: Number(row.line_count || row.lineCount || 0),
     totalQty: Number(row.total_qty || row.totalQty || 0),
     receivedQty: Number(row.received_qty || row.receivedQty || 0),
-    pendingQty: Number(row.pending_qty || row.pendingQty || 0),
+    pendingQty: cancelled ? 0 : Number(row.pending_qty || row.pendingQty || 0),
     basicTotal: Number(row.basic_total || row.basicTotal || 0),
     taxTotal: Number(row.tax_total || row.taxTotal || 0),
     totalValue: Number(row.total_value || row.totalValue || 0),
@@ -2856,18 +3022,22 @@ function _purchaseNormalizePOSummaryRow_(row) {
 }
 
 function purchaseListPOSummariesJSON(opts = {}) {
-  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_PO_SUMMARIES', { opts: opts || {} });
-  const cached = _getCachedJson_(cacheKey);
-  if (cached) return cached;
+  const forceRefresh = opts.forceRefresh === true;
+  const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
+  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_PO_SUMMARIES', { v: purchaseCacheVersion, opts: opts || {} });
+  if (!forceRefresh) {
+    const cached = _getCachedJson_(cacheKey);
+    if (cached) return cached;
+  }
 
   let viewRows = null;
   try {
     const filters = {};
     if (opts.poNo) filters.po_no = 'eq.' + String(opts.poNo || '').trim();
-    viewRows = supabaseSelect('v_purchase_order_summary', {
+    viewRows = _supabaseSelectAll_('v_purchase_order_summary', {
       filters: filters,
       order: 'order_date.desc,updated_at.desc,po_no.desc'
-    }) || [];
+    }, 1000, 50000) || [];
   } catch (err) {
     viewRows = null;
   }
@@ -2877,7 +3047,7 @@ function purchaseListPOSummariesJSON(opts = {}) {
       .map(_purchaseNormalizePOSummaryRow_)
       .filter(function(row) {
         if (opts.poNo && String(row.poNo || '') !== String(opts.poNo || '').trim()) return false;
-        if (opts.pendingOnly) return Number(row.pendingQty || 0) > 0;
+        if (opts.pendingOnly) return !_purchaseIsCancelledStatus_(row.status) && Number(row.pendingQty || 0) > 0;
         const rowDate = row.orderDate ? new Date(row.orderDate) : null;
         if (opts.fromDate && rowDate && rowDate < new Date(opts.fromDate + 'T00:00:00')) return false;
         if (opts.toDate && rowDate && rowDate > new Date(opts.toDate + 'T23:59:59')) return false;
@@ -2902,13 +3072,17 @@ function purchaseListPOSummariesJSON(opts = {}) {
   return result;
 }
 
-function purchaseGetPODetail(poNo) {
+function purchaseGetPODetail(poNo, opts) {
   const key = String(poNo || '').trim();
   if (!key) throw new Error('PO number is required');
-  const cacheKey = _reportsCacheKey_('PURCHASE_PO_DETAIL', { poNo: key });
-  const cached = _getCachedJson_(cacheKey);
-  if (cached) return cached;
-  const rows = purchaseListPOsJSON({ poNo: key, limit: 1 }).rows || [];
+  const forceRefresh = opts?.forceRefresh === true;
+  const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
+  const cacheKey = _reportsCacheKey_('PURCHASE_PO_DETAIL', { v: purchaseCacheVersion, poNo: key });
+  if (!forceRefresh) {
+    const cached = _getCachedJson_(cacheKey);
+    if (cached) return cached;
+  }
+  const rows = purchaseListPOsJSON({ poNo: key, limit: 1, forceRefresh: forceRefresh }).rows || [];
   const row = rows.find(function(item) {
     return String(item.poNo || '') === key;
   }) || null;
@@ -3049,13 +3223,15 @@ function purchaseListPOsForPRJSON(prNo) {
       const basicTotal = row.lines.reduce((sum, line) => sum + Number(line.amount || 0), 0);
       const taxTotal = row.lines.reduce((sum, line) => sum + Number(line.taxAmount || 0), 0);
       const totalValue = row.lines.reduce((sum, line) => sum + Number(line.totalAmount || line.amount || 0), 0) + Number(row.freightValue || 0);
-      const liveStatus = _purchaseDerivePOStatus_(totalQty, receivedQty);
+      const liveStatus = _purchaseIsCancelledStatus_(row.status)
+        ? 'CANCELLED'
+        : _purchaseDerivePOStatus_(totalQty, receivedQty);
       return Object.assign(row, {
         status: liveStatus,
         lineCount: row.lines.length,
         totalQty: totalQty,
         receivedQty: receivedQty,
-        pendingQty: Math.max(0, totalQty - receivedQty),
+        pendingQty: _purchaseIsCancelledStatus_(row.status) ? 0 : Math.max(0, totalQty - receivedQty),
         basicTotal: basicTotal,
         taxTotal: taxTotal,
         totalValue: totalValue
@@ -3074,6 +3250,12 @@ function purchaseCreatePO(payload) {
   const selectedRows = Array.isArray(payload.lines) ? payload.lines : [];
   if (!selectedRows.length) {
     throw new Error('Add at least one PO line');
+  }
+  if (selectedRows.some(function(line) {
+    const sourceType = String(line && line.sourceType || '').trim().toUpperCase();
+    return sourceType !== 'INVENTORY_PR' || !String(line && (line.prNo || line.sourceRef) || '').trim();
+  })) {
+    throw new Error('Inventory purchase orders can only be created against purchase requests.');
   }
 
   const vendor = _purchaseListVendors_().find(v => v.id === payload.vendorId);
@@ -3135,12 +3317,14 @@ function purchaseCreatePO(payload) {
         createdAt: now
       };
     }
-    return _purchaseNormalizeDirectLine_(line, 'DIRECT', idx + 1, poNo, now);
+    throw new Error('Inventory purchase orders can only be created against purchase requests.');
   });
 
   const basicTotal = lines.reduce((sum, line) => sum + Number(line.amount || 0), 0);
-  const taxTotal = lines.reduce((sum, line) => sum + Number(line.taxAmount || 0), 0);
-  const totalValue = lines.reduce((sum, line) => sum + Number(line.totalAmount || 0), 0) + freightValue;
+  const lineTaxTotal = lines.reduce((sum, line) => sum + Number(line.taxAmount || 0), 0);
+  const freightTax = _purchaseFreightTaxBreakup_(vendor.state, freightValue);
+  const taxTotal = lineTaxTotal + freightTax.taxAmount;
+  const totalValue = lines.reduce((sum, line) => sum + Number(line.totalAmount || 0), 0) + freightValue + freightTax.taxAmount;
   const totalQty = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
 
   const headerId = Utilities.getUuid();
@@ -3265,8 +3449,10 @@ function purchaseCreateArtworkPO(payload) {
   });
 
   const basicTotal = lines.reduce((sum, line) => sum + Number(line.amount || 0), 0);
-  const taxTotal = lines.reduce((sum, line) => sum + Number(line.taxAmount || 0), 0);
-  const totalValue = lines.reduce((sum, line) => sum + Number(line.totalAmount || 0), 0) + freightValue;
+  const lineTaxTotal = lines.reduce((sum, line) => sum + Number(line.taxAmount || 0), 0);
+  const freightTax = _purchaseFreightTaxBreakup_(vendor.state, freightValue);
+  const taxTotal = lineTaxTotal + freightTax.taxAmount;
+  const totalValue = lines.reduce((sum, line) => sum + Number(line.totalAmount || 0), 0) + freightValue + freightTax.taxAmount;
   const totalQty = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
 
   try {
@@ -3327,6 +3513,7 @@ function purchaseUpdatePO(payload) {
 
   const header = _purchaseListPOHeaders_().find(row => row.poNo === String(payload.poNo || '').trim());
   if (!header) throw new Error('PO not found');
+  if (_purchaseIsCancelledStatus_(header.status)) throw new Error('Cancelled purchase orders cannot be edited.');
 
   const vendor = _purchaseListVendors_().find(v => v.id === payload.vendorId);
   if (!vendor) throw new Error('Vendor not found');
@@ -3349,6 +3536,9 @@ function purchaseUpdatePO(payload) {
   let taxTotal = 0;
   const freightValue = Math.max(0, Number(payload.freightValue || 0));
   const finalLines = [];
+  const isPlateDiePO = existingLines.some(function(line) {
+    return _purchaseIsPlateDieSource_(line.sourceType);
+  });
 
   existingLines.forEach(line => {
     const incoming = incomingMap[String(line.id)];
@@ -3361,7 +3551,7 @@ function purchaseUpdatePO(payload) {
       return;
     }
     const sourceType = String(incoming.sourceType || line.sourceType || '').trim().toUpperCase() || 'DIRECT';
-    const next = _purchaseNormalizeDirectLine_(Object.assign({}, line, incoming, { sourceType: sourceType }), sourceType, finalLines.length + 1, header.poNo, line.createdAt || _purchaseNowIso_());
+    const next = _purchaseNormalizeDirectLine_(Object.assign({}, line, incoming, { sourceType: sourceType }), sourceType, finalLines.length + 1, header.poNo, line.createdAt || _purchaseNowIso_(), { keepId: true });
     next.id = line.id;
     next.poId = header.id;
     finalLines.push(next);
@@ -3369,19 +3559,29 @@ function purchaseUpdatePO(payload) {
 
   incomingList.filter(line => !line.id || !existingLines.some(x => String(x.id) === String(line.id))).forEach(line => {
     const sourceType = String(line.sourceType || '').trim().toUpperCase() || 'DIRECT';
-    const next = _purchaseNormalizeDirectLine_(line, sourceType, finalLines.length + 1, header.poNo, _purchaseNowIso_());
+    if (!isPlateDiePO) {
+      if (sourceType !== 'INVENTORY_PR' || !String(line.prNo || line.sourceRef || '').trim()) {
+        throw new Error('Inventory purchase orders can only add lines from pending purchase requests.');
+      }
+    }
+    const next = _purchaseNormalizeDirectLine_(Object.assign({}, line, { id: '' }), sourceType, finalLines.length + 1, header.poNo, _purchaseNowIso_());
     next.poId = header.id;
     finalLines.push(next);
   });
 
   if (!finalLines.length) throw new Error('At least one PO line is required');
 
+  const existingLineIds = {};
+  existingLines.forEach(function(row) {
+    existingLineIds[String(row.id)] = true;
+  });
+
   finalLines.forEach((line, idx) => {
     line.lineNo = idx + 1;
     totalQty += line.qty;
     basicTotal += line.amount;
     taxTotal += line.taxAmount;
-    if (existingLines.some(x => String(x.id) === String(line.id))) {
+    if (existingLineIds[String(line.id)]) {
       supabaseUpdate('purchase_order_lines', { id: 'eq.' + line.id }, {
         line_no: line.lineNo,
         source_type: line.sourceType,
@@ -3399,30 +3599,44 @@ function purchaseUpdatePO(payload) {
         remarks: line.remarks
       });
     } else {
-      supabaseInsert('purchase_order_lines', {
-        id: line.id,
-        po_id: header.id,
-        po_no: header.poNo,
-        line_no: line.lineNo,
-        source_type: line.sourceType,
-        source_ref: line.sourceRef,
-        item_code: line.itemCode,
-        item_name: line.itemName,
-        qty: line.qty,
-        rate: line.rate,
-        tax_pct: line.taxPct,
-        amount: line.amount,
-        tax_amount: line.taxAmount,
-        total_amount: line.totalAmount,
-        department: line.department,
-        job_ref: line.jobRef,
-        remarks: line.remarks,
-        created_at: line.createdAt || _purchaseNowIso_()
-      });
+      let inserted = false;
+      let lastInsertError = null;
+      for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
+        const insertId = Utilities.getUuid();
+        try {
+          supabaseInsert('purchase_order_lines', {
+            id: insertId,
+            po_id: header.id,
+            po_no: header.poNo,
+            line_no: line.lineNo,
+            source_type: line.sourceType,
+            source_ref: line.sourceRef,
+            item_code: line.itemCode,
+            item_name: line.itemName,
+            qty: line.qty,
+            rate: line.rate,
+            tax_pct: line.taxPct,
+            amount: line.amount,
+            tax_amount: line.taxAmount,
+            total_amount: line.totalAmount,
+            department: line.department,
+            job_ref: line.jobRef,
+            remarks: line.remarks,
+            created_at: line.createdAt || _purchaseNowIso_()
+          });
+          line.id = insertId;
+          inserted = true;
+        } catch (err) {
+          lastInsertError = err;
+          if (String(err && err.message || '').indexOf('23505') === -1) throw err;
+        }
+      }
+      if (!inserted) throw lastInsertError || new Error('Unable to insert new PO line.');
     }
   });
 
   try {
+    const freightTax = _purchaseFreightTaxBreakup_(vendor.state, freightValue);
     supabaseUpdate('purchase_orders', { id: 'eq.' + header.id }, {
       vendor_id: vendor.id,
       vendor_name: vendor.vendorName,
@@ -3436,8 +3650,8 @@ function purchaseUpdatePO(payload) {
       notes: String(payload.notes || '').trim(),
       total_qty: Number(totalQty.toFixed(3)),
       basic_total: Number(basicTotal.toFixed(2)),
-      tax_total: Number(taxTotal.toFixed(2)),
-      total_value: Number((basicTotal + taxTotal + freightValue).toFixed(2)),
+      tax_total: Number((taxTotal + freightTax.taxAmount).toFixed(2)),
+      total_value: Number((basicTotal + taxTotal + freightValue + freightTax.taxAmount).toFixed(2)),
       updated_at: _purchaseNowIso_()
     });
   } catch (e) {
@@ -3453,6 +3667,7 @@ function _purchaseUpdatePOStatus_(poNo) {
   const headers = _purchaseListPOHeaders_();
   const header = headers.find(row => row.poNo === poNo);
   if (!header) return;
+  if (_purchaseIsCancelledStatus_(header.status)) return;
   const rows = purchaseListPOsJSON().rows || [];
   const po = rows.find(r => r.poNo === poNo);
   if (!po) return;
@@ -3466,6 +3681,71 @@ function _purchaseUpdatePOStatus_(poNo) {
   });
 }
 
+function purchaseCancelPOs(payload) {
+  const poNos = Array.isArray(payload && payload.poNos)
+    ? [...new Set(payload.poNos.map(function(v) { return String(v || '').trim(); }).filter(Boolean))]
+    : [];
+  if (!poNos.length) throw new Error('Select at least one purchase order to cancel.');
+
+  const headers = _purchaseListPOHeaders_().filter(function(header) {
+    return poNos.indexOf(String(header.poNo || '').trim()) !== -1;
+  });
+  if (!headers.length) throw new Error('Selected purchase orders were not found.');
+
+  const missing = poNos.filter(function(poNo) {
+    return !headers.some(function(header) { return String(header.poNo || '') === poNo; });
+  });
+  if (missing.length) throw new Error('PO not found: ' + missing.join(', '));
+
+  const liveRows = purchaseListPOsJSON({ forceRefresh: true }).rows || [];
+  const liveMap = {};
+  liveRows.forEach(function(row) {
+    liveMap[String(row.poNo || '')] = row;
+  });
+
+  const blocked = [];
+  const cancellable = [];
+  headers.forEach(function(header) {
+    if (_purchaseIsCancelledStatus_(header.status)) return;
+    const live = liveMap[String(header.poNo || '')] || {};
+    const receivedQty = Number(live.receivedQty || 0);
+    const receiptLine = (live.lines || []).find(function(line) {
+      return Number(line.receivedQty || 0) > 0 || (Array.isArray(line.receiptEntries) && line.receiptEntries.length);
+    });
+    if (receivedQty > 0 || receiptLine) {
+      blocked.push(header.poNo);
+      return;
+    }
+    cancellable.push(header);
+  });
+
+  if (blocked.length) {
+    throw new Error('Cannot cancel PO(s) with received material: ' + blocked.join(', '));
+  }
+  if (!cancellable.length) {
+    return { ok: true, cancelled: 0, skipped: headers.length };
+  }
+
+  const now = _purchaseNowIso_();
+  const actor = String(payload && payload.cancelledBy || '').trim() || 'ERP User';
+  cancellable.forEach(function(header) {
+    const notes = String(header.notes || '').trim();
+    const cancelNote = 'Cancelled on ' + now + ' by ' + actor;
+    supabaseUpdate('purchase_orders', { id: 'eq.' + header.id }, {
+      status: 'CANCELLED',
+      notes: notes ? (notes + '\n' + cancelNote) : cancelNote,
+      updated_at: now
+    });
+  });
+
+  PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  return {
+    ok: true,
+    cancelled: cancellable.length,
+    poNos: cancellable.map(function(header) { return header.poNo; })
+  };
+}
+
 function purchaseReceivePOLine(payload) {
   if (!payload || !payload.poNo || !payload.lineId) {
     throw new Error('PO line reference is required');
@@ -3477,6 +3757,10 @@ function purchaseReceivePOLine(payload) {
 
   const line = _purchaseListPOLines_().find(row => row.poNo === payload.poNo && row.id === payload.lineId);
   if (!line) throw new Error('PO line not found');
+  const header = _purchaseListPOHeaders_().find(row => row.poNo === payload.poNo);
+  if (header && _purchaseIsCancelledStatus_(header.status)) {
+    throw new Error('Cancelled purchase orders cannot be received.');
+  }
 
   const po = ((purchaseListPOsJSON({ poNo: payload.poNo }).rows || [])[0]) || null;
   const liveLine = (po?.lines || []).find(r => r.id === payload.lineId) || line;
@@ -3533,6 +3817,10 @@ function purchaseReceiveArtworkPOLine(payload) {
 
   const line = _purchaseListPOLines_().find(row => row.poNo === payload.poNo && row.id === payload.lineId);
   if (!line) throw new Error('PO line not found');
+  const header = _purchaseListPOHeaders_().find(row => row.poNo === payload.poNo);
+  if (header && _purchaseIsCancelledStatus_(header.status)) {
+    throw new Error('Cancelled purchase orders cannot be received.');
+  }
   if (!_purchaseIsPlateDieSource_(line.sourceType)) {
     throw new Error('Receipts from this screen can only be posted for plate or die purchase order lines.');
   }
@@ -3590,6 +3878,9 @@ function purchaseReceiveArtworkPOBulk(payload) {
   const po = ((purchaseListPOsJSON({ poNo: String(payload.poNo || '').trim() }).rows || [])[0]) || null;
   if (!po) {
     throw new Error('PO not found');
+  }
+  if (_purchaseIsCancelledStatus_(po.status)) {
+    throw new Error('Cancelled purchase orders cannot be received.');
   }
 
   const prepared = inputLines.map(function(entry, idx) {
@@ -3683,6 +3974,7 @@ function purchaseGetPOPrintData(poNo) {
       };
       const intra = String(vendor.state || '').trim().toLowerCase() === String(PURCHASE_COMPANY.state || '').trim().toLowerCase();
       const freightValue = Number(first.freight_value || 0);
+      const freightTax = _purchaseFreightTaxBreakup_(vendor.state, freightValue);
       let subtotal = 0, cgst = 0, sgst = 0, igst = 0, grandTotal = 0;
 
       const normalizedLines = rows.map(function(row) {
@@ -3745,6 +4037,7 @@ function purchaseGetPOPrintData(poNo) {
           paymentTerms: first.payment_terms || '',
           freightTerms: first.freight_terms || '',
           freightValue: freightValue,
+          freightGstPct: freightTax.gstPct,
           deliveryTerms: first.delivery_terms || '',
           notes: first.notes || '',
           modeOfTransport: 'By Road'
@@ -3769,11 +4062,13 @@ function purchaseGetPOPrintData(poNo) {
         totals: {
           qty: normalizedLines.reduce(function(sum, row) { return sum + Number(row.qty || 0); }, 0),
           basicAmount: +subtotal.toFixed(2),
-          cgstAmount: +cgst.toFixed(2),
-          sgstAmount: +sgst.toFixed(2),
-          igstAmount: +igst.toFixed(2),
+          cgstAmount: +(cgst + freightTax.cgstAmt).toFixed(2),
+          sgstAmount: +(sgst + freightTax.sgstAmt).toFixed(2),
+          igstAmount: +(igst + freightTax.igstAmt).toFixed(2),
           freightAmount: +freightValue.toFixed(2),
-          value: +(grandTotal + freightValue).toFixed(2)
+          freightTaxAmount: +freightTax.taxAmount.toFixed(2),
+          freightGstPct: freightTax.gstPct,
+          value: +(grandTotal + freightValue + freightTax.taxAmount).toFixed(2)
         },
         intrastate: intra
       };
@@ -3800,6 +4095,7 @@ function purchaseGetPOPrintData(poNo) {
 
   const intra = String(vendor.state || '').trim().toLowerCase() === String(PURCHASE_COMPANY.state || '').trim().toLowerCase();
   const freightValue = Number(header.freightValue || 0);
+  const freightTax = _purchaseFreightTaxBreakup_(vendor.state, freightValue);
   let subtotal = 0, cgst = 0, sgst = 0, igst = 0, grandTotal = 0;
 
   const normalizedLines = lines.map(line => {
@@ -3848,6 +4144,7 @@ function purchaseGetPOPrintData(poNo) {
       paymentTerms: header.paymentTerms || '',
       freightTerms: header.freightTerms || '',
       freightValue: freightValue,
+      freightGstPct: freightTax.gstPct,
       deliveryTerms: header.deliveryTerms || '',
       notes: header.notes || '',
       modeOfTransport: 'By Road'
@@ -3872,11 +4169,13 @@ function purchaseGetPOPrintData(poNo) {
     totals: {
       qty: normalizedLines.reduce((sum, row) => sum + Number(row.qty || 0), 0),
       basicAmount: +subtotal.toFixed(2),
-      cgstAmount: +cgst.toFixed(2),
-      sgstAmount: +sgst.toFixed(2),
-      igstAmount: +igst.toFixed(2),
+      cgstAmount: +(cgst + freightTax.cgstAmt).toFixed(2),
+      sgstAmount: +(sgst + freightTax.sgstAmt).toFixed(2),
+      igstAmount: +(igst + freightTax.igstAmt).toFixed(2),
       freightAmount: +freightValue.toFixed(2),
-      value: +(grandTotal + freightValue).toFixed(2)
+      freightTaxAmount: +freightTax.taxAmount.toFixed(2),
+      freightGstPct: freightTax.gstPct,
+      value: +(grandTotal + freightValue + freightTax.taxAmount).toFixed(2)
     },
     intrastate: intra
   };
@@ -9770,7 +10069,7 @@ function createArtworksFromSoLines(soId) {
   );
 
   // 3️⃣ Prepare only missing artworks
-rowsToInsert = _filterSalesServiceOnlyItems_(lines)
+const rowsToInsert = _filterSalesServiceOnlyItems_(lines)
   .filter(l => !existingLineNos.has(String(l.line_no)))
   .map(l => ({
     so_id: soId,
@@ -10058,6 +10357,9 @@ function _artworkRowToWorkbenchJob_(r) {
     category: String(r.category || ''),
     division: String(r.division || ''),
     jobType: String(r.job_type || ''),
+    orderStatus: String(r.order_status || 'OPEN').trim().toUpperCase(),
+    lineStatus: String(r.line_status || 'OPEN').trim().toUpperCase(),
+    isCancelled: r.is_cancelled === true,
     qty: Number(r.qty || 0),
     unit: String(r.unit || ''),
     artworkNo: String(r.artwork_no || ''),
@@ -10152,6 +10454,9 @@ function _artworkGroupRowsFromJobs_(jobs) {
         clientList: [],
         divisionList: [],
         jobTypeList: [],
+        orderStatusList: [],
+        lineStatusList: [],
+        isCancelled: false,
         totalQty: 0
       };
     }
@@ -10192,6 +10497,9 @@ function _artworkGroupRowsFromJobs_(jobs) {
     if (job.client && group.clientList.indexOf(job.client) === -1) group.clientList.push(job.client);
     if (job.division && group.divisionList.indexOf(job.division) === -1) group.divisionList.push(job.division);
     if (job.jobType && group.jobTypeList.indexOf(job.jobType) === -1) group.jobTypeList.push(job.jobType);
+    if (job.orderStatus && group.orderStatusList.indexOf(job.orderStatus) === -1) group.orderStatusList.push(job.orderStatus);
+    if (job.lineStatus && group.lineStatusList.indexOf(job.lineStatus) === -1) group.lineStatusList.push(job.lineStatus);
+    if (job.isCancelled === true) group.isCancelled = true;
     if (!group.artworkAt && job.artworkAt) group.artworkAt = job.artworkAt;
     if (job.approvedAt && (!group.approvedAt || new Date(job.approvedAt) > new Date(group.approvedAt))) {
       group.approvedAt = job.approvedAt;
@@ -10241,7 +10549,10 @@ function _artworkGroupRowToWorkbenchGroup_(row, jobsByArtworkNo) {
     clientList: _normalizeSupabaseList_(row.client_list),
     divisionList: _normalizeSupabaseList_(row.division_list),
     jobTypeList: _normalizeSupabaseList_(row.job_type_list),
+    orderStatusList: [],
+    lineStatusList: [],
     isReady: row.is_ready === true,
+    isCancelled: false,
     jobs: jobs
   };
   if (!group.soList.length && jobs.length) group.soList = [...new Set(jobs.map(function(job){ return job.so; }).filter(Boolean))];
@@ -10249,6 +10560,9 @@ function _artworkGroupRowToWorkbenchGroup_(row, jobsByArtworkNo) {
   if (!group.clientList.length && jobs.length) group.clientList = [...new Set(jobs.map(function(job){ return job.client; }).filter(Boolean))];
   if (!group.divisionList.length && jobs.length) group.divisionList = [...new Set(jobs.map(function(job){ return job.division; }).filter(Boolean))];
   if (!group.jobTypeList.length && jobs.length) group.jobTypeList = [...new Set(jobs.map(function(job){ return job.jobType; }).filter(Boolean))];
+  group.orderStatusList = [...new Set(jobs.map(function(job){ return job.orderStatus; }).filter(Boolean))];
+  group.lineStatusList = [...new Set(jobs.map(function(job){ return job.lineStatus; }).filter(Boolean))];
+  group.isCancelled = jobs.some(function(job){ return job.isCancelled === true; });
   if (!group.jobCount && jobs.length) group.jobCount = jobs.length;
   if (!group.totalQty && jobs.length) {
     group.totalQty = jobs.reduce(function(sum, job){ return sum + Number(job.qty || 0); }, 0);
@@ -10533,6 +10847,67 @@ function _getFgStockByProductCodes_(codes) {
   return result;
 }
 
+function _decorateArtworkRowsWithOrderStatus_(rows) {
+  const list = Array.isArray(rows) ? rows.map(function(row) {
+    return Object.assign({}, row || {});
+  }) : [];
+  if (!list.length) return list;
+
+  const soNumbers = [...new Set(list.map(function(row) {
+    return String(row.so_number || '').trim();
+  }).filter(Boolean))];
+  if (!soNumbers.length) return list;
+
+  const soRows = _supabaseSelectByKeyInBatches_(
+    'sales_orders',
+    'id,so_number,status',
+    'so_number',
+    soNumbers,
+    null,
+    40
+  ) || [];
+  const soMap = {};
+  const soIdToNo = {};
+  soRows.forEach(function(row) {
+    const soNo = String(row.so_number || '').trim();
+    const soId = String(row.id || '').trim();
+    if (!soNo) return;
+    soMap[soNo] = row;
+    if (soId) soIdToNo[soId] = soNo;
+  });
+
+  const soIds = Object.keys(soIdToNo);
+  const lineRows = soIds.length
+    ? (_supabaseSelectByKeyInBatches_(
+        'sales_order_lines',
+        'so_id,line_no,status',
+        'so_id',
+        soIds,
+        null,
+        40
+      ) || [])
+    : [];
+  const lineMap = {};
+  lineRows.forEach(function(row) {
+    const soNo = soIdToNo[String(row.so_id || '').trim()] || '';
+    const lineNo = String(row.line_no || '').trim();
+    if (soNo && lineNo) lineMap[soNo + '||' + lineNo] = row;
+  });
+
+  return list.map(function(row) {
+    const soNo = String(row.so_number || '').trim();
+    const lineNo = String(row.line_no || '').trim();
+    const so = soMap[soNo] || {};
+    const line = lineMap[soNo + '||' + lineNo] || {};
+    const orderStatus = String(so.status || 'OPEN').trim().toUpperCase();
+    const lineStatus = String(line.status || 'OPEN').trim().toUpperCase();
+    row.order_status = orderStatus;
+    row.line_status = lineStatus;
+    row.is_cancelled = orderStatus === 'CANCELLED' || lineStatus === 'CANCELLED';
+    return row;
+  });
+}
+
 function getArtworkWorkbench(fromDate, toDate, pendingOnly) {
   const filters = {};
   if (!pendingOnly && fromDate && toDate) {
@@ -10546,14 +10921,15 @@ function getArtworkWorkbench(fromDate, toDate, pendingOnly) {
     filters.or = '(status.is.null,status.neq.APPROVED)';
   }
 
+  const baseSelect = 'id,so_number,so_date,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status';
   let rows = selectArtworkWorkbenchActiveView_({
-    select: 'id,so_number,so_date,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status,fg_stock_qty',
+    select: baseSelect + ',fg_stock_qty',
     filters: filters,
     order: 'so_date.asc,so_number.asc,line_no.asc'
   });
   if (rows === null) {
     rows = _filterSalesServiceOnlyItems_(_excludeCancelledSalesOrdersByNumber_(selectArtworkJobsActiveView_({
-      select: 'id,so_number,so_date,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status',
+      select: baseSelect,
       filters: filters,
       order: 'so_date.asc,so_number.asc,line_no.asc'
     }) || [], 'so_number'));
@@ -10564,17 +10940,57 @@ function getArtworkWorkbench(fromDate, toDate, pendingOnly) {
   } else {
     rows = _filterSalesServiceOnlyItems_(rows);
   }
+  rows = _decorateArtworkRowsWithOrderStatus_(rows);
 
   const jobs = rows.map(_artworkRowToWorkbenchJob_);
+  const cancelledFilters = Object.assign({}, filters);
+  delete cancelledFilters.or;
+  cancelledFilters.artwork_no = 'not.is.null';
+  let cancelledRows = _decorateArtworkRowsWithOrderStatus_(_filterSalesServiceOnlyItems_(selectArtworkJobsView_({
+    select: baseSelect,
+    filters: cancelledFilters,
+    order: 'so_date.asc,so_number.asc,line_no.asc'
+  }) || [], 'so_number')).filter(function(row) {
+    return row.is_cancelled === true && String(row.artwork_no || '').trim();
+  });
+  const existingJobIds = {};
+  jobs.forEach(function(job) { existingJobIds[String(job.id || '')] = true; });
+  cancelledRows = cancelledRows.filter(function(row) {
+    return existingJobIds[String(row.id || '')] !== true;
+  });
+  if (cancelledRows.length) {
+    const cancelledFgStockMap = _getFgStockByProductCodes_(cancelledRows.map(function(row){ return row.product_code; }));
+    cancelledRows.forEach(function(row){
+      row.fg_stock_qty = Number(cancelledFgStockMap[String(row.product_code || '').trim()] || 0);
+    });
+  }
+  const allJobs = jobs.concat(cancelledRows.map(_artworkRowToWorkbenchJob_));
   const jobsByArtworkNo = {};
-  jobs.forEach(function(job) {
+  allJobs.forEach(function(job) {
     const artworkNo = String(job.artworkNo || '').trim();
     if (!artworkNo) return;
     if (!jobsByArtworkNo[artworkNo]) jobsByArtworkNo[artworkNo] = [];
     jobsByArtworkNo[artworkNo].push(job);
   });
 
-  const groups = _artworkGroupRowsFromJobs_(jobs);
+  const groupFilters = Object.assign({}, filters);
+  delete groupFilters.or;
+  const groupRows = selectArtworkGroupsView_({
+    select: 'artwork_no,so_date,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,status,artwork_at,approved_at,job_count,total_qty,so_list,client_list,division_list,sales_rep_list,job_type_list,is_ready',
+    filters: groupFilters,
+    order: 'so_date.asc,artwork_no.asc'
+  });
+  let groups = Array.isArray(groupRows)
+    ? groupRows.map(function(row) { return _artworkGroupRowToWorkbenchGroup_(row, jobsByArtworkNo); })
+    : _artworkGroupRowsFromJobs_(allJobs);
+  groups = groups.filter(function(group) {
+    return (group.jobs || []).length > 0;
+  });
+  if (pendingOnly === true) {
+    groups = groups.filter(function(group) {
+      return String(group.status || '').toUpperCase() !== 'APPROVED' || group.isCancelled === true;
+    });
+  }
 
   groups.sort(function(a, b) {
     const rank = function(status) {
@@ -10584,6 +11000,8 @@ function getArtworkWorkbench(fromDate, toDate, pendingOnly) {
       if (s === 'APPROVED') return 2;
       return 1;
     };
+    const cancelDiff = (a.isCancelled === true ? -1 : 0) - (b.isCancelled === true ? -1 : 0);
+    if (cancelDiff !== 0) return cancelDiff;
     const rankDiff = rank(a.status) - rank(b.status);
     if (rankDiff !== 0) return rankDiff;
     const aFirst = (a.soList && a.soList[0]) || '';
@@ -10603,7 +11021,7 @@ function getArtworkWorkbench(fromDate, toDate, pendingOnly) {
     : jobs;
 
   return {
-    allJobs: jobs,
+    allJobs: allJobs,
     jobs: filteredJobs,
     groups: groups,
     meta: {
@@ -10618,6 +11036,7 @@ function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly) {
   const version = PropertiesService.getScriptProperties().getProperty('ARTWORK_WORKBENCH_VERSION') || '0';
   const cacheKey = _cacheKeyHash_('ARTWORK_WORKBENCH', JSON.stringify({
     v: version,
+    schema: 'ARTWORK_WORKBENCH_DETAIL_ROWS_V3',
     fromDate: fromDate || '',
     toDate: toDate || '',
     pendingOnly: pendingOnly === true
@@ -10629,6 +11048,22 @@ function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly) {
   const payload = JSON.stringify(getArtworkWorkbench(fromDate, toDate, pendingOnly));
   try { cache.put(cacheKey, payload, 180); } catch (e) {}
   return payload;
+}
+
+function getArtworkGroupJobs(artworkNo) {
+  const no = String(artworkNo || '').trim();
+  if (!no) throw new Error('Missing artwork no');
+  const baseSelect = 'id,so_number,so_date,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status';
+  const rows = _decorateArtworkRowsWithOrderStatus_(_filterSalesServiceOnlyItems_(selectArtworkJobsView_({
+    select: baseSelect,
+    filters: { artwork_no: 'eq.' + no },
+    order: 'so_date.asc,so_number.asc,line_no.asc'
+  }) || [], 'so_number'));
+  const fgStockMap = _getFgStockByProductCodes_(rows.map(function(row){ return row.product_code; }));
+  rows.forEach(function(row){
+    row.fg_stock_qty = Number(fgStockMap[String(row.product_code || '').trim()] || 0);
+  });
+  return rows.map(_artworkRowToWorkbenchJob_);
 }
 
 function getArtworkReference(artworkNo) {
@@ -12367,6 +12802,37 @@ function _invBumpStockSnapshotVersion_() {
   PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
 }
 
+function invRefreshInventoryCaches(scope) {
+  const target = String(scope || 'ALL').trim().toUpperCase() || 'ALL';
+  const props = PropertiesService.getScriptProperties();
+  const stamp = String(Date.now());
+  const updated = [];
+  const bump = function(key, label) {
+    props.setProperty(key, stamp);
+    if (label && updated.indexOf(label) === -1) updated.push(label);
+  };
+
+  if (target === 'ALL' || ['STOCK', 'ISSUE', 'RTS', 'RFP', 'ADJ', 'ITEMS'].indexOf(target) !== -1) {
+    bump('INV_STOCK_SNAPSHOT_VERSION', 'stock');
+  }
+  if (target === 'ALL' || ['ITEMS', 'ISSUE'].indexOf(target) !== -1) {
+    bump('ITEM_MASTER_CACHE_VERSION', 'items');
+  }
+  if (target === 'ALL' || ['PR', 'PURCHASE', 'PO', 'RECEIPT', 'RECEIPTS'].indexOf(target) !== -1) {
+    bump('PURCHASE_CACHE_VERSION', 'purchase');
+  }
+  if (target === 'ALL' || ['ISSUE', 'WO', 'WORK_ORDERS'].indexOf(target) !== -1) {
+    bump('WORK_ORDER_DATA_VERSION', 'workOrders');
+  }
+
+  return {
+    ok: true,
+    scope: target,
+    refreshedAt: new Date().toISOString(),
+    updated: updated
+  };
+}
+
 function _opsMapPackingFastRows_(rows) {
   return (rows || []).map(function(row) {
     const base = {
@@ -13694,25 +14160,9 @@ function invFindPaperItemsJSON(opts = {}) {
 }
 
 function invListIssueJSON(opts = {}) {
-
-const filters = {ref_type: 'eq.ISSUE'};
-
-if (opts.fromDate && opts.toDate) {
-
-  const from = opts.fromDate + 'T00:00:00';
-  const to   = opts.toDate   + 'T23:59:59';
-
-  filters.and =
-    `(created_at.gte.${from},created_at.lte.${to})`;
-}
-else if (opts.fromDate) {
-  filters.created_at = `gte.${opts.fromDate}T00:00:00`;
-}
-else if (opts.toDate) {
-  filters.created_at = `lte.${opts.toDate}T23:59:59`;
-}
-  const rows = supabaseSelect('v_inventory_transaction_register', {
-    select: `
+  const filters = _invBuildTxnDateFilters_(opts, 'ISSUE');
+  const requestLimit = _invResolveTxnRequestLimit_(opts, 1000, 50000);
+  const rows = _invSelectTxnRegisterRows_('inv_issue_register_v', `
       id,
       created_at,
       ref_no,
@@ -13724,11 +14174,7 @@ else if (opts.toDate) {
       location,
       department,
       batch_no
-    `,
-    filters: filters,
-    order: 'created_at.desc',
-    limit: opts.limit || 50
-  }) || [];
+    `, filters, requestLimit);
 
   const allocationMap = invGetAllocationSummaryMap_(rows.map(r => r.id));
   const reversalMap = invGetReversalSummaryMap_(rows.map(r => r.id));
@@ -13780,6 +14226,48 @@ function invSearchItemsJSON(q){
     }))
   };
 
+}
+
+function _invBuildTxnDateFilters_(opts, refType) {
+  const filters = {};
+  if (refType) filters.ref_type = 'eq.' + String(refType || '').trim();
+  if (opts.fromDate && opts.toDate) {
+    const from = opts.fromDate + 'T00:00:00';
+    const to = opts.toDate + 'T23:59:59';
+    filters.and = `(created_at.gte.${from},created_at.lte.${to})`;
+  } else if (opts.fromDate) {
+    filters.created_at = `gte.${opts.fromDate}T00:00:00`;
+  } else if (opts.toDate) {
+    filters.created_at = `lte.${opts.toDate}T23:59:59`;
+  }
+  return filters;
+}
+
+function _invResolveTxnRequestLimit_(opts, recentDefault, datedDefault) {
+  const hasDateFilter = !!(opts?.fromDate || opts?.toDate);
+  const fallback = hasDateFilter ? (datedDefault || 50000) : (recentDefault || 1000);
+  return Math.max(1, Number(opts?.limit || fallback) || fallback);
+}
+
+function _invSelectTxnRegisterRows_(primaryView, select, filters, requestLimit) {
+  const views = [primaryView, 'v_inventory_transaction_register'].filter(Boolean);
+  let lastErr = null;
+  for (let i = 0; i < views.length; i++) {
+    const viewName = views[i];
+    try {
+      return _supabaseSelectAll_(viewName, {
+        select: select,
+        filters: filters,
+        order: 'created_at.desc',
+        limit: requestLimit
+      }, 1000, requestLimit) || [];
+    } catch (err) {
+      lastErr = err;
+      if (viewName === 'v_inventory_transaction_register') break;
+    }
+  }
+  if (lastErr) throw lastErr;
+  return [];
 }
 
 function invAppendLedger_(p) {
@@ -14230,6 +14718,97 @@ function invFindExistingGRNByKey_(idempotencyKey) {
   };
 }
 
+function invAdjustPurchaseRequestReceipt_(prNo, deltaQty) {
+  const key = String(prNo || '').trim();
+  const delta = Number(deltaQty || 0);
+  if (!key || !delta) return null;
+
+  const pr = (supabaseSelect('inv_purchase_requests', {
+    select: 'pr_no,requested_qty,received_qty,status',
+    filters: { pr_no: 'eq.' + key },
+    limit: 1
+  }) || [])[0];
+  if (!pr) return null;
+
+  const requestedQty = Number(pr.requested_qty || 0);
+  const nextReceived = Math.max(0, Number(pr.received_qty || 0) + delta);
+  const nextStatus = nextReceived >= requestedQty ? 'CLOSED' : 'OPEN';
+  supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + key }, {
+    received_qty: nextReceived,
+    status: nextStatus
+  });
+
+  return {
+    prNo: key,
+    requestedQty: requestedQty,
+    receivedQty: nextReceived,
+    status: nextStatus
+  };
+}
+
+function invFindMatchingPOReceiptRecord_(ledgerRow, itemCode, opts) {
+  opts = opts || {};
+  const poNo = String(ledgerRow?.ref_no || '').trim();
+  const targetItemCode = String(itemCode || '').trim().toUpperCase();
+  if (!poNo) return null;
+
+  const ledgerQty = Number(ledgerRow?.qty_in || 0);
+  const ledgerRate = Number(ledgerRow?.rate || 0);
+  const ledgerDepartment = String(ledgerRow?.department || '').trim().toUpperCase();
+  const ledgerCreatedAtMs = ledgerRow?.created_at ? new Date(ledgerRow.created_at).getTime() : 0;
+  const sameNumber = function(a, b) {
+    return Math.abs(Number(a || 0) - Number(b || 0)) <= 0.0001;
+  };
+
+  const lineRows = Array.isArray(opts.lineRows) ? opts.lineRows : _purchaseListPOLines_();
+  const candidateLines = lineRows.filter(function(line) {
+    if (String(line.poNo || '').trim() !== poNo) return false;
+    if (targetItemCode && String(line.itemCode || '').trim().toUpperCase() !== targetItemCode) return false;
+    if (ledgerDepartment && String(line.department || '').trim().toUpperCase() !== ledgerDepartment) return false;
+    return true;
+  });
+  const fallbackLines = candidateLines.length
+    ? candidateLines
+    : lineRows.filter(function(line) {
+        if (String(line.poNo || '').trim() !== poNo) return false;
+        return targetItemCode
+          ? String(line.itemCode || '').trim().toUpperCase() === targetItemCode
+          : true;
+      });
+  if (!fallbackLines.length) return null;
+
+  const lineMap = {};
+  fallbackLines.forEach(function(line) {
+    const key = String(line.id || '').trim();
+    if (key) lineMap[key] = line;
+  });
+
+  const receiptRows = Array.isArray(opts.receiptRows) ? opts.receiptRows : _purchaseListPOReceipts_({ includeReversed: true });
+  const candidates = receiptRows.filter(function(row) {
+    return !!lineMap[String(row.poLineId || '').trim()];
+  });
+  if (!candidates.length) return null;
+
+  const ranked = candidates
+    .map(function(row) {
+      const line = lineMap[String(row.poLineId || '').trim()] || null;
+      const createdAtMs = row.createdAt ? new Date(row.createdAt).getTime() : 0;
+      let score = 0;
+      if (sameNumber(row.qty, ledgerQty)) score += 1000;
+      if (sameNumber(row.rate, ledgerRate)) score += 500;
+      if (ledgerDepartment && String(line?.department || '').trim().toUpperCase() === ledgerDepartment) score += 100;
+      if (createdAtMs && ledgerCreatedAtMs) {
+        score -= Math.abs(createdAtMs - ledgerCreatedAtMs) / 1000;
+      }
+      return { row: row, line: line, score: score };
+    })
+    .sort(function(a, b) {
+      return Number(b.score || 0) - Number(a.score || 0);
+    });
+
+  return ranked[0] || null;
+}
+
 function invRestoreLotAllocations_(ledgerRow) {
   const ledgerId = String(ledgerRow?.id || '').trim();
   if (!ledgerId) throw new Error('Ledger id missing');
@@ -14380,6 +14959,8 @@ function invReverseLedgerTransaction(ledgerId, reason) {
     'TXN:' + id,
     'Reason:' + reversalReason
   ].join(' | ');
+  let purchaseCacheTouched = false;
+  let purchaseSync = null;
 
   if (!isInbound && !isOutbound) {
     throw new Error('Unsupported transaction quantity');
@@ -14422,29 +15003,46 @@ function invReverseLedgerTransaction(ledgerId, reason) {
     if (originalType === 'PR-RECEIPT') {
       const prNo = String(ledger.ref_no || '').trim();
       if (prNo) {
-        const pr = (supabaseSelect('inv_purchase_requests', {
-          select: 'pr_no,requested_qty,received_qty,status',
-          filters: { pr_no: 'eq.' + prNo },
-          limit: 1
-        }) || [])[0];
-        if (pr) {
-          const nextReceived = Math.max(0, Number(pr.received_qty || 0) - qtyIn);
-          supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + prNo }, {
-            received_qty: nextReceived,
-            status: nextReceived >= Number(pr.requested_qty || 0) ? 'CLOSED' : 'OPEN'
-          });
+        invAdjustPurchaseRequestReceipt_(prNo, -qtyIn);
+        purchaseCacheTouched = true;
+      }
+    } else if (originalType === 'PO-RECEIPT') {
+      const receiptMatch = invFindMatchingPOReceiptRecord_(ledger, itemCode);
+      if (receiptMatch?.row?.id) {
+        supabaseDelete('purchase_po_receipts', { id: 'eq.' + String(receiptMatch.row.id || '').trim() });
+        const sourceType = String(receiptMatch.line?.sourceType || receiptMatch.row?.sourceType || '').trim().toUpperCase();
+        const linkedPrNo = String(receiptMatch.line?.sourceRef || '').trim();
+        if (sourceType === 'INVENTORY_PR' && linkedPrNo) {
+          invAdjustPurchaseRequestReceipt_(linkedPrNo, -qtyIn);
         }
+        purchaseCacheTouched = true;
+        purchaseSync = {
+          poNo: String(receiptMatch.row.poNo || ledger.ref_no || '').trim(),
+          receiptId: String(receiptMatch.row.id || '').trim()
+        };
+      } else {
+        purchaseSync = {
+          poNo: String(ledger.ref_no || '').trim(),
+          warning: 'Linked PO receipt row could not be matched for deletion'
+        };
       }
     }
   }
 
+  if (purchaseCacheTouched || purchaseSync?.poNo) {
+    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  }
+  if (purchaseSync?.poNo) {
+    _purchaseUpdatePOStatus_(purchaseSync.poNo);
+  }
   refreshStockMV_();
 
   return {
     ok: true,
     reversedId: id,
     reversalType: reversalType,
-    batchNo: batchNo
+    batchNo: batchNo,
+    purchaseSync: purchaseSync
   };
 }
 
@@ -14762,6 +15360,7 @@ function _artworkDivisionBySoLineMap_(rows) {
 
 function invListPurchaseRequestsJSON(opts = {}) {
   const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
+  const forceRefresh = opts.forceRefresh === true;
   const requestLimit = Math.max(1, Number(opts.limit || 300) || 300);
   const cacheKey = _cacheKeyHash_('INV_PURCHASE_REQUESTS', JSON.stringify({
     v: purchaseCacheVersion,
@@ -14771,12 +15370,14 @@ function invListPurchaseRequestsJSON(opts = {}) {
     limit: requestLimit
   }));
   const cache = CacheService.getScriptCache();
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    try {
-      return JSON.parse(cached);
-    } catch (err) {
-      cache.remove(cacheKey);
+  if (!forceRefresh) {
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      try {
+        return JSON.parse(cached);
+      } catch (err) {
+        cache.remove(cacheKey);
+      }
     }
   }
 
@@ -14820,7 +15421,8 @@ else if (opts.toDate) {
   }) || [];
 
   const purchaseRows = purchaseListInventoryRequestsJSON(Object.assign({}, opts, {
-    limit: requestLimit
+    limit: requestLimit,
+    forceRefresh: forceRefresh
   })).rows || [];
   const purchaseMap = {};
   purchaseRows.forEach(r => { purchaseMap[r.prNo] = r; });
@@ -14915,20 +15517,11 @@ function invUpdatePurchaseRequest(payload) {
 }
 
 function invListPurchaseReceiptsJSON(opts = {}) {
-  const filters = { ref_type: _supabaseInFilter_(['PR-RECEIPT', 'PO-RECEIPT', 'DIRECT-RECEIPT']) };
+  const filters = _invBuildTxnDateFilters_(opts);
+  filters.ref_type = _supabaseInFilter_(['PR-RECEIPT', 'PO-RECEIPT', 'DIRECT-RECEIPT']);
+  const requestLimit = _invResolveTxnRequestLimit_(opts, 1000, 50000);
 
-  if (opts.fromDate && opts.toDate) {
-    const from = opts.fromDate + 'T00:00:00';
-    const to = opts.toDate + 'T23:59:59';
-    filters.and = `(created_at.gte.${from},created_at.lte.${to})`;
-  } else if (opts.fromDate) {
-    filters.created_at = `gte.${opts.fromDate}T00:00:00`;
-  } else if (opts.toDate) {
-    filters.created_at = `lte.${opts.toDate}T23:59:59`;
-  }
-
-  const rows = supabaseSelect('v_inventory_transaction_register', {
-    select: `
+  const rows = _invSelectTxnRegisterRows_('inv_receipt_register_v', `
       id,
       created_at,
       ref_type,
@@ -14942,11 +15535,7 @@ function invListPurchaseReceiptsJSON(opts = {}) {
       department,
       batch_no,
       remarks
-    `,
-    filters,
-    order: 'created_at.desc',
-    limit: opts.limit || 200
-  }) || [];
+    `, filters, requestLimit);
 
   const reversalMap = invGetReversalSummaryMap_(rows.map(function(r) { return r.id; }));
 
@@ -14999,6 +15588,9 @@ function invPostPOReceiptLine_(payload) {
   const po = payload.poRow || (purchaseListPOsJSON().rows || []).find(function(r) {
     return String(r.poNo || '') === String(payload.poNo || '');
   });
+  if (po && _purchaseIsCancelledStatus_(po.status)) {
+    throw new Error('Cancelled purchase orders cannot be received.');
+  }
   const liveLine = payload.liveLine || ((po?.lines || []).find(function(r) {
     return String(r.id || '') === String(payload.poLineId || '');
   }) || line);
@@ -15363,38 +15955,7 @@ function generatePRNo_() {
 }
 
 function invPostDirectReceipt(payload) {
-  if ((!payload.itemCode && !payload.itemName) || !payload.qty || !payload.rate || !payload.reason)
-    throw new Error('Item, qty, rate & reason required');
-
-  const item = resolveInventoryItemForEntry_(payload.itemCode, payload.itemName);
-
-  const lot = invCreateLot_({
-    itemCode: item.item_code || payload.itemCode,
-    qty: payload.qty,
-    rate: payload.rate,
-    batchNo: payload.batchNo,
-    sourceType: 'DIRECT-RECEIPT',
-    sourceRef: payload.refNo || '',
-    receiptDate: new Date().toISOString(),
-    location: payload.location,
-    department: payload.department || '',
-    remarks: payload.reason
-  });
-
-  const ledger = invAppendLedger_({
-    refType: 'DIRECT-RECEIPT',
-    refNo: payload.refNo || '',
-    itemCode: item.item_code || payload.itemCode,
-    qtyIn: payload.qty,
-    rate: payload.rate,
-    batchNo: lot.batchNo,
-    location: payload.location,
-    remarks: payload.reason
-  });
-
-refreshStockMV_();
-
-  return { ok: true, receiptNo: ledger?.id || '', batchNo: lot.batchNo || '' };
+  throw new Error('Direct material receipt is disabled. Please receive materials only through PR -> PO -> GRN flow.');
 }
 
 function invGetReceiptPrintData(receiptNo) {
@@ -16166,26 +16727,9 @@ refreshStockMV_();
 }
 
 function invListRTSJSON(opts = {}) {
-
-const filters = {ref_type: 'eq.RTS'};
-
-if (opts.fromDate && opts.toDate) {
-
-  const from = opts.fromDate + 'T00:00:00';
-  const to   = opts.toDate   + 'T23:59:59';
-
-  filters.and =
-    `(created_at.gte.${from},created_at.lte.${to})`;
-}
-else if (opts.fromDate) {
-  filters.created_at = `gte.${opts.fromDate}T00:00:00`;
-}
-else if (opts.toDate) {
-  filters.created_at = `lte.${opts.toDate}T23:59:59`;
-}
-
-  const rows = supabaseSelect('v_inventory_transaction_register', {
-    select: `
+  const filters = _invBuildTxnDateFilters_(opts, 'RTS');
+  const requestLimit = _invResolveTxnRequestLimit_(opts, 1000, 50000);
+  const rows = _invSelectTxnRegisterRows_('inv_rts_register_v', `
       id,
       created_at,
       ref_no,
@@ -16197,11 +16741,7 @@ else if (opts.toDate) {
       batch_no,
       item_code,
       item_name
-    `,
-    filters,
-    order: 'created_at.desc',
-    limit: opts.limit || 50
-  }) || [];
+    `, filters, requestLimit);
 
   const allocationMap = invGetAllocationSummaryMap_(rows.map(r => r.id));
   const reversalMap = invGetReversalSummaryMap_(rows.map(r => r.id));
@@ -16260,18 +16800,9 @@ refreshStockMV_();
 }
 
 function invListRFPJSON(opts = {}) {
-
-  const filters = { ref_type: 'eq.RFP' };
-
-  if (opts.fromDate && opts.toDate) {
-    const from = opts.fromDate + 'T00:00:00';
-    const to   = opts.toDate   + 'T23:59:59';
-    filters.and =
-      `(created_at.gte.${from},created_at.lte.${to})`;
-  }
-
-  const rows = supabaseSelect('v_inventory_transaction_register', {
-    select: `
+  const filters = _invBuildTxnDateFilters_(opts, 'RFP');
+  const requestLimit = _invResolveTxnRequestLimit_(opts, 1000, 50000);
+  const rows = _invSelectTxnRegisterRows_('inv_rfp_register_v', `
       id,
       created_at,
       ref_no,
@@ -16283,11 +16814,7 @@ function invListRFPJSON(opts = {}) {
       batch_no,
       item_code,
       item_name
-    `,
-    filters,
-    order: 'created_at.desc',
-    limit: opts.limit || 50
-  }) || [];
+    `, filters, requestLimit);
 
   const allocationMap = invGetAllocationSummaryMap_(rows.map(r => r.id));
   const reversalMap = invGetReversalSummaryMap_(rows.map(r => r.id));
@@ -16713,7 +17240,9 @@ function invPostSheetConversion(payload) {
   const sourceQty = Number(payload.sourceQty || 0);
   const sourceBatchNo = String(payload.sourceBatchNo || '').trim();
   const location = payload.location || DEFAULT_LOCATION;
-  const sourceLines = Array.isArray(payload.lines) ? payload.lines : [];
+  const sourceLines = Array.isArray(payload.lines) && payload.lines.length
+    ? payload.lines
+    : (payload.line ? [payload.line] : []);
   const cutRequestRef = String(payload.cutRequestRef || '').trim();
   const remarks = String(payload.remarks || '').trim();
   const doneBy = String(payload.doneBy || Session.getActiveUser?.().getEmail?.() || '').trim();
@@ -16991,8 +17520,7 @@ function invPostSheetConversion(payload) {
 
     supabaseUpdate('inv_sheet_conversion_lines', { id: 'eq.' + lineId }, {
       batch_no: targetLot.batchNo,
-      target_lot_id: targetLotRow?.id || null,
-      updated_at: conversionDate
+      target_lot_id: targetLotRow?.id || null
     });
 
     const lineShare = sourceAreaPerSheet > 0 ? (line.lineAreaPerSheet / sourceAreaPerSheet) : 0;
@@ -17321,17 +17849,9 @@ function invGetConversionDetailJSON(conversionNo) {
 }
 
 function invListAdjustmentsJSON(opts = {}) {
-
-  const filters = { ref_type: 'eq.ADJ' };
-
-  if (opts.fromDate && opts.toDate) {
-    const from = opts.fromDate + 'T00:00:00';
-    const to   = opts.toDate   + 'T23:59:59';
-    filters.and = `(created_at.gte.${from},created_at.lte.${to})`;
-  }
-
-  const rows = supabaseSelect('v_inventory_transaction_register', {
-    select: `
+  const filters = _invBuildTxnDateFilters_(opts, 'ADJ');
+  const requestLimit = _invResolveTxnRequestLimit_(opts, 1000, 50000);
+  const rows = _invSelectTxnRegisterRows_('inv_adjustment_register_v', `
       id,
       created_at,
       qty_in,
@@ -17343,11 +17863,7 @@ function invListAdjustmentsJSON(opts = {}) {
       batch_no,
       item_code,
       item_name
-    `,
-    filters,
-    order: 'created_at.desc',
-    limit: opts.limit || 50
-  }) || [];
+    `, filters, requestLimit);
 
   const allocationMap = invGetAllocationSummaryMap_(rows.map(r => r.id));
   const reversalMap = invGetReversalSummaryMap_(rows.map(r => r.id));
@@ -17375,6 +17891,7 @@ function invListAdjustmentsJSON(opts = {}) {
 
 function invGetStockSnapshotJSON(opts = {}) {
   const includeAnalytics = opts.includeAnalytics === true;
+  const forceRefresh = opts.forceRefresh === true;
   const requestedLimit = Math.max(1, Number(opts.limit || 5000) || 5000);
   const snapshotLimit = Math.min(requestedLimit, 5000);
   const version = PropertiesService.getScriptProperties().getProperty('INV_STOCK_SNAPSHOT_VERSION') || '0';
@@ -17386,9 +17903,11 @@ function invGetStockSnapshotJSON(opts = {}) {
     a: includeAnalytics ? 1 : 0
   }));
   const cache = CacheService.getScriptCache();
-  const cached = cache.get(cacheKey);
-  if (cached) {
-    return JSON.parse(cached);
+  if (!forceRefresh) {
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
   }
 
   try {
@@ -22184,8 +22703,14 @@ function _prodExpandCorr2PlyStageRows_(rows) {
       }));
       return;
     }
+    const baseProducedTotal = Number(row.producedQty || row.produced_qty || 0);
     groups.forEach(function(group, index) {
-      const produced = Number(detailTotals[String(row.routingId || '') + '||' + group.groupKey] || 0);
+      let produced = Number(detailTotals[String(row.routingId || '') + '||' + group.groupKey] || 0);
+      if (!(produced > 0) && groups.length === 1 && baseProducedTotal > 0) {
+        // Keep single-set rows visible when a legacy save inserted the stage
+        // production entry but the 2-ply detail row is missing.
+        produced = baseProducedTotal;
+      }
       const planned = Number(group.planQty || 0);
       expanded.push(Object.assign({}, row, {
         rowKey: String(row.routingId || '') + '||2PLY||' + group.groupKey,
@@ -23578,6 +24103,9 @@ function saveProductionBulk(entries, token) {
   const createdBy = Session.getActiveUser()?.getEmail?.() || 'user';
   const inserts = [];
   const corr2PlyDetailRefs = [];
+  const corr2PlyDetailTotals = entries.some(function(entry) {
+    return !!(entry && entry.corrugation2PlyDetails && entry.corrugation2PlyDetails.group && entry.corrugation2PlyDetails.group.groupKey);
+  }) ? _prodGetCorr2PlyDetailTotals_(routingIds) : {};
   const orderedEntries = entries.slice().sort(function(a, b) {
     const ra = routingMap[String(a.routingId)] || {};
     const rb = routingMap[String(b.routingId)] || {};
@@ -23607,11 +24135,29 @@ function saveProductionBulk(entries, token) {
       jobProducedTotals,
       jobTotals
     );
-    const plannedQty = Number(stageInfo.plannedQty || 0);
-    const producedQty = Number(stageInfo.producedQty || 0);
-    const balance = Number(stageInfo.balanceQty || 0);
+    let plannedQty = Number(stageInfo.plannedQty || 0);
+    let producedQty = Number(stageInfo.producedQty || 0);
+    let balance = Number(stageInfo.balanceQty || 0);
     const produced = Number(payload.producedQty || 0);
     const rejected = Number(payload.rejectedQty || 0);
+    const corr2PlyGroup = payload.corrugation2PlyDetails && payload.corrugation2PlyDetails.group
+      ? payload.corrugation2PlyDetails.group
+      : null;
+    const corr2PlyKey = corr2PlyGroup && corr2PlyGroup.groupKey
+      ? String(routing.id || '') + '||' + String(corr2PlyGroup.groupKey || '')
+      : '';
+
+    if (corr2PlyKey) {
+      const groupPlannedQty = Number(corr2PlyGroup.planQty || 0);
+      const groupProducedQty = Number(corr2PlyDetailTotals[corr2PlyKey] || 0);
+      if (groupPlannedQty > 0) {
+        // 2-ply rows are expanded into group-level lines in the UI. Validate
+        // against the same grouped plan/balance the operator sees there.
+        plannedQty = groupPlannedQty;
+        producedQty = groupProducedQty;
+        balance = Math.max(groupPlannedQty - groupProducedQty, 0);
+      }
+    }
 
     if (produced <= 0)
       return;
@@ -23637,6 +24183,9 @@ function saveProductionBulk(entries, token) {
       jobProducedTotals[String(routing.id)][stageInfo.jobKey] = (jobProducedTotals[String(routing.id)][stageInfo.jobKey] || 0) + produced;
       if (!jobTotals[String(routing.id)]) jobTotals[String(routing.id)] = {};
       jobTotals[String(routing.id)][stageInfo.jobKey] = (jobTotals[String(routing.id)][stageInfo.jobKey] || 0) + goodQty;
+    }
+    if (corr2PlyKey) {
+      corr2PlyDetailTotals[corr2PlyKey] = (corr2PlyDetailTotals[corr2PlyKey] || 0) + produced;
     }
     if (payload.corrugation2PlyDetails) {
       const d = payload.corrugation2PlyDetails || {};
@@ -23683,17 +24232,34 @@ function saveProductionBulk(entries, token) {
     try {
       if (corr2PlyDetailRefs.length) {
         const insertedRows = _supabaseBulkInsertInChunks_('production_entries', inserts, 30, 250000);
-        const detailRows = corr2PlyDetailRefs.map(function(ref) {
-          const inserted = insertedRows[ref.insertIndex] || {};
-          return _prodBuildCorr2PlyDetailInsert_(
-            ref.detail,
-            inserted.id || null,
-            inserts[ref.insertIndex],
-            ref.routing,
-            createdBy
-          );
-        });
-        if (detailRows.length) _supabaseBulkInsertMinimalInChunks_('corrugation_2ply_entry_details', detailRows, 30, 250000);
+        const insertedIds = insertedRows.map(function(row) {
+          return String(row && row.id || '').trim();
+        }).filter(Boolean);
+        try {
+          const detailRows = corr2PlyDetailRefs.map(function(ref) {
+            const inserted = insertedRows[ref.insertIndex] || {};
+            return _prodBuildCorr2PlyDetailInsert_(
+              ref.detail,
+              inserted.id || null,
+              inserts[ref.insertIndex],
+              ref.routing,
+              createdBy
+            );
+          });
+          if (detailRows.length) _supabaseBulkInsertMinimalInChunks_('corrugation_2ply_entry_details', detailRows, 30, 250000);
+        } catch (detailErr) {
+          insertedIds.forEach(function(id) {
+            try {
+              supabaseDeleteMinimal('corrugation_2ply_entry_details', { production_entry_id: 'eq.' + id });
+            } catch (cleanupErr) {}
+          });
+          insertedIds.forEach(function(id) {
+            try {
+              supabaseDeleteMinimal('production_entries', { id: 'eq.' + id });
+            } catch (cleanupErr) {}
+          });
+          throw detailErr;
+        }
       } else {
         _supabaseBulkInsertMinimalInChunks_('production_entries', inserts, 40, 300000);
       }
@@ -24309,6 +24875,7 @@ this.purchaseCreatePO = purchaseCreatePO;
 this.purchaseCreateArtworkPO = purchaseCreateArtworkPO;
 this.purchaseUpdatePO = purchaseUpdatePO;
 this.purchaseSaveLeadTimeBulk = purchaseSaveLeadTimeBulk;
+this.purchaseCancelPOs = purchaseCancelPOs;
 this.purchaseReceivePOLine = purchaseReceivePOLine;
 this.purchaseReceiveArtworkPOLine = purchaseReceiveArtworkPOLine;
 this.purchaseReceiveArtworkPOBulk = purchaseReceiveArtworkPOBulk;
@@ -24350,6 +24917,7 @@ this.invListRTSJSON = invListRTSJSON;
 this.invListRFPJSON = invListRFPJSON;
 this.invListAdjustmentsJSON = invListAdjustmentsJSON;
 this.invListAvailableLotsJSON = invListAvailableLotsJSON;
+this.invRefreshInventoryCaches = invRefreshInventoryCaches;
 
 // ===== FG STOCK =====
 this.fgGetBootstrap = fgGetBootstrap;

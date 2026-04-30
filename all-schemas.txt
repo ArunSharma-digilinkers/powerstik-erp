@@ -828,6 +828,69 @@ $$;
 
 
 --
+-- Name: backfill_missing_sales_order_artworks(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.backfill_missing_sales_order_artworks() RETURNS bigint
+    LANGUAGE plpgsql
+    AS $$
+declare
+  v_inserted bigint := 0;
+begin
+  with inserted as (
+    insert into public.artworks (
+      so_id,
+      line_no,
+      artwork_no,
+      product_type,
+      plate_status,
+      die_status,
+      status,
+      sheet_length,
+      sheet_width,
+      sheet_ups,
+      printing_colors
+    )
+    select
+      sol.so_id,
+      sol.line_no,
+      null,
+      coalesce(sol.category, ''),
+      'PENDING',
+      'PENDING',
+      'NO_ART',
+      null,
+      null,
+      null,
+      null
+    from public.sales_order_lines sol
+    join public.sales_orders so
+      on so.id = sol.so_id
+    left join public.artworks a
+      on a.so_id = sol.so_id
+     and a.line_no::text = sol.line_no::text
+    where a.id is null
+      and sol.so_id is not null
+      and sol.line_no is not null
+      and upper(coalesce(so.status, 'OPEN')) not in ('CANCELLED', 'CLOSED')
+      and upper(coalesce(sol.status, 'OPEN')) not in ('CANCELLED', 'CLOSED')
+      and upper(coalesce(so.order_prefix, '')) <> 'MB'
+      and upper(coalesce(so.sales_type, '')) <> 'MANUAL_BILLING'
+      and upper(trim(coalesce(sol.product_code, ''))) not in ('SLC001', 'SLC002', 'SLC003')
+      and upper(trim(coalesce(sol.category, ''))) not in ('FLEXO PRINTING PLATE', 'OFFSET PRINTING PLATE', 'DIE')
+      and upper(trim(coalesce(sol.hsn_group, ''))) not in ('FLEXO PRINTING PLATE', 'OFFSET PRINTING PLATE', 'DIE')
+      and upper(trim(coalesce(sol.product_name, ''))) not in ('FLEXO PRINTING PLATE', 'OFFSET PRINTING PLATE', 'DIE')
+    returning 1
+  )
+  select count(*) into v_inserted
+  from inserted;
+
+  return coalesce(v_inserted, 0);
+end;
+$$;
+
+
+--
 -- Name: billing_document_register_v2(date, date, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1183,6 +1246,93 @@ begin
   end if;
 
   return v_new_id;
+end;
+$$;
+
+
+--
+-- Name: ensure_artwork_row_for_sales_order_line_trg(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.ensure_artwork_row_for_sales_order_line_trg() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare
+  v_order_status text := 'OPEN';
+  v_order_prefix text := '';
+  v_sales_type text := '';
+  v_item_code text := upper(trim(coalesce(new.product_code, '')));
+  v_category text := upper(trim(coalesce(new.category, '')));
+  v_hsn_group text := upper(trim(coalesce(new.hsn_group, '')));
+  v_product_name text := upper(trim(coalesce(new.product_name, '')));
+begin
+  if new.so_id is null or new.line_no is null then
+    return new;
+  end if;
+
+  select
+    upper(coalesce(so.status, 'OPEN')),
+    upper(coalesce(so.order_prefix, '')),
+    upper(coalesce(so.sales_type, ''))
+  into
+    v_order_status,
+    v_order_prefix,
+    v_sales_type
+  from public.sales_orders so
+  where so.id = new.so_id;
+
+  if coalesce(v_order_status, 'OPEN') in ('CANCELLED', 'CLOSED') then
+    return new;
+  end if;
+
+  if upper(coalesce(new.status, 'OPEN')) in ('CANCELLED', 'CLOSED') then
+    return new;
+  end if;
+
+  if v_order_prefix = 'MB' or v_sales_type = 'MANUAL_BILLING' then
+    return new;
+  end if;
+
+  if v_item_code in ('SLC001', 'SLC002', 'SLC003')
+     or v_category in ('FLEXO PRINTING PLATE', 'OFFSET PRINTING PLATE', 'DIE')
+     or v_hsn_group in ('FLEXO PRINTING PLATE', 'OFFSET PRINTING PLATE', 'DIE')
+     or v_product_name in ('FLEXO PRINTING PLATE', 'OFFSET PRINTING PLATE', 'DIE') then
+    return new;
+  end if;
+
+  insert into public.artworks (
+    so_id,
+    line_no,
+    artwork_no,
+    product_type,
+    plate_status,
+    die_status,
+    status,
+    sheet_length,
+    sheet_width,
+    sheet_ups,
+    printing_colors
+  )
+  select
+    new.so_id,
+    new.line_no,
+    null,
+    coalesce(new.category, ''),
+    'PENDING',
+    'PENDING',
+    'NO_ART',
+    null,
+    null,
+    null,
+    null
+  where not exists (
+    select 1
+    from public.artworks a
+    where a.so_id = new.so_id
+      and a.line_no::text = new.line_no::text
+  );
+
+  return new;
 end;
 $$;
 
@@ -5056,16 +5206,6 @@ CREATE TABLE public.idempotency_keys (
 
 
 --
--- Name: inv_item_sequences; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.inv_item_sequences (
-    prefix text NOT NULL,
-    last_no integer DEFAULT 0 NOT NULL
-);
-
-
---
 -- Name: inv_items; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -5123,6 +5263,94 @@ CREATE TABLE public.inv_ledger (
     CONSTRAINT not_both_qty_check CHECK ((NOT ((qty_in > (0)::numeric) AND (qty_out > (0)::numeric)))),
     CONSTRAINT qty_positive_check CHECK (((qty_in >= (0)::numeric) AND (qty_out >= (0)::numeric))),
     CONSTRAINT rate_non_negative CHECK ((rate >= (0)::numeric))
+);
+
+
+--
+-- Name: v_inventory_transaction_register; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_inventory_transaction_register AS
+ SELECT l.id,
+    l.item_id,
+    l.created_at,
+    upper(COALESCE(l.ref_type, ''::text)) AS ref_type,
+    l.ref_no,
+    COALESCE(i.item_code, ''::text) AS item_code,
+    COALESCE(i.item_name, ''::text) AS item_name,
+    COALESCE(i.uom, ''::text) AS uom,
+    COALESCE(i.category, ''::text) AS category,
+    COALESCE(l.department, ''::text) AS department,
+    COALESCE(l.qty_in, (0)::numeric) AS qty_in,
+    COALESCE(l.qty_out, (0)::numeric) AS qty_out,
+    COALESCE(l.rate, (0)::numeric) AS rate,
+    COALESCE(l.value, (0)::numeric) AS value,
+    COALESCE(l.location, ''::text) AS location,
+    COALESCE(l.batch_no, ''::text) AS batch_no,
+    COALESCE(l.remarks, ''::text) AS remarks
+   FROM (public.inv_ledger l
+     LEFT JOIN public.inv_items i ON ((i.id = l.item_id)));
+
+
+--
+-- Name: inv_adjustment_register_v; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.inv_adjustment_register_v AS
+ SELECT id,
+    item_id,
+    created_at,
+    ref_type,
+    ref_no,
+    item_code,
+    item_name,
+    uom,
+    category,
+    department,
+    qty_in,
+    qty_out,
+    rate,
+    value,
+    location,
+    batch_no,
+    remarks
+   FROM public.v_inventory_transaction_register
+  WHERE (ref_type = 'ADJ'::text);
+
+
+--
+-- Name: inv_issue_register_v; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.inv_issue_register_v AS
+ SELECT id,
+    item_id,
+    created_at,
+    ref_type,
+    ref_no,
+    item_code,
+    item_name,
+    uom,
+    category,
+    department,
+    qty_in,
+    qty_out,
+    rate,
+    value,
+    location,
+    batch_no,
+    remarks
+   FROM public.v_inventory_transaction_register
+  WHERE (ref_type = 'ISSUE'::text);
+
+
+--
+-- Name: inv_item_sequences; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inv_item_sequences (
+    prefix text NOT NULL,
+    last_no integer DEFAULT 0 NOT NULL
 );
 
 
@@ -5194,6 +5422,84 @@ CREATE TABLE public.inv_purchase_requests (
     item_code text,
     item_name text
 );
+
+
+--
+-- Name: inv_receipt_register_v; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.inv_receipt_register_v AS
+ SELECT id,
+    item_id,
+    created_at,
+    ref_type,
+    ref_no,
+    item_code,
+    item_name,
+    uom,
+    category,
+    department,
+    qty_in,
+    qty_out,
+    rate,
+    value,
+    location,
+    batch_no,
+    remarks
+   FROM public.v_inventory_transaction_register
+  WHERE (ref_type = ANY (ARRAY['PR-RECEIPT'::text, 'PO-RECEIPT'::text, 'DIRECT-RECEIPT'::text]));
+
+
+--
+-- Name: inv_rfp_register_v; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.inv_rfp_register_v AS
+ SELECT id,
+    item_id,
+    created_at,
+    ref_type,
+    ref_no,
+    item_code,
+    item_name,
+    uom,
+    category,
+    department,
+    qty_in,
+    qty_out,
+    rate,
+    value,
+    location,
+    batch_no,
+    remarks
+   FROM public.v_inventory_transaction_register
+  WHERE (ref_type = 'RFP'::text);
+
+
+--
+-- Name: inv_rts_register_v; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.inv_rts_register_v AS
+ SELECT id,
+    item_id,
+    created_at,
+    ref_type,
+    ref_no,
+    item_code,
+    item_name,
+    uom,
+    category,
+    department,
+    qty_in,
+    qty_out,
+    rate,
+    value,
+    location,
+    batch_no,
+    remarks
+   FROM public.v_inventory_transaction_register
+  WHERE (ref_type = 'RTS'::text);
 
 
 --
@@ -7873,32 +8179,6 @@ CREATE VIEW public.v_flexo_work_order_jobs AS
 --
 
 COMMENT ON VIEW public.v_flexo_work_order_jobs IS 'Fast Flexo Work Order queue: pending, approval status, remaining qty, and processed WO metadata in one view for GAS.';
-
-
---
--- Name: v_inventory_transaction_register; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.v_inventory_transaction_register AS
- SELECT l.id,
-    l.item_id,
-    l.created_at,
-    upper(COALESCE(l.ref_type, ''::text)) AS ref_type,
-    l.ref_no,
-    COALESCE(i.item_code, ''::text) AS item_code,
-    COALESCE(i.item_name, ''::text) AS item_name,
-    COALESCE(i.uom, ''::text) AS uom,
-    COALESCE(i.category, ''::text) AS category,
-    COALESCE(l.department, ''::text) AS department,
-    COALESCE(l.qty_in, (0)::numeric) AS qty_in,
-    COALESCE(l.qty_out, (0)::numeric) AS qty_out,
-    COALESCE(l.rate, (0)::numeric) AS rate,
-    COALESCE(l.value, (0)::numeric) AS value,
-    COALESCE(l.location, ''::text) AS location,
-    COALESCE(l.batch_no, ''::text) AS batch_no,
-    COALESCE(l.remarks, ''::text) AS remarks
-   FROM (public.inv_ledger l
-     LEFT JOIN public.inv_items i ON ((i.id = l.item_id)));
 
 
 --
@@ -14662,6 +14942,13 @@ CREATE TRIGGER trg_sales_order_line_status_from_line AFTER INSERT OR UPDATE OF q
 --
 
 CREATE TRIGGER trg_sales_order_line_status_from_order AFTER INSERT OR UPDATE OF status ON public.sales_orders FOR EACH ROW EXECUTE FUNCTION public.sales_order_line_status_from_order_trg();
+
+
+--
+-- Name: sales_order_lines trg_sales_order_lines_ensure_artwork; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_sales_order_lines_ensure_artwork AFTER INSERT OR UPDATE OF so_id, line_no, product_code, product_name, category, hsn_group, status ON public.sales_order_lines FOR EACH ROW EXECUTE FUNCTION public.ensure_artwork_row_for_sales_order_line_trg();
 
 
 --
