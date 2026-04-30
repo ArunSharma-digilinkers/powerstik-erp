@@ -16146,6 +16146,7 @@ function _invIsPrimaryFlexoIssueMaterial_(label, snapshotJson, itemCodeOverride,
 function _invBuildNormalizedWOIssuePreparedRow_(row, snapshotJson) {
   const snap = snapshotJson || {};
   const next = Object.assign({}, row);
+  const originalMaterialKey = normalizeStoredWOMaterialKey_(row.material_key || row.materialKey || '');
   const parsed = parseStoredWOMaterialKey_(row.material_key || row.materialKey || '');
   const label = String(parsed.label || row.item_label || row.itemLabel || '').trim();
   const labelUpper = label.toUpperCase();
@@ -16181,14 +16182,15 @@ function _invBuildNormalizedWOIssuePreparedRow_(row, snapshotJson) {
     next.required_qty = flexoRunningMeter;
   }
 
-  if (next.uom && next.uom !== currentUom) {
-    next.material_key = normalizeWOMaterialKey_(
-      next.item_label,
-      gsm,
-      deckleMm,
-      cutMm,
-      next.uom
-    );
+  const normalizedMaterialKey = normalizeWOMaterialKey_(
+    next.item_label,
+    gsm,
+    deckleMm,
+    cutMm,
+    next.uom
+  );
+  if (normalizedMaterialKey && normalizedMaterialKey !== originalMaterialKey) {
+    next.material_key = normalizedMaterialKey;
   }
 
   return next;
@@ -16233,11 +16235,14 @@ function _invComputePreparedWOIssueRowIssuedQty_(row, issuedRows, snapshotJson) 
     if (!(qtyOut > 0)) return sum;
 
     if (targetUom === 'RM') {
-      if (sourceUom === 'RM') return sum + qtyOut;
-      if (_invIsFlexoSnapshot_(snapshotJson) && sourceUom === 'KG') {
-        return sum + _invFlexoKgToRm_(qtyOut, snapshotJson);
+      // Flexo issue transactions are now posted and reviewed in running meter.
+      // Some older ledger remarks still carry a stale KG material key even though
+      // the entered transaction qty itself is already RM. Respect the posted qty
+      // here instead of auto-converting it to the full WO RM requirement.
+      if (sourceUom === 'RM' || (_invIsFlexoSnapshot_(snapshotJson) && sourceUom === 'KG')) {
+        return sum + qtyOut;
       }
-      return sum;
+      return sourceUom ? sum : (sum + qtyOut);
     }
     if (targetUom === 'KG') {
       return sourceUom === 'KG' ? (sum + qtyOut) : sum;
