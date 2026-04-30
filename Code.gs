@@ -125,7 +125,7 @@ function _supabaseSelectAll_(table, opts, pageSize, maxRows) {
 
 function _selectArtworkJobsFromView_(viewName, opts) {
   const query = opts || {};
-  const optionalColumns = ['teeth', 'stock_qty_to_bill', 'division', 'job_type', 'job_reference', 'expected_delivery', 'job_priority', 'product_remarks', 'prepress_remarks'];
+  const optionalColumns = ['so_created_at', 'teeth', 'stock_qty_to_bill', 'division', 'job_type', 'job_reference', 'expected_delivery', 'job_priority', 'product_remarks', 'prepress_remarks'];
   const viewPattern = String(viewName || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const stripSelectColumn = function(select, column) {
     return String(select || '')
@@ -10336,6 +10336,18 @@ function _commitArtworkSequence_(cfg, nextNo) {
   }
 }
 
+function _artworkFormatSoTime_(createdAt, fallbackTime) {
+  if (createdAt) {
+    const raw = String(createdAt || '').trim();
+    const normalized = /[zZ]|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : raw + 'Z';
+    const dt = new Date(normalized);
+    if (!isNaN(dt.getTime())) {
+      return Utilities.formatDate(dt, 'Asia/Kolkata', 'HH:mm');
+    }
+  }
+  return String(fallbackTime || '');
+}
+
 function _artworkRowToWorkbenchJob_(r) {
   const artworkAssigned = !!String(r.artwork_no || '').trim();
   const normalizedProductType = _artworkNormalizeProductType_(
@@ -10348,7 +10360,7 @@ function _artworkRowToWorkbenchJob_(r) {
     so: String(r.so_number || ''),
     soDate: r.so_date || null,
     soCreatedAt: r.so_created_at || null,
-    soTime: String(r.so_time || ''),
+    soTime: _artworkFormatSoTime_(r.so_created_at, r.so_time),
     salesRep: String(r.sales_rep || ''),
     lineNo: String(r.line_no || ''),
     productCode: String(r.product_code || ''),
@@ -10921,7 +10933,7 @@ function getArtworkWorkbench(fromDate, toDate, pendingOnly) {
     filters.or = '(status.is.null,status.neq.APPROVED)';
   }
 
-  const baseSelect = 'id,so_number,so_date,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status';
+  const baseSelect = 'id,so_number,so_date,so_created_at,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status';
   let rows = selectArtworkWorkbenchActiveView_({
     select: baseSelect + ',fg_stock_qty',
     filters: filters,
@@ -11036,7 +11048,7 @@ function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly) {
   const version = PropertiesService.getScriptProperties().getProperty('ARTWORK_WORKBENCH_VERSION') || '0';
   const cacheKey = _cacheKeyHash_('ARTWORK_WORKBENCH', JSON.stringify({
     v: version,
-    schema: 'ARTWORK_WORKBENCH_DETAIL_ROWS_V3',
+    schema: 'ARTWORK_WORKBENCH_DETAIL_ROWS_V5_SO_TIME_UTC',
     fromDate: fromDate || '',
     toDate: toDate || '',
     pendingOnly: pendingOnly === true
@@ -11053,7 +11065,7 @@ function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly) {
 function getArtworkGroupJobs(artworkNo) {
   const no = String(artworkNo || '').trim();
   if (!no) throw new Error('Missing artwork no');
-  const baseSelect = 'id,so_number,so_date,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status';
+  const baseSelect = 'id,so_number,so_date,so_created_at,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status';
   const rows = _decorateArtworkRowsWithOrderStatus_(_filterSalesServiceOnlyItems_(selectArtworkJobsView_({
     select: baseSelect,
     filters: { artwork_no: 'eq.' + no },
@@ -17897,8 +17909,8 @@ function invListAdjustmentsJSON(opts = {}) {
 function invGetStockSnapshotJSON(opts = {}) {
   const includeAnalytics = opts.includeAnalytics === true;
   const forceRefresh = opts.forceRefresh === true;
-  const requestedLimit = Math.max(1, Number(opts.limit || 5000) || 5000);
-  const snapshotLimit = Math.min(requestedLimit, 5000);
+  const requestedLimit = Math.max(1, Number(opts.limit || 20000) || 20000);
+  const snapshotLimit = Math.min(requestedLimit, 20000);
   const version = PropertiesService.getScriptProperties().getProperty('INV_STOCK_SNAPSHOT_VERSION') || '0';
   const cacheKey = _cacheKeyHash_('INV_STOCK_SNAPSHOT', JSON.stringify({
     v: version,
@@ -17976,29 +17988,59 @@ function invGetStockSnapshotJSON(opts = {}) {
       return String(row.location || '').trim().toUpperCase() !== 'FG';
     })
     .slice(0, snapshotLimit);
-  const allSnapshotRows = snapshotRows;
+  let allSnapshotRows = snapshotRows.slice();
 
   const normalizeItemCode = code =>
     String(code || '').trim().toUpperCase();
 
   const itemMetaMap = {};
-  const snapshotItemCodes = [...new Set(allSnapshotRows
-    .map(r => normalizeItemCode(r.itemcode || r.item_code || ''))
-    .filter(Boolean))];
-  if (snapshotItemCodes.length) {
-    const chunkSize = 200;
-    for (let i = 0; i < snapshotItemCodes.length; i += chunkSize) {
-      const chunk = snapshotItemCodes.slice(i, i + chunkSize);
-      const itemRows = supabaseSelect('inv_items', {
-        select: 'id,item_code,category,department,uom',
-        filters: { item_code: _supabaseInFilter_(chunk) }
-      }) || [];
-      itemRows.forEach(item => {
-        const key = normalizeItemCode(item.item_code);
-        if (!key || itemMetaMap[key]) return;
-        itemMetaMap[key] = item;
-      });
-    }
+  const activeItemRows = (supabaseSelect('inv_items', {
+    select: 'id,item_code,item_name,category,department,uom,active',
+    order: 'item_name.asc'
+  }) || []).filter(function(item) {
+    if (item.active === false) return false;
+    const q = String(opts.q || '').trim().toLowerCase();
+    if (!q) return true;
+    const hay = [
+      item.item_code,
+      item.item_name,
+      item.category,
+      item.department,
+      item.uom
+    ].join(' ').toLowerCase();
+    return hay.indexOf(q) !== -1;
+  });
+  activeItemRows.forEach(function(item) {
+    const key = normalizeItemCode(item.item_code);
+    if (!key || itemMetaMap[key]) return;
+    itemMetaMap[key] = item;
+  });
+
+  const snapshotItemCodes = {};
+  allSnapshotRows.forEach(function(row) {
+    const key = normalizeItemCode(row.itemcode || row.item_code || '');
+    if (key) snapshotItemCodes[key] = true;
+  });
+  const zeroStockRows = [];
+  activeItemRows.forEach(function(item) {
+    const itemCodeKey = normalizeItemCode(item.item_code);
+    if (!itemCodeKey || snapshotItemCodes[itemCodeKey]) return;
+    zeroStockRows.push({
+      itemcode: item.item_code || '',
+      itemname: item.item_name || '',
+      category: item.category || '',
+      department: item.department || '',
+      uom: item.uom || '',
+      location: (opts.location || DEFAULT_LOCATION || 'MAIN'),
+      qty: 0,
+      avgrate: 0,
+      avg_rate: 0,
+      value: 0,
+      last_movement_at: null
+    });
+  });
+  if (zeroStockRows.length) {
+    allSnapshotRows = allSnapshotRows.concat(zeroStockRows).slice(0, snapshotLimit);
   }
 
   const daysBetween = (start, end) =>
