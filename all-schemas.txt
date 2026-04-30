@@ -1590,21 +1590,90 @@ $$;
 -- Name: inv_stock_snapshot_ui(text, text, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.inv_stock_snapshot_ui(p_location text DEFAULT NULL::text, p_search text DEFAULT NULL::text, p_limit integer DEFAULT 5000) RETURNS TABLE(itemcode text, itemname text, category text, department text, uom text, location text, qty numeric, avgrate numeric, avg_rate numeric, value numeric, last_movement_at timestamp with time zone, oldest_receipt_at timestamp with time zone, ageing_days integer, movement_class text, next_batch_no text, batch_count integer, avg_lead_time_days numeric, avg_daily_consumption numeric, safety_factor numeric, minimum_stock_level numeric, msl_status text, msl_gap numeric)
+CREATE FUNCTION public.inv_stock_snapshot_ui(p_location text DEFAULT NULL::text, p_search text DEFAULT NULL::text, p_limit integer DEFAULT 20000) RETURNS TABLE(itemcode text, itemname text, category text, department text, uom text, location text, qty numeric, avgrate numeric, avg_rate numeric, value numeric, last_movement_at timestamp with time zone, oldest_receipt_at timestamp with time zone, ageing_days integer, movement_class text, next_batch_no text, batch_count integer, avg_lead_time_days numeric, avg_daily_consumption numeric, safety_factor numeric, minimum_stock_level numeric, msl_status text, msl_gap numeric)
     LANGUAGE sql STABLE
     AS $$
+  with base_rows as (
+    select
+      s.item_id,
+      s.item_code,
+      s.item_name,
+      s.category,
+      s.department,
+      s.uom,
+      s.location,
+      s.qty,
+      s.avg_rate,
+      s.value,
+      s.last_movement_at
+    from public.inv_stock_mv s
+    where (p_location is null or trim(p_location) = '' or upper(s.location) = upper(trim(p_location)))
+      and upper(coalesce(s.location, '')) <> 'FG'
+      and (
+        p_search is null or trim(p_search) = '' or
+        lower(
+          concat_ws(
+            ' ',
+            s.item_code,
+            s.item_name,
+            s.category,
+            s.department,
+            s.uom,
+            s.location
+          )
+        ) like '%' || lower(trim(p_search)) || '%'
+      )
+
+    union all
+
+    select
+      i.id as item_id,
+      i.item_code,
+      i.item_name,
+      coalesce(i.category, ''::text) as category,
+      coalesce(i.department, ''::text) as department,
+      coalesce(i.uom, ''::text) as uom,
+      coalesce(nullif(upper(trim(p_location)), ''), 'MAIN') as location,
+      0::numeric as qty,
+      0::numeric as avg_rate,
+      0::numeric as value,
+      null::timestamptz as last_movement_at
+    from public.inv_items i
+    where coalesce(i.active, true) = true
+      and not exists (
+        select 1
+        from public.inv_stock_mv s0
+        where s0.item_id = i.id
+          and upper(coalesce(s0.location, '')) <> 'FG'
+          and (p_location is null or trim(p_location) = '' or upper(s0.location) = upper(trim(p_location)))
+      )
+      and (
+        p_search is null or trim(p_search) = '' or
+        lower(
+          concat_ws(
+            ' ',
+            i.item_code,
+            i.item_name,
+            i.category,
+            i.department,
+            i.uom,
+            coalesce(nullif(upper(trim(p_location)), ''), 'MAIN')
+          )
+        ) like '%' || lower(trim(p_search)) || '%'
+      )
+  )
   select
-    s.item_code as itemcode,
-    s.item_name as itemname,
-    s.category,
-    s.department,
-    s.uom,
-    s.location,
-    s.qty,
-    s.avg_rate as avgrate,
-    s.avg_rate,
-    s.value,
-    s.last_movement_at,
+    b.item_code as itemcode,
+    b.item_name as itemname,
+    b.category,
+    b.department,
+    b.uom,
+    b.location,
+    b.qty,
+    b.avg_rate as avgrate,
+    b.avg_rate,
+    b.value,
+    b.last_movement_at,
     a.oldest_receipt_at,
     a.ageing_days,
     a.movement_class,
@@ -1614,31 +1683,14 @@ CREATE FUNCTION public.inv_stock_snapshot_ui(p_location text DEFAULT NULL::text,
     a.avg_daily_consumption,
     a.safety_factor,
     a.minimum_stock_level,
-    case when s.qty < coalesce(a.minimum_stock_level, 0) then 'BELOW_MSL' else 'OK' end as msl_status,
-    round((s.qty - coalesce(a.minimum_stock_level, 0))::numeric, 2) as msl_gap
-  from public.inv_stock_mv s
+    case when b.qty < coalesce(a.minimum_stock_level, 0) then 'BELOW_MSL' else 'OK' end as msl_status,
+    round((b.qty - coalesce(a.minimum_stock_level, 0))::numeric, 2) as msl_gap
+  from base_rows b
   left join public.inv_stock_analytics_mv a
-    on a.item_id = s.item_id
-   and a.location = s.location
-  where (p_location is null or trim(p_location) = '' or upper(s.location) = upper(trim(p_location)))
-    and upper(coalesce(s.location, '')) <> 'FG'
-    and (
-      p_search is null or trim(p_search) = '' or
-      lower(
-        concat_ws(
-          ' ',
-          s.item_code,
-          s.item_name,
-          s.category,
-          s.department,
-          s.uom,
-          s.location,
-          coalesce(a.next_batch_no, '')
-        )
-      ) like '%' || lower(trim(p_search)) || '%'
-    )
-  order by s.item_name asc, s.item_code asc
-  limit greatest(coalesce(p_limit, 5000), 1);
+    on a.item_id = b.item_id
+   and a.location = b.location
+  order by b.item_name asc, b.item_code asc, b.location asc
+  limit greatest(coalesce(p_limit, 20000), 1);
 $$;
 
 
