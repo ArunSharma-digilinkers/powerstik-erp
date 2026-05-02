@@ -638,12 +638,12 @@ const DEFAULT_MASTERS = {
   gsmList: [60,70,80,90,100,130,170,200,230,250,300,350,400,450],
   upsOptions: [1,2,4,6,8,9,12,16,18,24,32],
   departments: ['Printing','Lamination','Coating','Die Cutting','Rotary Cutting','Stitching','Side Pasting','Packing','QC','Embossing','Window Pasting','Corrugation Sheet Pasting','2 Ply Making','Cutting Pre','Cutting Post','Inspection/Slitting','Flexo Printing','Flexo Die Cutting Offline'],
-  machines: ['Heidelberg SM74','CD102','UV 2 Color Machine','RS4 Printing','Canon Digital Printing','Lamination 01','Lamination 02','Lamination 03','Lamination 04','Die Cutting 01','Die Cutting 02','Die Cutting 03','2 Ply Making Machine','Flute Laminator','Manual Sheet Pasting','Markany Flexo E5','Rhyguan','Manual Die Cutting 04','Manual Die Cutting 05','Automatic Die Cutting','Stitching Manual 01','Stitching Manual 02','Auto Stitching','Folder Gluer','Manual Pasting','Manual Window Pasting','Auto Window Pasting','Packing Machine','Manual Packing','Manual Cutting Pre','Auto Cutting Pre','QC'],
+  machines: ['Heidelberg SM74','CD102','UV 2 Color Machine','RS4 Printing','Canon Digital Printing','Lamination 01','Lamination 02','Lamination 03','Lamination 04','Die Cutting 01','Die Cutting 02','Die Cutting 03','2 Ply Making Machine','Flute Laminator','Manual Sheet Pasting','Markany Flexo E5','Rhyguan','Manual Die Cutting 04','Manual Die Cutting 05','Automatic Die Cutting','Vulcan Cutting Machine','Flash Cut','Stitching Manual 01','Stitching Manual 02','Auto Stitching','Folder Gluer','Manual Pasting','Manual Window Pasting','Auto Window Pasting','Packing Machine','Manual Packing','Manual Cutting Pre','Auto Cutting Pre','QC'],
   machinesByDept: {
     'Printing': ['','Heidelberg SM74', 'CD102', 'UV 2 Color Machine', 'RS4 Printing', 'Canon Digital Printing'],
     'Lamination': ['','Lamination 01', 'Lamination 02', 'Lamination 03', 'Lamination 04'],
     'Coating': ['','UV 2 Color Machine'],
-    'Die Cutting': ['','Die Cutting 01','Die Cutting 02','Die Cutting 03','Manual Die Cutting 04','Manual Die Cutting 05','Automatic Die Cutting'],
+    'Die Cutting': ['','Die Cutting 01','Die Cutting 02','Die Cutting 03','Manual Die Cutting 04','Manual Die Cutting 05','Automatic Die Cutting','Vulcan Cutting Machine','Flash Cut'],
     'Rotary Cutting': ['','Manual Rotary Cutting','Auto Rotary Cutting'],
     'Stitching': ['','Stitching Manual 01','Stitching Manual 02','Auto Stitching'],
     'Side Pasting': ['','Folder Gluer','Manual Pasting'],
@@ -812,7 +812,7 @@ function getMasters() {
 function getWOMasters() {
   try {
     const cache = CacheService.getScriptCache();
-    const cacheKey = 'WO_MASTERS_v7';
+    const cacheKey = 'WO_MASTERS_v8';
     const cached = cache.get(cacheKey);
     if (cached) return JSON.parse(cached);
 
@@ -3264,14 +3264,7 @@ function purchaseCreatePO(payload) {
   const prNos = [...new Set(selectedRows.map(function(line) {
     return String(line && (line.prNo || line.sourceRef) || '').trim();
   }).filter(Boolean))];
-  const prData = prNos.length ? purchaseListInventoryRequestsJSON({
-    status: '',
-    pendingOnly: false,
-    prNos: prNos,
-    limit: Math.max(prNos.length || 0, 1)
-  }).rows : [];
-  const prMap = {};
-  prData.forEach(row => { prMap[row.prNo] = row; });
+  const prMap = _purchaseGetInventoryPRValidationMap_(prNos);
 
   const poNo = _purchaseNextPoNo_();
   const now = _purchaseNowIso_();
@@ -3282,40 +3275,9 @@ function purchaseCreatePO(payload) {
       const prNo = String(line.prNo || line.sourceRef || '').trim();
       const pr = prMap[prNo];
       if (!pr) throw new Error('PR not found: ' + prNo);
-
-      const qty = Number(line.qty || 0);
-      const rate = Number(line.rate || 0);
-      const taxPct = Number(line.taxPct || 0);
-
-      if (qty <= 0) throw new Error('Invalid PO qty for ' + pr.prNo);
-      if (rate <= 0) throw new Error('Invalid PO rate for ' + pr.prNo);
-      if (taxPct < 0) throw new Error('Invalid tax % for ' + pr.prNo);
-
-      const basicAmount = Number((qty * rate).toFixed(2));
-      const taxAmount = Number((basicAmount * taxPct / 100).toFixed(2));
-      const totalAmount = Number((basicAmount + taxAmount).toFixed(2));
-
-      return {
-        id: Utilities.getUuid(),
-        poNo: poNo,
-        lineNo: idx + 1,
-        sourceType: 'INVENTORY_PR',
-        sourceRef: pr.prNo,
-        itemCode: pr.itemCode,
-        itemName: pr.itemName,
-        qty: qty,
-        rate: rate,
-        taxPct: taxPct,
-        amount: basicAmount,
-        taxAmount: taxAmount,
-        totalAmount: totalAmount,
-        department: pr.department || '',
-        jobRef: pr.jobRef || '',
-        remarks: String(line.remarks || pr.remarks || '').trim(),
-        receivedQty: 0,
-        pendingQty: qty,
+      return _purchaseNormalizeInventoryPRLine_(line, pr, idx + 1, poNo, now, {
         createdAt: now
-      };
+      });
     }
     throw new Error('Inventory purchase orders can only be created against purchase requests.');
   });
@@ -3530,6 +3492,16 @@ function purchaseUpdatePO(payload) {
     if (!line || !line.id) return;
     incomingMap[String(line.id)] = line;
   });
+  const incomingPrNos = [...new Set(
+    incomingList.map(function(line) {
+      return String(line && (line.prNo || line.sourceRef) || '').trim();
+    })
+    .concat(existingLines.map(function(line) {
+      return String(line && line.sourceRef || '').trim();
+    }))
+    .filter(Boolean)
+  )];
+  const prMap = _purchaseGetInventoryPRValidationMap_(incomingPrNos);
 
   let totalQty = 0;
   let basicTotal = 0;
@@ -3551,7 +3523,39 @@ function purchaseUpdatePO(payload) {
       return;
     }
     const sourceType = String(incoming.sourceType || line.sourceType || '').trim().toUpperCase() || 'DIRECT';
-    const next = _purchaseNormalizeDirectLine_(Object.assign({}, line, incoming, { sourceType: sourceType }), sourceType, finalLines.length + 1, header.poNo, line.createdAt || _purchaseNowIso_(), { keepId: true });
+    const hasReceipts = Number(live.receivedQty || 0) > 0;
+    let next;
+    if (!isPlateDiePO) {
+      if (sourceType !== 'INVENTORY_PR' || !String(incoming.prNo || incoming.sourceRef || line.sourceRef || '').trim()) {
+        throw new Error('Inventory purchase orders can only add lines from pending purchase requests.');
+      }
+      const prNo = String(incoming.prNo || incoming.sourceRef || line.sourceRef || '').trim();
+      const prCtx = prMap[prNo];
+      if (!prCtx) throw new Error('PR not found: ' + prNo);
+      next = _purchaseNormalizeInventoryPRLine_(Object.assign({}, line, incoming, { sourceType: sourceType, prNo: prNo }), prCtx, finalLines.length + 1, header.poNo, line.createdAt || _purchaseNowIso_(), {
+        keepId: true,
+        createdAt: line.createdAt || _purchaseNowIso_(),
+        currentAllocatedQty: Number(line.qty || 0),
+        allowExistingOnClosed: true
+      });
+    } else {
+      next = _purchaseNormalizeDirectLine_(Object.assign({}, line, incoming, { sourceType: sourceType }), sourceType, finalLines.length + 1, header.poNo, line.createdAt || _purchaseNowIso_(), { keepId: true });
+    }
+    if (hasReceipts) {
+      if (Number(next.qty || 0) + 0.0001 < Number(live.receivedQty || 0)) {
+        throw new Error('PO qty cannot be reduced below received qty for line ' + line.lineNo);
+      }
+      const changedCommercial =
+        String(next.sourceType || '').trim().toUpperCase() !== String(line.sourceType || '').trim().toUpperCase() ||
+        String(next.sourceRef || '').trim() !== String(line.sourceRef || '').trim() ||
+        String(next.itemCode || '').trim().toUpperCase() !== String(line.itemCode || '').trim().toUpperCase() ||
+        String(next.itemName || '').trim().toUpperCase() !== String(line.itemName || '').trim().toUpperCase() ||
+        Math.abs(Number(next.rate || 0) - Number(line.rate || 0)) > 0.0001 ||
+        Math.abs(Number(next.taxPct || 0) - Number(line.taxPct || 0)) > 0.0001;
+      if (changedCommercial) {
+        throw new Error('Received PO line ' + line.lineNo + ' cannot change item, source, rate, or GST after GRN activity.');
+      }
+    }
     next.id = line.id;
     next.poId = header.id;
     finalLines.push(next);
@@ -3563,6 +3567,13 @@ function purchaseUpdatePO(payload) {
       if (sourceType !== 'INVENTORY_PR' || !String(line.prNo || line.sourceRef || '').trim()) {
         throw new Error('Inventory purchase orders can only add lines from pending purchase requests.');
       }
+      const prNo = String(line.prNo || line.sourceRef || '').trim();
+      const prCtx = prMap[prNo];
+      if (!prCtx) throw new Error('PR not found: ' + prNo);
+      const next = _purchaseNormalizeInventoryPRLine_(Object.assign({}, line, { id: '' }), prCtx, finalLines.length + 1, header.poNo, _purchaseNowIso_(), {});
+      next.poId = header.id;
+      finalLines.push(next);
+      return;
     }
     const next = _purchaseNormalizeDirectLine_(Object.assign({}, line, { id: '' }), sourceType, finalLines.length + 1, header.poNo, _purchaseNowIso_());
     next.poId = header.id;
@@ -10087,6 +10098,7 @@ const rowsToInsert = _filterSalesServiceOnlyItems_(lines)
 
   if (rowsToInsert.length) {
     supabaseInsert('artworks', rowsToInsert);
+    PropertiesService.getScriptProperties().setProperty('ARTWORK_WORKBENCH_VERSION', String(Date.now()));
   }
 }
 
@@ -11044,7 +11056,7 @@ function getArtworkWorkbench(fromDate, toDate, pendingOnly) {
   };
 }
 
-function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly) {
+function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly, forceRefresh) {
   const version = PropertiesService.getScriptProperties().getProperty('ARTWORK_WORKBENCH_VERSION') || '0';
   const cacheKey = _cacheKeyHash_('ARTWORK_WORKBENCH', JSON.stringify({
     v: version,
@@ -11054,7 +11066,7 @@ function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly) {
     pendingOnly: pendingOnly === true
   }));
   const cache = CacheService.getScriptCache();
-  const cached = cache.get(cacheKey);
+  const cached = forceRefresh === true ? null : cache.get(cacheKey);
   if (cached) return cached;
 
   const payload = JSON.stringify(getArtworkWorkbench(fromDate, toDate, pendingOnly));
@@ -13902,16 +13914,28 @@ function _getUnifiedInventoryItems_(opts) {
   return rows;
 }
 
-function ensureInventoryItemExists_(itemCode) {
+function ensureInventoryItemExists_(itemCode, opts) {
   const code = String(itemCode || '').trim();
   if (!code) throw new Error('Item code required');
+  const options = opts || {};
+  const requireActive = options.requireActive === true;
+  const allowAutoCreate = options.allowAutoCreate === true;
 
   let item = (supabaseSelect('inv_items', {
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0];
 
-  if (item) return item;
+  if (item) {
+    if (requireActive && item.active === false) {
+      throw new Error('Inactive inventory item cannot be used');
+    }
+    return item;
+  }
+
+  if (!allowAutoCreate) {
+    throw new Error('Inventory item not found in active inventory master');
+  }
 
   const master = (supabaseSelect('items', {
     filters: { item_code: 'eq.' + code },
@@ -13938,6 +13962,9 @@ function ensureInventoryItemExists_(itemCode) {
   }) || [])[0];
 
   if (!item) throw new Error('Inventory item not found');
+  if (requireActive && item.active === false) {
+    throw new Error('Inactive inventory item cannot be used');
+  }
   return item;
 }
 
@@ -13946,7 +13973,10 @@ function resolveInventoryItemForEntry_(itemCode, itemName) {
   const name = String(itemName || '').trim();
 
   if (code) {
-    return ensureInventoryItemExists_(code);
+    return ensureInventoryItemExists_(code, {
+      requireActive: true,
+      allowAutoCreate: false
+    });
   }
 
   if (!name) throw new Error('Item required');
@@ -14280,6 +14310,146 @@ function _invSelectTxnRegisterRows_(primaryView, select, filters, requestLimit) 
   }
   if (lastErr) throw lastErr;
   return [];
+}
+
+function _purchaseGetInventoryPRValidationMap_(prNos) {
+  const keys = [...new Set((prNos || []).map(function(v) {
+    return String(v || '').trim();
+  }).filter(Boolean))];
+  if (!keys.length) return {};
+
+  const prRows = _supabaseSelectByKeyInBatches_(
+    'inv_purchase_requests',
+    'pr_no,item_id,item_code,item_name,requested_qty,received_qty,department,job_ref,remarks,status',
+    'pr_no',
+    keys,
+    null,
+    40
+  ) || [];
+  const prMap = {};
+  const receiptSeed = {};
+  prRows.forEach(function(row) {
+    const prNo = String(row.pr_no || '').trim();
+    if (!prNo) return;
+    receiptSeed[prNo] = Number(row.received_qty || 0);
+    prMap[prNo] = {
+      prNo: prNo,
+      itemId: row.item_id || '',
+      itemCode: row.item_code || '',
+      itemName: row.item_name || '',
+      requestedQty: Number(row.requested_qty || 0),
+      receivedQty: Number(row.received_qty || 0),
+      department: row.department || '',
+      jobRef: row.job_ref || '',
+      remarks: row.remarks || '',
+      status: String(row.status || 'OPEN').trim().toUpperCase() || 'OPEN',
+      orderedQty: 0,
+      openPOQty: 0,
+      availableToOrderQty: 0,
+      poRefs: []
+    };
+  });
+
+  const poMap = _purchaseBuildActivePRPoLineMap_(keys, receiptSeed);
+  Object.keys(prMap).forEach(function(prNo) {
+    const linked = poMap[prNo] || {};
+    prMap[prNo].orderedQty = Number(linked.orderedQty || 0);
+    prMap[prNo].openPOQty = Number(linked.openPOQty || 0);
+    prMap[prNo].availableToOrderQty = Math.max(
+      0,
+      Number(prMap[prNo].requestedQty || 0) -
+      Number(prMap[prNo].receivedQty || 0) -
+      Number(prMap[prNo].openPOQty || 0)
+    );
+    prMap[prNo].poRefs = Array.isArray(linked.refs) ? linked.refs.slice() : [];
+    prMap[prNo].latestRate = Number(linked.latestRate || 0);
+    prMap[prNo].latestTaxPct = Number(linked.latestTaxPct || 0);
+  });
+
+  return prMap;
+}
+
+function _purchaseAssertPRCanGeneratePO_(prCtx, qty, opts) {
+  const ctx = prCtx || null;
+  if (!ctx || !ctx.prNo) throw new Error('PR not found');
+  const status = String(ctx.status || 'OPEN').trim().toUpperCase() || 'OPEN';
+  const currentAllocatedQty = Math.max(0, Number(opts && opts.currentAllocatedQty || 0));
+  const requestedPoQty = Number(qty || 0);
+  if (['CLOSED', 'SHORT_CLOSED', 'CANCELLED'].indexOf(status) !== -1) {
+    if (opts && opts.allowExistingOnClosed === true && requestedPoQty <= currentAllocatedQty + 0.0001) {
+      return;
+    }
+    throw new Error('PO cannot be created for PR ' + ctx.prNo + ' because it is ' + status.replace('_', ' '));
+  }
+
+  const requestedQty = Number(ctx.requestedQty || 0);
+  const receivedQty = Number(ctx.receivedQty || 0);
+  const availableQty = Math.max(0, Number(ctx.availableToOrderQty || 0) + currentAllocatedQty);
+  if (!(requestedPoQty > 0)) {
+    throw new Error('Invalid PO qty for ' + ctx.prNo);
+  }
+
+  const allowOver = opts && opts.allowOverProcurement === true;
+  const overReason = String(opts && opts.overProcurementReason || '').trim();
+  if (!allowOver && requestedPoQty > availableQty + 0.0001) {
+    throw new Error('PO qty exceeds available PR balance for ' + ctx.prNo);
+  }
+  if (allowOver && requestedPoQty > availableQty + 0.0001 && !overReason) {
+    throw new Error('Over-procurement reason is required for PR ' + ctx.prNo);
+  }
+  if (requestedQty > 0 && receivedQty >= requestedQty && requestedPoQty > 0) {
+    throw new Error('PR ' + ctx.prNo + ' is already fully received');
+  }
+}
+
+function _purchaseNormalizeInventoryPRLine_(line, prCtx, lineNo, poNo, now, opts) {
+  const ctx = prCtx || null;
+  if (!ctx || !ctx.prNo) throw new Error('PR not found');
+
+  const qty = Number(line.qty || 0);
+  const rate = Number(line.rate || 0);
+  const taxPct = Number(line.taxPct || 0);
+  if (!(qty > 0)) throw new Error('Invalid PO qty for ' + ctx.prNo);
+  if (!(rate > 0)) throw new Error('Invalid PO rate for ' + ctx.prNo);
+  if (taxPct < 0) throw new Error('Invalid tax % for ' + ctx.prNo);
+
+  _purchaseAssertPRCanGeneratePO_(ctx, qty, {
+    allowOverProcurement: line.allowOverProcurement === true,
+    overProcurementReason: line.overProcurementReason,
+    currentAllocatedQty: opts && opts.currentAllocatedQty,
+    allowExistingOnClosed: opts && opts.allowExistingOnClosed === true
+  });
+
+  const basicAmount = Number((qty * rate).toFixed(2));
+  const taxAmount = Number((basicAmount * taxPct / 100).toFixed(2));
+  const totalAmount = Number((basicAmount + taxAmount).toFixed(2));
+  const overReason = String(line.overProcurementReason || '').trim();
+  const userRemarks = String(line.remarks || ctx.remarks || '').trim();
+  const mergedRemarks = [userRemarks, overReason ? ('OverProcurement:' + overReason) : '']
+    .filter(Boolean)
+    .join(' | ');
+
+  return {
+    id: opts && opts.keepId ? String(line.id || '').trim() : (String(line.id || '').trim() || Utilities.getUuid()),
+    poNo: poNo,
+    lineNo: lineNo,
+    sourceType: 'INVENTORY_PR',
+    sourceRef: ctx.prNo,
+    itemCode: ctx.itemCode,
+    itemName: ctx.itemName,
+    qty: qty,
+    rate: rate,
+    taxPct: taxPct,
+    amount: basicAmount,
+    taxAmount: taxAmount,
+    totalAmount: totalAmount,
+    department: ctx.department || '',
+    jobRef: ctx.jobRef || '',
+    remarks: mergedRemarks,
+    receivedQty: 0,
+    pendingQty: qty,
+    createdAt: opts && opts.createdAt ? opts.createdAt : now
+  };
 }
 
 function invAppendLedger_(p) {
@@ -15582,6 +15752,7 @@ function invPostPOReceiptLine_(payload) {
     throw new Error('PO line reference is required');
   }
 
+  _invAssertReceiptHeaderMetadata_(payload);
   const qty = Number(payload.qty || 0);
   const rate = Number(payload.rate || 0);
   if (qty <= 0 || rate <= 0) throw new Error('Invalid qty or rate');
@@ -15591,6 +15762,7 @@ function invPostPOReceiptLine_(payload) {
       String(row.id || '') === String(payload.poLineId || '');
   });
   if (!line) throw new Error('PO line not found');
+  ensureInventoryItemExists_(line.itemCode, { requireActive: true, allowAutoCreate: false });
 
   const sourceType = String(line.sourceType || '').toUpperCase();
   if (_purchaseIsPlateDieSource_(sourceType)) {
@@ -15607,17 +15779,35 @@ function invPostPOReceiptLine_(payload) {
     return String(r.id || '') === String(payload.poLineId || '');
   }) || line);
   const pendingQty = Number(liveLine.pendingQty || 0);
+  const overByQty = Number((qty - pendingQty).toFixed(6));
+  if (!payload.allowOverReceipt && overByQty > 0.0001) {
+    throw new Error('Over receipt blocked. Pending=' + pendingQty + ', Receive=' + qty);
+  }
+  if (payload.allowOverReceipt === true && overByQty > 0.0001 && !String(payload.overReceiptReason || '').trim()) {
+    throw new Error('Over receipt reason required');
+  }
+  if (_invReceiptCommercialMismatch_(payload, liveLine)) {
+    if (payload.allowCommercialOverride !== true) {
+      throw new Error('GRN commercial mismatch. Rate/GST differs from PO line; confirmation required.');
+    }
+    if (!String(payload.commercialOverrideReason || '').trim()) {
+      throw new Error('Commercial override reason required');
+    }
+  }
 
   const receiptNote = [
     'PO Receipt',
     payload.grnNo ? 'GRN:' + String(payload.grnNo).trim() : '',
     payload.idempotencyKey ? 'Idem:' + String(payload.idempotencyKey).trim() : '',
     'INV:' + String(payload.invoiceNo || '').trim(),
+    'InvoiceDate:' + String(payload.invoiceDate || '').trim(),
     payload.poNo ? 'PO:' + String(payload.poNo).trim() : '',
     payload.taxPct !== undefined && payload.taxPct !== null
       ? 'TaxPct:' + String(payload.taxPct).trim()
       : '',
     payload.vendorName ? 'Vendor:' + String(payload.vendorName).trim() : '',
+    payload.challanNo ? 'ChallanNo:' + String(payload.challanNo).trim() : '',
+    payload.challanDate ? 'ChallanDate:' + String(payload.challanDate).trim() : '',
     payload.paymentTerms ? 'Pay:' + String(payload.paymentTerms).trim() : '',
     payload.freightTerms ? 'Freight:' + String(payload.freightTerms).trim() : '',
     payload.freightValue !== undefined && payload.freightValue !== null
@@ -15626,6 +15816,8 @@ function invPostPOReceiptLine_(payload) {
     payload.freightGstPct !== undefined && payload.freightGstPct !== null
       ? 'FreightGST:' + String(payload.freightGstPct).trim()
       : '',
+    overByQty > 0.0001 ? 'OverReceiptReason:' + String(payload.overReceiptReason || '').trim() : '',
+    payload.allowCommercialOverride === true ? 'CommercialOverride:' + String(payload.commercialOverrideReason || '').trim() : '',
     payload.deliveryTerms ? 'Delivery:' + String(payload.deliveryTerms).trim() : '',
     payload.remarks ? 'Remarks:' + String(payload.remarks).trim() : ''
   ].filter(Boolean).join(' | ');
@@ -15668,7 +15860,7 @@ function invPostPOReceiptLine_(payload) {
       line_no: line.lineNo,
       source_type: line.sourceType,
       receipt_date: _purchaseIsoDate_(new Date()),
-      challan_no: '',
+      challan_no: String(payload.challanNo || '').trim(),
       qty: qty,
       rate: rate,
       remarks: String(payload.remarks || '').trim(),
@@ -15717,6 +15909,8 @@ function invPostPurchaseReceipt(payload) {
   if (!payload.prNo)
     throw new Error('PR required');
 
+  _invAssertReceiptHeaderMetadata_(payload);
+
   const pr = supabaseSelect('inv_purchase_requests', {
     filters: { pr_no: 'eq.' + payload.prNo },
     limit: 1
@@ -15727,6 +15921,10 @@ function invPostPurchaseReceipt(payload) {
 
   if (pr.status === 'CLOSED')
     throw new Error('PR already closed');
+  if (['SHORT_CLOSED', 'CANCELLED'].indexOf(String(pr.status || '').trim().toUpperCase()) !== -1)
+    throw new Error('PR is not open for GRN');
+
+  ensureInventoryItemExists_(payload.itemCode, { requireActive: true, allowAutoCreate: false });
 
   const qty = Number(payload.qty);
   const rate = Number(payload.rate);
@@ -15744,11 +15942,14 @@ function invPostPurchaseReceipt(payload) {
     payload.grnNo ? 'GRN:' + String(payload.grnNo).trim() : '',
     payload.idempotencyKey ? 'Idem:' + String(payload.idempotencyKey).trim() : '',
     'INV:' + String(payload.invoiceNo || '').trim(),
+    'InvoiceDate:' + String(payload.invoiceDate || '').trim(),
     payload.poNo ? 'PO:' + String(payload.poNo).trim() : '',
     payload.taxPct !== undefined && payload.taxPct !== null
       ? 'TaxPct:' + String(payload.taxPct).trim()
       : '',
     payload.vendorName ? 'Vendor:' + String(payload.vendorName).trim() : '',
+    payload.challanNo ? 'ChallanNo:' + String(payload.challanNo).trim() : '',
+    payload.challanDate ? 'ChallanDate:' + String(payload.challanDate).trim() : '',
     payload.paymentTerms ? 'Pay:' + String(payload.paymentTerms).trim() : '',
     payload.freightTerms ? 'Freight:' + String(payload.freightTerms).trim() : '',
     payload.freightValue !== undefined && payload.freightValue !== null
@@ -15827,7 +16028,7 @@ function invPostPurchaseReceiptBulk(payload) {
     });
 
   if (!lines.length) throw new Error('At least one receipt line is required');
-  if (!String(header.invoiceNo || '').trim()) throw new Error('Invoice No required');
+  _invAssertReceiptHeaderMetadata_(header);
   if (header.freightValue === '' || header.freightValue === null || header.freightValue === undefined) {
     throw new Error('Freight value is required');
   }
@@ -15842,6 +16043,10 @@ function invPostPurchaseReceiptBulk(payload) {
   try {
     const existing = invFindExistingGRNByKey_(idempotencyKey);
     if (existing) return existing;
+    const duplicateInvoice = _invFindDuplicateVendorInvoice_(header.vendorName, header.invoiceNo, idempotencyKey);
+    if (duplicateInvoice) {
+      throw new Error('Duplicate invoice detected for vendor + invoice no. Existing receipt: ' + duplicateInvoice.receiptNo);
+    }
 
     const receiptPoNo = String(header.poNo || '').trim();
     const touchedPoNos = {};
@@ -15873,8 +16078,11 @@ function invPostPurchaseReceiptBulk(payload) {
         taxPct: Number(line.taxPct || 0),
         location: header.location || DEFAULT_LOCATION,
         invoiceNo: String(header.invoiceNo || '').trim(),
+        invoiceDate: String(header.invoiceDate || '').trim(),
         poNo: String(header.poNo || '').trim(),
         vendorName: String(header.vendorName || '').trim(),
+        challanNo: String(header.challanNo || '').trim(),
+        challanDate: String(header.challanDate || '').trim(),
         paymentTerms: String(header.paymentTerms || '').trim(),
         freightTerms: String(header.freightTerms || '').trim(),
         freightValue: Number(header.freightValue || 0),
@@ -15882,6 +16090,9 @@ function invPostPurchaseReceiptBulk(payload) {
         deliveryTerms: String(header.deliveryTerms || '').trim(),
         remarks: String(header.remarks || '').trim(),
         allowOverReceipt: header.allowOverReceipt === true,
+        overReceiptReason: String(header.overReceiptReason || '').trim(),
+        allowCommercialOverride: header.allowCommercialOverride === true,
+        commercialOverrideReason: String(header.commercialOverrideReason || '').trim(),
         grnNo: grnNo,
         idempotencyKey: idempotencyKey
       };
@@ -15930,22 +16141,106 @@ function invPostPurchaseReceiptBulk(payload) {
   }
 }
 
-function invClosePurchaseRequest(prNo, reason) {
+function _invLifecycleActor_() {
+  try {
+    return Session.getActiveUser().getEmail() || 'ERP User';
+  } catch (err) {
+    return 'ERP User';
+  }
+}
 
-  if (!reason)
-    throw new Error('Close reason required');
+function _invGetPurchaseRequestLifecycleContext_(prNo) {
+  const key = String(prNo || '').trim();
+  if (!key) throw new Error('PR No required');
+  const pr = (supabaseSelect('inv_purchase_requests', {
+    select: 'pr_no,requested_qty,received_qty,status,remarks',
+    filters: { pr_no: 'eq.' + key },
+    limit: 1
+  }) || [])[0];
+  if (!pr) throw new Error('PR not found');
 
-  supabaseUpdate(
-    'inv_purchase_requests',
-    { pr_no: 'eq.' + prNo },
-    {
-      status: 'CLOSED',
-      closed_at: new Date().toISOString(),
-      remarks: reason
+  const ctxMap = _purchaseGetInventoryPRValidationMap_([key]);
+  const linked = ctxMap[key] || {};
+  return {
+    prNo: key,
+    requestedQty: Number(pr.requested_qty || 0),
+    receivedQty: Number(pr.received_qty || 0),
+    status: String(pr.status || 'OPEN').trim().toUpperCase() || 'OPEN',
+    remarks: String(pr.remarks || '').trim(),
+    orderedQty: Number(linked.orderedQty || 0),
+    openPOQty: Number(linked.openPOQty || 0),
+    availableToOrderQty: Math.max(0, Number(linked.availableToOrderQty || 0)),
+    poRefs: Array.isArray(linked.poRefs || linked.refs) ? (linked.poRefs || linked.refs).slice() : []
+  };
+}
+
+function invSetPurchaseRequestLifecycle(prNo, action, reason) {
+  const ctx = _invGetPurchaseRequestLifecycleContext_(prNo);
+  const target = String(action || '').trim().toUpperCase();
+  const why = String(reason || '').trim();
+  if (!target) throw new Error('Lifecycle action required');
+  if (!why) throw new Error('Reason required');
+  if (['CLOSED', 'SHORT_CLOSED', 'CANCELLED'].indexOf(ctx.status) !== -1) {
+    throw new Error('PR is already ' + ctx.status.replace('_', ' '));
+  }
+
+  const now = new Date().toISOString();
+  const actor = _invLifecycleActor_();
+  const auditNote = (target === 'CANCELLED' ? 'Cancelled' : (target === 'SHORT_CLOSED' ? 'Short closed' : 'Closed')) +
+    ' on ' + now + ' by ' + actor + ' | ' + why;
+  const nextRemarks = [ctx.remarks, auditNote].filter(Boolean).join('\n');
+
+  if (target === 'CANCELLED') {
+    if (ctx.receivedQty > 0.0001) throw new Error('PR with GRN/receipt activity cannot be cancelled');
+    if (ctx.orderedQty > 0.0001 || ctx.poRefs.length) throw new Error('PR with linked PO cannot be cancelled');
+    supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + ctx.prNo }, {
+      status: 'CANCELLED',
+      closed_at: now,
+      remarks: nextRemarks
+    });
+    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+    return { ok: true, status: 'CANCELLED' };
+  }
+
+  if (target === 'SHORT_CLOSED') {
+    if (ctx.openPOQty > 0.0001) throw new Error('Short close blocked. Open PO exists for this PR');
+    supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + ctx.prNo }, {
+      status: 'SHORT_CLOSED',
+      closed_at: now,
+      remarks: nextRemarks
+    });
+    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+    return { ok: true, status: 'SHORT_CLOSED' };
+  }
+
+  if (target === 'CLOSED') {
+    if (ctx.openPOQty > 0.0001) throw new Error('Close blocked. Open PO exists for this PR');
+    if (ctx.receivedQty > 0.0001) throw new Error('Close blocked. GRN/receipt activity already exists for this PR');
+    if (ctx.availableToOrderQty > 0.0001 || (ctx.requestedQty - ctx.receivedQty) > 0.0001) {
+      throw new Error('Close blocked. Pending procurement still remains for this PR');
     }
-  );
+    supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + ctx.prNo }, {
+      status: 'CLOSED',
+      closed_at: now,
+      remarks: nextRemarks
+    });
+    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+    return { ok: true, status: 'CLOSED' };
+  }
 
-  return { ok: true };
+  throw new Error('Unsupported lifecycle action');
+}
+
+function invClosePurchaseRequest(prNo, reason) {
+  return invSetPurchaseRequestLifecycle(prNo, 'CLOSED', reason);
+}
+
+function invShortClosePurchaseRequest(prNo, reason) {
+  return invSetPurchaseRequestLifecycle(prNo, 'SHORT_CLOSED', reason);
+}
+
+function invCancelPurchaseRequest(prNo, reason) {
+  return invSetPurchaseRequestLifecycle(prNo, 'CANCELLED', reason);
 }
 
 function generatePRNo_() {
@@ -16580,6 +16875,7 @@ function invListWorkOrdersForIssue() {
 function invPostIssue(payload) {
   if (!payload.itemCode || !payload.qty)
     throw new Error('Item and qty required');
+  ensureInventoryItemExists_(payload.itemCode, { requireActive: true, allowAutoCreate: false });
 
   const location = payload.location || DEFAULT_LOCATION;
   const qty = Number(payload.qty);
@@ -19220,6 +19516,7 @@ function _billingNormalizeManualLines_(rows) {
       productCode: String(src.productCode || '').trim(),
       productName: String(src.productName || '').trim(),
       hsn: String(src.hsn || '').trim(),
+      division: String(src.division || '').trim(),
       unit: String(src.unit || 'Nos').trim() || 'Nos',
       qty: _billingRound2_(src.qty),
       rate: _billingRound2_(src.rate),
@@ -20432,7 +20729,7 @@ function _billingManualSalesOrderLineRows_(manualLines, billToState) {
       job_reference: String(row.remarks || row.hsn || row.productCode || 'MANUAL').trim(),
       job_priority: '',
       product_remarks: String(row.remarks || '').trim(),
-      division: 'MANUAL',
+      division: String(row.division || '').trim(),
       quote_no: '',
       pm_code: '',
       prepress_remarks: String(row.hsn || '').trim(),
@@ -20494,7 +20791,7 @@ function _billingCreateOrUpdateManualSalesOrder_(options) {
   let inserted = supabaseBulkInsert('sales_order_lines', lineRows) || [];
   if (!inserted.length || inserted.some(function(row) { return !row || !row.id; })) {
     inserted = supabaseSelect('sales_order_lines', {
-      select: 'id,so_id,line_no,product_code,product_name,qty,unit,rate,gst_pct,amount,cgst,sgst,igst,line_total,prepress_remarks',
+      select: 'id,so_id,line_no,product_code,product_name,qty,unit,rate,gst_pct,amount,cgst,sgst,igst,line_total,prepress_remarks,division',
       filters: { so_id: 'eq.' + soId },
       order: 'line_no.asc'
     }) || [];
@@ -20520,6 +20817,7 @@ function _billingCreateOrUpdateManualSalesOrder_(options) {
         productCode: row.product_code || '',
         productName: row.product_name || '',
         hsn: row.prepress_remarks || '',
+        division: row.division || '',
         unit: row.unit || 'Nos',
         qty: _billingRound2_(row.qty),
         rate: _billingRound2_(row.rate),
@@ -20567,6 +20865,7 @@ function _billingValidateCreatePayload_(payload, token, sessionUser) {
     if (!manualLines.length) throw new Error('Add at least one manual line item.');
     manualLines.forEach(function(row, idx) {
       if (!row.productName) throw new Error('Manual line ' + (idx + 1) + ' requires item description.');
+      if (!row.division) throw new Error('Manual line ' + (idx + 1) + ' requires division.');
       if (!(row.qty > 0)) throw new Error('Manual line ' + (idx + 1) + ' requires quantity.');
       if (row.rate < 0) throw new Error('Manual line ' + (idx + 1) + ' has invalid rate.');
     });
@@ -20677,6 +20976,7 @@ function createInvoice(payload, token) {
       qty: row.billingQty,
       rate: row.billingRate,
       gst_pct: isChallan ? 0 : row.billingGstPct,
+      division: row.division || '',
       taxable_amount: taxable,
       line_amount: taxable,
       cgst_pct: tax.cgstPct,
@@ -20784,6 +21084,7 @@ function createInvoice(payload, token) {
     'line_no',
     'unit',
     'gst_pct',
+    'division',
     'taxable_amount',
     'source_mode',
     'dispatch_qty_snapshot',
@@ -20910,7 +21211,7 @@ function _billingCreateManualInvoice_(normalized, token, user) {
   const invoice = invoiceInsert && invoiceInsert[0];
   if (!invoice?.id) throw new Error(_billingDocumentLabel_(documentType) + ' header insert failed');
 
-  const optionalLineFields = ['so_number','line_no','unit','gst_pct','taxable_amount','source_mode','dispatch_qty_snapshot','ordered_qty_snapshot','billed_qty_snapshot'];
+  const optionalLineFields = ['so_number','line_no','unit','gst_pct','division','taxable_amount','source_mode','dispatch_qty_snapshot','ordered_qty_snapshot','billed_qty_snapshot'];
   manualSo.lines.forEach(function(row) {
     const tax = isChallan
       ? { cgstPct:0, sgstPct:0, igstPct:0 }
@@ -20928,6 +21229,7 @@ function _billingCreateManualInvoice_(normalized, token, user) {
       qty: row.qty,
       rate: row.rate,
       gst_pct: isChallan ? 0 : row.gstPct,
+      division: row.division || '',
       taxable_amount: row.taxableAmount,
       line_amount: row.taxableAmount,
       cgst_pct: tax.cgstPct,
@@ -21156,7 +21458,8 @@ function billingGetInvoiceEditor(invoiceId, token) {
       invoiceRefs: inv.invoice_no ? [inv.invoice_no] : [],
       poNumber: '',
       dispatchNo: '',
-      jobReference: ''
+      jobReference: '',
+      division: row.division || ''
     };
   }).filter(function(row) { return row.soLineId && String(row.sourceMode || '').toUpperCase() !== 'MANUAL'; });
   const manualLines = lines.map(function(row, idx) {
@@ -21165,6 +21468,7 @@ function billingGetInvoiceEditor(invoiceId, token) {
       productCode: row.product_code || '',
       productName: row.product_name || '',
       hsn: row.hsn || '',
+      division: row.division || '',
       unit: row.unit || 'Nos',
       qty: _billingRound2_(row.qty),
       rate: _billingRound2_(row.rate),
@@ -21296,6 +21600,7 @@ function updateInvoiceDraft(invoiceId, payload, token) {
       qty: _billingRound2_(entry.qty),
       rate: effectiveRate,
       gst_pct: effectiveGstPct,
+      division: row.division || '',
       taxable_amount: taxable,
       line_amount: taxable,
       cgst_pct: tax.cgstPct,
@@ -21399,6 +21704,7 @@ function updateInvoiceDraft(invoiceId, payload, token) {
     'line_no',
     'unit',
     'gst_pct',
+    'division',
     'taxable_amount',
     'source_mode',
     'dispatch_qty_snapshot',
@@ -21518,7 +21824,7 @@ function _billingUpdateManualInvoiceDraft_(invoiceId, inv, normalized, token) {
     grandTotal: grandTotal
   });
   supabaseDelete('invoice_lines', { invoice_id: 'eq.' + invoiceId });
-  const optionalLineFields = ['so_number','line_no','unit','gst_pct','taxable_amount','source_mode','dispatch_qty_snapshot','ordered_qty_snapshot','billed_qty_snapshot'];
+  const optionalLineFields = ['so_number','line_no','unit','gst_pct','division','taxable_amount','source_mode','dispatch_qty_snapshot','ordered_qty_snapshot','billed_qty_snapshot'];
   manualSo.lines.forEach(function(row) {
     const tax = isChallan
       ? { cgstPct:0, sgstPct:0, igstPct:0 }
@@ -21536,6 +21842,7 @@ function _billingUpdateManualInvoiceDraft_(invoiceId, inv, normalized, token) {
       qty: row.qty,
       rate: row.rate,
       gst_pct: isChallan ? 0 : row.gstPct,
+      division: row.division || '',
       taxable_amount: row.taxableAmount,
       line_amount: row.taxableAmount,
       cgst_pct: tax.cgstPct,
@@ -22402,6 +22709,60 @@ function _prodCorrPaperIdentitySet_(snapshot) {
     });
   });
   return out;
+}
+
+function _invReceiptCommercialMismatch_(payload, liveLine) {
+  const baseLine = liveLine || {};
+  const rateDiff = Math.abs(Number(payload.rate || 0) - Number(baseLine.rate || 0));
+  const taxDiff = Math.abs(Number(payload.taxPct || 0) - Number(baseLine.taxPct || 0));
+  return rateDiff > 0.0001 || taxDiff > 0.0001;
+}
+
+function _invAssertReceiptHeaderMetadata_(payload) {
+  const invoiceNo = String(payload.invoiceNo || '').trim();
+  const invoiceDate = String(payload.invoiceDate || '').trim();
+  const challanNo = String(payload.challanNo || '').trim();
+  const challanDate = String(payload.challanDate || '').trim();
+  if (!invoiceNo) throw new Error('Invoice No required');
+  if (!invoiceDate) throw new Error('Invoice Date required');
+  if ((challanNo && !challanDate) || (!challanNo && challanDate)) {
+    throw new Error('Challan No and Challan Date must both be entered');
+  }
+}
+
+function _invFindDuplicateVendorInvoice_(vendorName, invoiceNo, excludeIdempotencyKey) {
+  const vendor = String(vendorName || '').trim().toUpperCase();
+  const invoice = String(invoiceNo || '').trim().toUpperCase();
+  const excludeKey = String(excludeIdempotencyKey || '').trim();
+  if (!vendor || !invoice) return null;
+
+  const rows = supabaseSelect('inv_ledger', {
+    select: 'id,ref_type,ref_no,remarks,created_at',
+    filters: {
+      ref_type: _supabaseInFilter_(['PR-RECEIPT', 'PO-RECEIPT']),
+      remarks: 'ilike.%INV:' + invoice + '%'
+    },
+    order: 'created_at.desc',
+    limit: 300
+  }) || [];
+  if (!rows.length) return null;
+
+  const reversalMap = invGetReversalSummaryMap_(rows.map(function(row) { return row.id; }));
+  for (var i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (reversalMap[String(row.id || '')]?.reversed === true) continue;
+    const note = invParseReceiptNote_(row.remarks);
+    if (String(note.INV || '').trim().toUpperCase() !== invoice) continue;
+    if (String(note.VENDOR || '').trim().toUpperCase() !== vendor) continue;
+    if (excludeKey && String(note.IDEM || '').trim() === excludeKey) continue;
+    return {
+      receiptNo: row.id || '',
+      refType: row.ref_type || '',
+      refNo: row.ref_no || '',
+      createdAt: row.created_at || ''
+    };
+  }
+  return null;
 }
 
 function _prodExtractBoardPlyCountFromText_(value) {
@@ -27725,6 +28086,370 @@ function _reportsSectionDelivery_(token, params) {
   };
 }
 
+function _reportsDivisionBillingViewSelect_() {
+  return [
+    'invoice_line_id',
+    'invoice_id',
+    'invoice_no',
+    'invoice_date',
+    'created_at',
+    'posted_at',
+    'invoice_status',
+    'document_type',
+    'billing_mode',
+    'client_code',
+    'client_name',
+    'so_id',
+    'so_line_id',
+    'so_number',
+    'so_date',
+    'line_no',
+    'sales_rep',
+    'division',
+    'product_code',
+    'product_name',
+    'category',
+    'order_qty',
+    'billed_qty',
+    'rate',
+    'billed_value',
+    'line_total',
+    'expected_delivery',
+    'final_delivery'
+  ].join(',');
+}
+
+function _reportsMapDivisionBillingRow_(row) {
+  const orderQty = _reportsSafeNumber_(row.order_qty);
+  const billedQty = _reportsSafeNumber_(row.billed_qty);
+  const billedValue = _reportsSafeNumber_(row.billed_value);
+  const lineTotal = _reportsSafeNumber_(row.line_total || row.billed_value);
+  const division = String(row.division || '').trim() || 'Unassigned';
+  return {
+    invoiceLineId: String(row.invoice_line_id || row.id || '').trim(),
+    invoiceId: String(row.invoice_id || '').trim(),
+    invoiceNo: row.invoice_no || '',
+    invoiceDate: row.invoice_date || '',
+    createdAt: row.created_at || '',
+    postedAt: row.posted_at || '',
+    invoiceStatus: String(row.invoice_status || 'POSTED').trim().toUpperCase() || 'POSTED',
+    documentType: String(row.document_type || 'INVOICE').trim().toUpperCase() || 'INVOICE',
+    billingMode: row.billing_mode || '',
+    clientCode: row.client_code || '',
+    clientName: row.client_name || row.client_code || '',
+    soId: String(row.so_id || '').trim(),
+    soLineId: String(row.so_line_id || '').trim(),
+    soNumber: row.so_number || '',
+    soDate: row.so_date || '',
+    lineNo: row.line_no == null ? '' : String(row.line_no),
+    salesRep: row.sales_rep || '',
+    division: division,
+    productCode: row.product_code || '',
+    productName: row.product_name || '',
+    category: row.category || '',
+    orderQty: orderQty,
+    billedQty: billedQty,
+    rate: _reportsSafeNumber_(row.rate),
+    billedValue: billedValue,
+    lineTotal: lineTotal,
+    expectedDelivery: row.expected_delivery || '',
+    finalDelivery: row.final_delivery || ''
+  };
+}
+
+function _reportsBuildDivisionBillingRowsFromView_(filters) {
+  try {
+    return _supabaseSelectAll_('v_report_billing_register', {
+      select: _reportsDivisionBillingViewSelect_(),
+      filters: _reportsApplyDateFilterToQuery_(filters, 'invoice_date'),
+      order: 'invoice_date.desc,posted_at.desc,invoice_no.desc,so_number.asc,line_no.asc'
+    }, 1000, 50000).map(_reportsMapDivisionBillingRow_);
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'v_report_billing_register')) return null;
+    throw err;
+  }
+}
+
+function _reportsBuildDivisionBillingRowsLegacy_(filters) {
+  const invoiceRows = _reportsSelectAll_('invoices', {
+    select: 'id,invoice_no,invoice_date,created_at,posted_at,status,document_type,billing_mode,client_code,client_name',
+    filters: _reportsApplyDateFilterToQuery_(filters, 'invoice_date'),
+    order: 'invoice_date.desc,posted_at.desc,invoice_no.desc'
+  }).filter(function(row) {
+    const status = String(row.status || 'POSTED').trim().toUpperCase();
+    const documentType = String(row.document_type || 'INVOICE').trim().toUpperCase();
+    const invoiceNo = String(row.invoice_no || '').trim().toUpperCase();
+    return status === 'POSTED' &&
+      documentType !== 'CHALLAN' &&
+      invoiceNo.indexOf('DC-H/') !== 0;
+  });
+  if (!invoiceRows.length) return [];
+
+  const invoiceMap = {};
+  invoiceRows.forEach(function(row) {
+    invoiceMap[String(row.id || '').trim()] = row;
+  });
+  const invoiceIds = Object.keys(invoiceMap);
+  const lineRowsRaw = invoiceIds.length ? (_supabaseSelectByKeyInBatches_(
+    'invoice_lines',
+    'id,invoice_id,so_id,so_line_id,product_code,product_name,qty,rate,line_amount,line_total,so_number,line_no,taxable_amount,division',
+    'invoice_id',
+    invoiceIds,
+    null,
+    40
+  ) || []) : [];
+  const lineRowsFiltered = lineRowsRaw.filter(function(row) {
+    return String(row.invoice_id || '').trim() && !!invoiceMap[String(row.invoice_id || '').trim()];
+  });
+  if (!lineRowsFiltered.length) return [];
+
+  const lineIds = [...new Set(lineRowsFiltered.map(function(row) {
+    return String(row.so_line_id || '').trim();
+  }).filter(Boolean))];
+  const lineRows = lineIds.length ? (_supabaseSelectByKeyInBatches_(
+    'sales_order_lines',
+    'id,so_id,line_no,product_code,product_name,category,qty,division,expected_delivery,final_delivery',
+    'id',
+    lineIds,
+    null,
+    40
+  ) || []) : [];
+  const lineMap = {};
+  lineRows.forEach(function(row) {
+    lineMap[String(row.id || '').trim()] = row;
+  });
+
+  const soIds = [...new Set(lineRowsFiltered.map(function(row) {
+    const soLineId = String(row.so_line_id || '').trim();
+    return String((lineMap[soLineId] && lineMap[soLineId].so_id) || row.so_id || '').trim();
+  }).filter(Boolean))];
+  const soRows = soIds.length ? (_supabaseSelectByKeyInBatches_(
+    'sales_orders',
+    'id,so_number,so_date,client_code,sales_rep,status',
+    'id',
+    soIds,
+    null,
+    40
+  ) || []) : [];
+  const soMap = {};
+  soRows.forEach(function(row) {
+    soMap[String(row.id || '').trim()] = row;
+  });
+
+  const clientCodes = [...new Set(soRows.map(function(row) {
+    return String(row.client_code || '').trim();
+  }).filter(Boolean))];
+  const clientRows = clientCodes.length ? (_supabaseSelectByKeyInBatches_(
+    'clients',
+    'client_code,client_name',
+    'client_code',
+    clientCodes,
+    null,
+    40
+  ) || []) : [];
+  const clientMap = {};
+  clientRows.forEach(function(row) {
+    clientMap[String(row.client_code || '').trim()] = row;
+  });
+
+  return lineRowsFiltered.map(function(row) {
+    const invoice = invoiceMap[String(row.invoice_id || '').trim()] || {};
+    const soLineId = String(row.so_line_id || '').trim();
+    const line = lineMap[soLineId] || {};
+    const soId = String(line.so_id || row.so_id || '').trim();
+    const so = soMap[soId] || {};
+    const clientCode = String(invoice.client_code || so.client_code || '').trim();
+    const client = clientMap[clientCode] || {};
+    return _reportsMapDivisionBillingRow_({
+      invoice_line_id: row.id,
+      invoice_id: row.invoice_id,
+      invoice_no: invoice.invoice_no || '',
+      invoice_date: invoice.invoice_date || '',
+      created_at: row.created_at,
+      posted_at: invoice.posted_at || '',
+      invoice_status: invoice.status || 'POSTED',
+      document_type: invoice.document_type || 'INVOICE',
+      billing_mode: invoice.billing_mode || '',
+      client_code: clientCode,
+      client_name: invoice.client_name || client.client_name || clientCode || '',
+      so_id: soId,
+      so_line_id: soLineId,
+      so_number: row.so_number || so.so_number || '',
+      so_date: so.so_date || '',
+      line_no: row.line_no != null ? row.line_no : line.line_no,
+      sales_rep: so.sales_rep || '',
+      division: row.division || line.division || '',
+      product_code: line.product_code || row.product_code || '',
+      product_name: line.product_name || row.product_name || '',
+      category: line.category || '',
+      order_qty: _reportsSafeNumber_(line.qty),
+      billed_qty: row.qty,
+      rate: row.rate,
+      billed_value: row.taxable_amount != null ? row.taxable_amount : (row.line_amount != null ? row.line_amount : (_reportsSafeNumber_(row.qty) * _reportsSafeNumber_(row.rate))),
+      line_total: row.line_total != null ? row.line_total : (row.taxable_amount != null ? row.taxable_amount : row.line_amount),
+      expected_delivery: line.expected_delivery || '',
+      final_delivery: line.final_delivery || ''
+    });
+  }).filter(Boolean);
+}
+
+function _reportsFinalizeDivisionBillingRows_(rows, filters) {
+  return (rows || []).filter(function(row) {
+    return _reportsDatePasses_(row.invoiceDate, filters) &&
+      _reportsTextPasses_(row, filters, [
+        'invoiceNo',
+        'soNumber',
+        'lineNo',
+        'clientName',
+        'salesRep',
+        'division',
+        'productCode',
+        'productName',
+        'category',
+        'invoiceStatus',
+        'documentType',
+        'billingMode'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'division',
+        'invoiceStatus',
+        'documentType',
+        'billingMode',
+        'category'
+      ]);
+  }).sort(function(a, b) {
+    const aStamp = String(a.invoiceDate || a.postedAt || a.createdAt || '');
+    const bStamp = String(b.invoiceDate || b.postedAt || b.createdAt || '');
+    if (aStamp !== bStamp) return bStamp.localeCompare(aStamp);
+    if (String(a.invoiceNo || '') !== String(b.invoiceNo || '')) return String(b.invoiceNo || '').localeCompare(String(a.invoiceNo || ''));
+    if (String(a.soNumber || '') !== String(b.soNumber || '')) return String(b.soNumber || '').localeCompare(String(a.soNumber || ''));
+    return _reportsSafeNumber_(a.lineNo) - _reportsSafeNumber_(b.lineNo);
+  });
+}
+
+function _reportsBuildDivisionBillingRows_(filters) {
+  const viewRows = _reportsBuildDivisionBillingRowsFromView_(filters);
+  const rows = viewRows === null ? _reportsBuildDivisionBillingRowsLegacy_(filters) : viewRows;
+  return _reportsFinalizeDivisionBillingRows_(rows || [], filters);
+}
+
+function _reportsBuildDivisionBillingSummaryRows_(rows) {
+  const byDivision = {};
+  (rows || []).forEach(function(row) {
+    const key = String(row.division || '').trim() || 'Unassigned';
+    if (!byDivision[key]) {
+      byDivision[key] = {
+        division: key,
+        invoiceLines: 0,
+        billedQty: 0,
+        billedValue: 0,
+        lineTotal: 0,
+        invoices: {},
+        salesOrders: {},
+        clients: {},
+        lastInvoiceDate: ''
+      };
+    }
+    const acc = byDivision[key];
+    acc.invoiceLines += 1;
+    acc.billedQty += _reportsSafeNumber_(row.billedQty);
+    acc.billedValue += _reportsSafeNumber_(row.billedValue);
+    acc.lineTotal += _reportsSafeNumber_(row.lineTotal);
+    if (row.invoiceNo) acc.invoices[row.invoiceNo] = true;
+    if (row.soNumber) acc.salesOrders[row.soNumber] = true;
+    if (row.clientName) acc.clients[row.clientName] = true;
+    const invoiceDate = String(row.invoiceDate || '').trim();
+    if (invoiceDate && (!acc.lastInvoiceDate || invoiceDate > acc.lastInvoiceDate)) acc.lastInvoiceDate = invoiceDate;
+  });
+
+  return Object.keys(byDivision).map(function(key) {
+    const acc = byDivision[key];
+    return {
+      division: acc.division,
+      invoiceLines: acc.invoiceLines,
+      invoices: Object.keys(acc.invoices).length,
+      salesOrders: Object.keys(acc.salesOrders).length,
+      clients: Object.keys(acc.clients).length,
+      billedQty: Math.round(acc.billedQty * 100) / 100,
+      billedValue: Math.round(acc.billedValue * 100) / 100,
+      lineTotal: Math.round(acc.lineTotal * 100) / 100,
+      lastInvoiceDate: acc.lastInvoiceDate
+    };
+  }).sort(function(a, b) {
+    if (_reportsSafeNumber_(a.billedValue) !== _reportsSafeNumber_(b.billedValue)) {
+      return _reportsSafeNumber_(b.billedValue) - _reportsSafeNumber_(a.billedValue);
+    }
+    return String(a.division || '').localeCompare(String(b.division || ''));
+  });
+}
+
+function _reportsSectionDivisionBilling_(token, params) {
+  _reportsRequireSession_(token);
+  const filters = _reportsNormalizeFilters_(params);
+  const rows = _reportsBuildDivisionBillingRows_(filters);
+  const summaryRows = _reportsBuildDivisionBillingSummaryRows_(rows);
+
+  return {
+    ok: true,
+    title: 'Division Billing',
+    metrics: {
+      billedLines: rows.length,
+      invoices: [...new Set(rows.map(function(row){ return String(row.invoiceId || row.invoiceNo || '').trim(); }).filter(Boolean))].length,
+      divisions: summaryRows.length,
+      billedQty: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.billedQty); }, 0) * 100) / 100,
+      billedValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.billedValue); }, 0) * 100) / 100,
+      invoiceValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.lineTotal); }, 0) * 100) / 100
+    },
+    tables: [{
+      key: 'divisionbillingsummary',
+      title: 'Division Summary',
+      subtitle: 'Posted invoice lines summarized by division for the selected billing date window. Challans and cancelled billing documents are excluded.',
+      minWidth: 1280,
+      columns: [
+        { key:'division', label:'Division' },
+        { key:'invoiceLines', label:'Invoice Lines', type:'number' },
+        { key:'invoices', label:'Invoices', type:'number' },
+        { key:'salesOrders', label:'Sales Orders', type:'number' },
+        { key:'clients', label:'Clients', type:'number' },
+        { key:'billedQty', label:'Billed Qty', type:'number' },
+        { key:'billedValue', label:'Basic Value', type:'money' },
+        { key:'lineTotal', label:'Invoice Value', type:'money' },
+        { key:'lastInvoiceDate', label:'Last Invoice', type:'date' }
+      ],
+      rows: summaryRows
+    },{
+      key: 'divisionbillingdetail',
+      title: 'Billing Register',
+      subtitle: 'One row per posted invoice line, enriched with sales-order division and line context.',
+      minWidth: 3300,
+      columns: [
+        { key:'invoiceDate', label:'Invoice Date', type:'date' },
+        { key:'invoiceNo', label:'Invoice No' },
+        { key:'invoiceStatus', label:'Status', type:'status' },
+        { key:'documentType', label:'Doc Type', type:'status' },
+        { key:'division', label:'Division' },
+        { key:'soNumber', label:'SO No' },
+        { key:'soDate', label:'SO Date', type:'date' },
+        { key:'lineNo', label:'Line' },
+        { key:'clientName', label:'Client' },
+        { key:'salesRep', label:'Sales Rep' },
+        { key:'billingMode', label:'Billing Mode' },
+        { key:'productCode', label:'Product Code' },
+        { key:'productName', label:'Product' },
+        { key:'category', label:'Category' },
+        { key:'orderQty', label:'Order Qty', type:'number' },
+        { key:'billedQty', label:'Billed Qty', type:'number' },
+        { key:'rate', label:'Rate', type:'money' },
+        { key:'billedValue', label:'Basic Value', type:'money' },
+        { key:'lineTotal', label:'Invoice Value', type:'money' },
+        { key:'expectedDelivery', label:'Expected Delivery', type:'date' },
+        { key:'finalDelivery', label:'Final Delivery', type:'date' }
+      ],
+      rows: rows
+    }]
+  };
+}
+
 function _reportsSectionBilling_(token, params) {
   _reportsRequireSession_(token);
   const filters = _reportsNormalizeFilters_(params);
@@ -27838,14 +28563,206 @@ function reportsGetSectionData(section, params, token) {
   else if (key === 'inventory') result = _reportsSectionInventory_(token, params);
   else if (key === 'procurement') result = _reportsSectionProcurement_(token, params);
   else if (key === 'delivery') result = _reportsSectionDelivery_(token, params);
+  else if (key === 'divisionbilling') result = _reportsSectionDivisionBilling_(token, params);
   else if (key === 'billing') result = _reportsSectionBilling_(token, params);
   else throw new Error('Unknown report section');
   _putCachedJson_(cacheKey, result, 60);
   return result;
 }
 
+function _reportsExportSheetName_(name) {
+  return String(name || 'Sheet')
+    .replace(/[\[\]\*\/\\\?\:]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 31) || 'Sheet';
+}
+
+function _reportsExportFileName_(name) {
+  const base = String(name || 'report-export')
+    .replace(/[^a-z0-9._-]+/ig, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  return (base || 'report-export').replace(/\.xlsx$/i, '') + '.xlsx';
+}
+
+function _reportsExportCellValue_(value) {
+  if (value == null) return '';
+  if (typeof value === 'number') return isFinite(value) ? value : '';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value);
+}
+
+function _reportsExportNumberFormat_(type) {
+  const key = String(type || '').trim().toLowerCase();
+  if (key === 'money') return '#,##0.00';
+  if (key === 'number' || key === 'nop') return '#,##0.00';
+  return '';
+}
+
+function _reportsExportWorkbookXlsx_(payload) {
+  const p = payload || {};
+  const rawSheets = Array.isArray(p.sheets) ? p.sheets : [];
+  if (!rawSheets.length) throw new Error('No report sheets supplied for export.');
+
+  const workbookName = _reportsExportFileName_(p.fileName || 'reports-export');
+  const spreadsheet = SpreadsheetApp.create(workbookName.replace(/\.xlsx$/i, ''));
+  const spreadsheetId = spreadsheet.getId();
+  let success = false;
+
+  try {
+    while (spreadsheet.getSheets().length < rawSheets.length) spreadsheet.insertSheet();
+    while (spreadsheet.getSheets().length > rawSheets.length) {
+      spreadsheet.deleteSheet(spreadsheet.getSheets()[spreadsheet.getSheets().length - 1]);
+    }
+
+    rawSheets.forEach(function(sheetSpec, idx) {
+      const spec = sheetSpec || {};
+      const sheet = spreadsheet.getSheets()[idx];
+      const columns = Array.isArray(spec.columns) && spec.columns.length ? spec.columns : [{ label: 'Value', type: 'text' }];
+      const groups = Array.isArray(spec.columnGroups) ? spec.columnGroups : [];
+      const dataRows = Array.isArray(spec.rows) ? spec.rows : [];
+      const totalCols = Math.max(columns.length, 1);
+      const title = String(spec.title || 'Report');
+      const subtitle = String(spec.subtitle || '');
+      const generatedAt = String(spec.generatedAt || '');
+      const meta = 'Generated: ' + (generatedAt || Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'dd-MMM-yyyy HH:mm')) + ' | Rows: ' + dataRows.length;
+      const values = [];
+
+      sheet.clear();
+      sheet.clearFormats();
+      sheet.setHiddenGridlines(true);
+      sheet.setName(_reportsExportSheetName_(spec.name || ('Sheet ' + (idx + 1))));
+
+      function pushMergedRow(text) {
+        const row = new Array(totalCols).fill('');
+        row[0] = text;
+        values.push(row);
+      }
+
+      pushMergedRow(title);
+      if (subtitle) pushMergedRow(subtitle);
+      pushMergedRow(meta);
+
+      if (groups.length) {
+        const row = new Array(totalCols).fill('');
+        let offset = 0;
+        groups.forEach(function(group) {
+          if (offset >= totalCols) return;
+          row[offset] = String((group && group.label) || '');
+          offset += Math.max(1, Number(group && group.span || 1) || 1);
+        });
+        values.push(row);
+      }
+
+      values.push(columns.map(function(col) {
+        return String((col && col.label) || '');
+      }));
+
+      dataRows.forEach(function(row) {
+        const src = Array.isArray(row) ? row : [];
+        const out = [];
+        for (var c = 0; c < totalCols; c++) out.push(_reportsExportCellValue_(src[c]));
+        values.push(out);
+      });
+
+      sheet.getRange(1, 1, values.length, totalCols).setValues(values);
+
+      var currentRow = 1;
+      sheet.getRange(currentRow, 1, 1, totalCols).mergeAcross().setFontWeight('bold').setFontSize(14).setBackground('#EEF2F7');
+      currentRow++;
+      if (subtitle) {
+        sheet.getRange(currentRow, 1, 1, totalCols).mergeAcross().setFontSize(10).setFontColor('#4B5563').setBackground('#F8FAFC');
+        currentRow++;
+      }
+      sheet.getRange(currentRow, 1, 1, totalCols).mergeAcross().setFontSize(10).setFontColor('#4B5563').setBackground('#F8FAFC');
+      currentRow++;
+
+      if (groups.length) {
+        var startCol = 1;
+        groups.forEach(function(group) {
+          var span = Math.max(1, Number(group && group.span || 1) || 1);
+          if (startCol > totalCols) return;
+          span = Math.min(span, totalCols - startCol + 1);
+          var range = sheet.getRange(currentRow, startCol, 1, span);
+          if (span > 1) range.mergeAcross();
+          range.setFontWeight('bold').setHorizontalAlignment('center').setBackground('#DBEAFE');
+          startCol += span;
+        });
+        if (startCol <= totalCols) {
+          sheet.getRange(currentRow, startCol, 1, totalCols - startCol + 1).setBackground('#DBEAFE');
+        }
+        currentRow++;
+      }
+
+      var headerRow = currentRow;
+      sheet.getRange(headerRow, 1, 1, totalCols)
+        .setFontWeight('bold')
+        .setHorizontalAlignment('center')
+        .setBackground(groups.length ? '#EFF6FF' : '#F1F5F9');
+
+      var dataStartRow = headerRow + 1;
+      if (dataRows.length) {
+        var dataRange = sheet.getRange(dataStartRow, 1, dataRows.length, totalCols);
+        dataRange.setVerticalAlignment('middle');
+        dataRange.setWrapStrategy(SpreadsheetApp.WrapStrategy.CLIP);
+        columns.forEach(function(col, index) {
+          var colType = String((col && col.type) || '').trim().toLowerCase();
+          var format = _reportsExportNumberFormat_(colType);
+          var colRange = sheet.getRange(dataStartRow, index + 1, dataRows.length, 1);
+          if (format) {
+            colRange.setNumberFormat(format);
+            colRange.setHorizontalAlignment('right');
+          } else {
+            colRange.setHorizontalAlignment(colType === 'deviationpct' ? 'right' : 'left');
+          }
+        });
+      }
+
+      sheet.setFrozenRows(headerRow);
+      for (var i = 0; i < totalCols; i++) {
+        var headerLen = String((columns[i] && columns[i].label) || '').length;
+        sheet.setColumnWidth(i + 1, Math.min(Math.max(headerLen * 11, 90), 260));
+      }
+      try {
+        sheet.autoResizeColumns(1, totalCols);
+      } catch (resizeErr) {}
+    });
+
+    SpreadsheetApp.flush();
+
+    var response = UrlFetchApp.fetch('https://docs.google.com/spreadsheets/d/' + spreadsheetId + '/export?format=xlsx', {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    });
+    var code = Number(response.getResponseCode() || 0);
+    if (code < 200 || code >= 300) {
+      throw new Error('XLSX export failed with status ' + code + '.');
+    }
+    var blob = response.getBlob().setName(workbookName);
+    success = true;
+    return {
+      fileName: workbookName,
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      base64: Utilities.base64Encode(blob.getBytes())
+    };
+  } finally {
+    try {
+      if (spreadsheetId) DriveApp.getFileById(spreadsheetId).setTrashed(true);
+    } catch (cleanupErr) {
+      if (success) Logger.log('reportsExportWorkbookXlsx cleanup failed: ' + cleanupErr.message);
+    }
+  }
+}
+
+function reportsExportWorkbookXlsx(payload, token) {
+  _reportsRequireSession_(token);
+  return _reportsExportWorkbookXlsx_(payload);
+}
+
 this.reportsGetOverviewData = reportsGetOverviewData;
 this.reportsGetSectionData = reportsGetSectionData;
+this.reportsExportWorkbookXlsx = reportsExportWorkbookXlsx;
 
 // ===== DEDICATED PLANNING MODULE =====
 function _planningNormalizeFilters_(params) {
