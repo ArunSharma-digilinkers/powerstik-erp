@@ -102,6 +102,16 @@ function _supabaseRelationMissing_(err, relationName) {
   );
 }
 
+function _salesOrderItemPickerDimensionColumnsMissing_(err) {
+  const msg = String((err && err.message) || err || '').toLowerCase();
+  return msg.indexOf('v_sales_order_item_picker') !== -1 && (
+    msg.indexOf('dimension_unit') !== -1 ||
+    msg.indexOf('length_mm') !== -1 ||
+    msg.indexOf('width_mm') !== -1 ||
+    msg.indexOf('height_mm') !== -1
+  );
+}
+
 function _supabaseSelectAll_(table, opts, pageSize, maxRows) {
   const size = Math.min(1000, Math.max(1, Number(pageSize || 1000) || 1000));
   const cap = Math.max(size, Number(maxRows || 50000) || 50000);
@@ -605,9 +615,8 @@ const DEFAULT_MASTERS = {
     'Intra State Supplies attracting GST','Export Sales','B2C','Exempted From GST'
   ],
   categories: [
-    'Automotive Sticker','Barcode','Book - Hardcase','Brochures','Calenders','Cards','Carry Bags','Carton',
-    'Catalogues','Caution Sticker','Corrugated Box','Dangler','Envelopes','Folders','IT Sticker','Labels','Labels - Clockwise','Labels - Anti Clockwise','Labels - Sheet Form',
-    'Leaflet','Letter Head','Posters','Stickers','Visiting Card','Warranty Card'
+    'Calenders','Carry Bags','Catalogues','Caution Sticker','Corrugated Box','Dangler','Envelopes','Folders',
+    'IT Sticker','Labels','Leaflet','Letter Head','Posters','Visiting Card','Warranty Card','Writing Pads'
   ],
   hsnGroups: [
     'CORRUGATED BOX','LEAFLET','BOOK','T SHIRT','CAP','STICKER','WARRANTY CARD','KEY RING','ENVELOPE','LETTER HEAD',
@@ -6550,22 +6559,46 @@ function saveAndExportWO(payload) {
    Items (master)
    ========================= */
 function saveItem(item) {
-  if (!item || !item.itemName) {
-    throw new Error('Item name is required');
+  if (!item) {
+    throw new Error('Item details are required');
   }
+  const category = String(item.category || '').trim();
   const hsnGroup = String(item.hsnGroup || '').trim();
   if (!hsnGroup) {
     throw new Error('HSN Group is required');
   }
+  if (!category) {
+    throw new Error('Product Category is required');
+  }
+  if (!item.unit) {
+    throw new Error('Order Unit is required');
+  }
+
+  const dimensionUnit = _normalizeItemDimensionUnit_(item.dimensionUnit || 'MM') || 'MM';
+  if (!item.length || !item.width) {
+    throw new Error('Length and Width are required');
+  }
+  const lengthMm = _convertItemDimensionToMm_(item.length, dimensionUnit);
+  const widthMm = _convertItemDimensionToMm_(item.width, dimensionUnit);
+  const heightMm = _convertItemDimensionToMm_(item.height, dimensionUnit);
+  const itemName = _composeSalesOrderItemName_(item, dimensionUnit);
+  if (!itemName) {
+    throw new Error('Generated Item Name is required');
+  }
 
   const row = {
     item_code: item.itemCode || generateItemCode_(),
-    item_name: String(item.itemName || '').trim(),
-    category: item.category || '',
+    item_name: itemName,
+    category: category,
     hsn_group: hsnGroup,
     unit: item.unit || '',
     default_rate: Number(item.defaultRate || 0),
     gst_pct: Number(item.gstPct || 0),
+    description: String(item.description || '').trim() || null,
+    length_mm: lengthMm,
+    width_mm: widthMm,
+    height_mm: heightMm,
+    dimension_unit: (lengthMm != null || widthMm != null || heightMm != null) ? dimensionUnit : null,
     client_code: item.clientCode || null,
     active: item.active !== false
   };
@@ -6586,11 +6619,59 @@ function saveItem(item) {
       defaultRate: Number(savedRow.default_rate || 0),
       gstPct: Number(savedRow.gst_pct || 0),
       description: savedRow.description || '',
+      lengthMm: savedRow.length_mm == null ? '' : Number(savedRow.length_mm),
+      widthMm: savedRow.width_mm == null ? '' : Number(savedRow.width_mm),
+      heightMm: savedRow.height_mm == null ? '' : Number(savedRow.height_mm),
+      dimensionUnit: _normalizeItemDimensionUnit_(savedRow.dimension_unit || 'MM') || 'MM',
+      lengthMmDisplay: _formatItemDimensionDisplay_(savedRow.length_mm, savedRow.dimension_unit || 'MM'),
+      widthMmDisplay: _formatItemDimensionDisplay_(savedRow.width_mm, savedRow.dimension_unit || 'MM'),
+      heightMmDisplay: _formatItemDimensionDisplay_(savedRow.height_mm, savedRow.dimension_unit || 'MM'),
       clientCode: savedRow.client_code || '',
       clientName: savedRow.client_name || '',
       active: savedRow.active !== false
     }
   };
+}
+
+function _composeSalesOrderItemName_(item, dimensionUnit) {
+  const category = String(item?.category || '').trim();
+  const length = _formatSalesOrderItemDimensionInput_(item?.length);
+  const width = _formatSalesOrderItemDimensionInput_(item?.width);
+  const height = _formatSalesOrderItemDimensionInput_(item?.height);
+  const unit = _salesOrderItemDimensionUnitLabel_(dimensionUnit);
+  const description = String(item?.description || '').trim();
+  if (!category || !length || !width) return '';
+  const dims = [length, width];
+  if (height) dims.push(height);
+  return [category, dims.join(' x ') + ' ' + unit, description]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _formatSalesOrderItemDimensionInput_(value) {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return '';
+  const n = Number(raw);
+  if (!isFinite(n)) return raw;
+  return String(Number(n.toFixed(3)));
+}
+
+function _salesOrderItemDimensionUnitLabel_(unit) {
+  const normalizedUnit = _normalizeItemDimensionUnit_(unit) || 'MM';
+  if (normalizedUnit === 'INCH') return 'inch';
+  if (normalizedUnit === 'CM') return 'cm';
+  return 'mm';
+}
+
+function _formatItemDimensionDisplay_(valueMm, unit) {
+  const n = _normalizePaperNumber_(valueMm);
+  if (n === null) return '';
+  const normalizedUnit = _normalizeItemDimensionUnit_(unit) || 'MM';
+  if (normalizedUnit === 'INCH') return Number((n / 25.4).toFixed(3));
+  if (normalizedUnit === 'CM') return Number((n / 10).toFixed(3));
+  return Number(n.toFixed(3));
 }
 
 function _salesOrderItemSearchSafe_(value) {
@@ -6604,6 +6685,7 @@ function _salesOrderItemSearchLimit_(value, fallback) {
 }
 
 function _salesOrderItemMapRow_(row) {
+  const dimensionUnit = _normalizeItemDimensionUnit_(row.dimension_unit || row.dimensionUnit || 'MM') || 'MM';
   return {
     itemCode: row.item_code || row.itemCode || '',
     itemName: row.item_name || row.itemName || '',
@@ -6613,6 +6695,13 @@ function _salesOrderItemMapRow_(row) {
     defaultRate: Number(row.default_rate != null ? row.default_rate : row.defaultRate || 0),
     gstPct: Number(row.gst_pct != null ? row.gst_pct : row.gstPct || 0),
     description: row.description || '',
+    lengthMm: row.length_mm != null ? Number(row.length_mm) : (row.lengthMm != null ? Number(row.lengthMm) : ''),
+    widthMm: row.width_mm != null ? Number(row.width_mm) : (row.widthMm != null ? Number(row.widthMm) : ''),
+    heightMm: row.height_mm != null ? Number(row.height_mm) : (row.heightMm != null ? Number(row.heightMm) : ''),
+    dimensionUnit: dimensionUnit,
+    lengthMmDisplay: _formatItemDimensionDisplay_(row.length_mm != null ? row.length_mm : row.lengthMm, dimensionUnit),
+    widthMmDisplay: _formatItemDimensionDisplay_(row.width_mm != null ? row.width_mm : row.widthMm, dimensionUnit),
+    heightMmDisplay: _formatItemDimensionDisplay_(row.height_mm != null ? row.height_mm : row.heightMm, dimensionUnit),
     clientCode: row.client_code || row.clientCode || '',
     clientName: row.client_name || row.clientName || '',
     isVirtual: row.is_virtual === true || row.isVirtual === true,
@@ -6641,7 +6730,7 @@ function _salesOrderItemPickerViewRows_(params) {
     'description',
     'client_name'
   ]);
-  const select = 'item_code,item_name,category,hsn_group,unit,default_rate,gst_pct,description,client_code,client_name,active,is_virtual,prefix_scope,sort_rank';
+  const select = 'item_code,item_name,category,hsn_group,unit,default_rate,gst_pct,description,length_mm,width_mm,height_mm,dimension_unit,client_code,client_name,active,is_virtual,prefix_scope,sort_rank';
   const mapRows = function(rows) {
     return (rows || []).map(_salesOrderItemMapRow_);
   };
@@ -6707,7 +6796,7 @@ function getItems(params) {
   try {
     return _salesOrderItemPickerViewRows_(Object.assign({}, p, { q: q, limit: limit }));
   } catch (err) {
-    if (!_supabaseRelationMissing_(err, 'v_sales_order_item_picker')) throw err;
+    if (!_supabaseRelationMissing_(err, 'v_sales_order_item_picker') && !_salesOrderItemPickerDimensionColumnsMissing_(err)) throw err;
   }
 
   if (orderPrefix === 'M') {
@@ -6740,7 +6829,7 @@ function getItems(params) {
   if (orFilter) filters.or = orFilter;
 
   const rows = supabaseSelect('items', {
-    select: 'item_code,item_name,category,hsn_group,unit,default_rate,gst_pct,description,client_code,client_name,active',
+    select: 'item_code,item_name,category,hsn_group,unit,default_rate,gst_pct,description,length_mm,width_mm,height_mm,dimension_unit,client_code,client_name,active',
     filters,
     order: 'item_name.asc',
     limit: limit
@@ -6755,6 +6844,13 @@ function getItems(params) {
     defaultRate: Number(i.default_rate || 0),
     gstPct: Number(i.gst_pct || 0),
     description: i.description || '',
+    lengthMm: i.length_mm == null ? '' : Number(i.length_mm),
+    widthMm: i.width_mm == null ? '' : Number(i.width_mm),
+    heightMm: i.height_mm == null ? '' : Number(i.height_mm),
+    dimensionUnit: _normalizeItemDimensionUnit_(i.dimension_unit || 'MM') || 'MM',
+    lengthMmDisplay: _formatItemDimensionDisplay_(i.length_mm, i.dimension_unit || 'MM'),
+    widthMmDisplay: _formatItemDimensionDisplay_(i.width_mm, i.dimension_unit || 'MM'),
+    heightMmDisplay: _formatItemDimensionDisplay_(i.height_mm, i.dimension_unit || 'MM'),
     clientCode: i.client_code || '',
     clientName: i.client_name || '',
     isVirtual: false,
@@ -13645,10 +13741,19 @@ function invSaveItem(payload) {
 
   const rmType = _normalizePaperText_(payload.rmType);
   const sizeProfile = _normalizeItemSizeProfile_(payload.sizeProfile || _inferItemSizeProfileFromCategory_(payload.category));
-  const lengthUnit = _normalizeItemDimensionUnit_(payload.lengthUnit || (sizeProfile === 'SHEET' ? 'IN' : 'MM'));
-  const widthUnit = _normalizeItemDimensionUnit_(payload.widthUnit || (sizeProfile === 'SHEET' ? 'IN' : 'MM'));
-  const lengthMm = sizeProfile === 'ROLL' ? null : _normalizePaperNumber_(payload.lengthMm);
+  const dimensionUnit = _normalizeItemDimensionUnit_(
+    payload.dimensionUnit ||
+    payload.lengthUnit ||
+    payload.widthUnit ||
+    payload.heightUnit ||
+    (sizeProfile === 'SHEET' ? 'INCH' : 'MM')
+  );
+  const lengthUnit = dimensionUnit;
+  const widthUnit = dimensionUnit;
+  const heightUnit = dimensionUnit;
+  const lengthMm = _normalizePaperNumber_(payload.lengthMm);
   const widthMm = _normalizePaperNumber_(payload.widthMm);
+  const heightMm = _normalizePaperNumber_(payload.heightMm);
   const gsm = _normalizePaperNumber_(payload.gsm);
   const specsText = String(payload.specsText || '').trim();
   const additionalInfo = String(payload.additionalInfo || '').trim();
@@ -13660,7 +13765,8 @@ function invSaveItem(payload) {
   });
   const sizeKey = _buildPaperSizeKey_({
     lengthMm: lengthMm,
-    widthMm: widthMm
+    widthMm: widthMm,
+    heightMm: heightMm
   });
 
   const rec = {
@@ -13675,8 +13781,10 @@ function invSaveItem(payload) {
     rm_type: rmType || null,
     length_mm: lengthMm,
     width_mm: widthMm,
+    height_mm: heightMm,
     length_unit: lengthMm == null ? null : (lengthUnit || null),
     width_unit: widthMm == null ? null : (widthUnit || null),
+    height_unit: heightMm == null ? null : (heightUnit || null),
     gsm: gsm,
     specs_text: specsText || null,
     additional_info: additionalInfo || null,
@@ -13707,8 +13815,11 @@ function invSaveItem(payload) {
       rmType: rec.rm_type || '',
       lengthMm: rec.length_mm == null ? '' : Number(rec.length_mm),
       widthMm: rec.width_mm == null ? '' : Number(rec.width_mm),
+      heightMm: rec.height_mm == null ? '' : Number(rec.height_mm),
+      dimensionUnit: rec.length_unit || rec.width_unit || rec.height_unit || '',
       lengthUnit: rec.length_unit || '',
       widthUnit: rec.width_unit || '',
+      heightUnit: rec.height_unit || '',
       gsm: rec.gsm == null ? '' : Number(rec.gsm),
       specsText: rec.specs_text || '',
       additionalInfo: rec.additional_info || '',
@@ -13744,9 +13855,11 @@ function _buildPaperMaterialKey_(payload) {
 function _buildPaperSizeKey_(payload) {
   const lengthMm = _normalizePaperNumber_(payload?.lengthMm || payload?.length_mm);
   const widthMm = _normalizePaperNumber_(payload?.widthMm || payload?.width_mm);
+  const heightMm = _normalizePaperNumber_(payload?.heightMm || payload?.height_mm);
   const parts = [];
   if (lengthMm !== null) parts.push('L:' + String(lengthMm));
   if (widthMm !== null) parts.push('W:' + String(widthMm));
+  if (heightMm !== null) parts.push('H:' + String(heightMm));
   return parts.join('|');
 }
 
@@ -13774,7 +13887,9 @@ function _inferItemSizeProfileFromCategory_(category) {
 
 function _normalizeItemDimensionUnit_(value) {
   const raw = String(value || '').trim().toUpperCase();
-  if (raw === 'IN' || raw === 'MM') return raw;
+  if (raw === 'IN' || raw === 'INCH' || raw === 'INCHES') return 'INCH';
+  if (raw === 'MM') return 'MM';
+  if (raw === 'CM') return 'CM';
   return '';
 }
 
@@ -13798,9 +13913,10 @@ function _sheetConvNormalizeStoredDimensionMm_(value, unit, profile) {
 function _convertItemDimensionToMm_(value, unit) {
   const n = _normalizePaperNumber_(value);
   if (n === null) return null;
-  return _normalizeItemDimensionUnit_(unit) === 'IN'
-    ? Number((n * 25.4).toFixed(3))
-    : n;
+  const normalizedUnit = _normalizeItemDimensionUnit_(unit);
+  if (normalizedUnit === 'INCH') return Number((n * 25.4).toFixed(3));
+  if (normalizedUnit === 'CM') return Number((n * 10).toFixed(3));
+  return n;
 }
 
 function _normalizeInventoryItemCode_(value) {
@@ -13810,6 +13926,17 @@ function _normalizeInventoryItemCode_(value) {
 function _mapInventoryItemRow_(row, source) {
   const src = row || {};
   const sizeProfile = String(src.size_profile || src.sizeProfile || '').trim().toUpperCase();
+  const dimensionUnit = String(
+    src.dimension_unit ||
+    src.dimensionUnit ||
+    src.length_unit ||
+    src.lengthUnit ||
+    src.width_unit ||
+    src.widthUnit ||
+    src.height_unit ||
+    src.heightUnit ||
+    ''
+  ).trim();
   return {
     id: src.id || null,
     itemCode: String(src.item_code || src.itemCode || '').trim(),
@@ -13831,8 +13958,15 @@ function _mapInventoryItemRow_(row, source) {
       src.width_unit != null ? src.width_unit : src.widthUnit,
       sizeProfile
     ) ?? '',
+    heightMm: _sheetConvNormalizeStoredDimensionMm_(
+      src.height_mm != null ? src.height_mm : src.heightMm,
+      src.height_unit != null ? src.height_unit : src.heightUnit,
+      sizeProfile
+    ) ?? '',
+    dimensionUnit: dimensionUnit,
     lengthUnit: String(src.length_unit || src.lengthUnit || '').trim(),
     widthUnit: String(src.width_unit || src.widthUnit || '').trim(),
+    heightUnit: String(src.height_unit || src.heightUnit || '').trim(),
     gsm: src.gsm == null ? '' : Number(src.gsm),
     specsText: String(src.specs_text || src.specsText || '').trim(),
     additionalInfo: String(src.additional_info || src.additionalInfo || '').trim(),
@@ -13848,7 +13982,7 @@ function _getUnifiedInventoryItems_(opts) {
   const onlyActive = opts?.onlyActive === true;
 
   const invRows = (supabaseSelect('inv_items', {
-    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,length_unit,width_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key',
+    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key',
     order: 'item_name.asc'
   }) || []).map(function(row) {
     return _mapInventoryItemRow_(row, 'inventory');
@@ -14033,7 +14167,7 @@ function generateInvItemCode_() {
 
 function invListItemsJSON(opts = {}) {
   let rows = (supabaseSelect('inv_items', {
-    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,length_unit,width_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key',
+    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key',
     order: 'item_name.asc'
   }) || []).map(function(row) {
     return _mapInventoryItemRow_(row, 'inventory');
