@@ -9749,7 +9749,7 @@ CREATE VIEW public.v_report_billing_register AS
      LEFT JOIN public.sales_order_lines sol ON ((sol.id = il.so_line_id)))
      LEFT JOIN public.sales_orders so ON ((so.id = COALESCE(il.so_id, sol.so_id))))
      LEFT JOIN public.clients c ON ((c.client_code = COALESCE(inv.client_code, so.client_code))))
-  WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text));
+  WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text));
 
 
 --
