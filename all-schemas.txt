@@ -5327,7 +5327,9 @@ CREATE TABLE public.inv_items (
     lead_time_days numeric(10,2),
     moq_qty numeric(14,3),
     lead_time_updated_at timestamp with time zone,
-    lead_time_updated_by text
+    lead_time_updated_by text,
+    height_mm numeric(12,3),
+    height_unit text
 );
 
 
@@ -6226,6 +6228,10 @@ CREATE TABLE public.items (
     item_master_notes text,
     product_category text,
     wo_module text,
+    length_mm numeric(12,3),
+    width_mm numeric(12,3),
+    height_mm numeric(12,3),
+    dimension_unit text,
     CONSTRAINT items_bom_basis_chk CHECK ((bom_basis = 'PER_UNIT'::text)),
     CONSTRAINT items_lifecycle_status_chk CHECK ((item_lifecycle_status = ANY (ARRAY['DRAFT'::text, 'ACTIVE'::text, 'INACTIVE'::text, 'OBSOLETE'::text]))),
     CONSTRAINT items_product_category_chk CHECK (((product_category IS NULL) OR (product_category = ANY (ARRAY['Flat'::text, 'Corrugated'::text, 'Flexo'::text])))),
@@ -11593,8 +11599,8 @@ CREATE VIEW public.v_report_unbilled_dispatch AS
 --
 
 CREATE VIEW public.v_sales_order_item_picker AS
- SELECT TRIM(BOTH FROM COALESCE(i.item_code, ''::text)) AS item_code,
-    TRIM(BOTH FROM COALESCE(i.item_name, ''::text)) AS item_name,
+ SELECT COALESCE(i.item_code, ''::text) AS item_code,
+    COALESCE(i.item_name, ''::text) AS item_name,
     COALESCE(i.category, ''::text) AS category,
     COALESCE(i.hsn_group, ''::text) AS hsn_group,
     COALESCE(i.unit, ''::text) AS unit,
@@ -11606,7 +11612,11 @@ CREATE VIEW public.v_sales_order_item_picker AS
     COALESCE(i.active, true) AS active,
     false AS is_virtual,
     'DB'::text AS prefix_scope,
-    20 AS sort_rank
+    20 AS sort_rank,
+    i.length_mm,
+    i.width_mm,
+    i.height_mm,
+    i.dimension_unit
    FROM public.items i
   WHERE (COALESCE(i.active, true) = true)
 UNION ALL
@@ -11623,7 +11633,11 @@ UNION ALL
     virtual_items.active,
     virtual_items.is_virtual,
     virtual_items.prefix_scope,
-    virtual_items.sort_rank
+    virtual_items.sort_rank,
+    NULL::numeric AS length_mm,
+    NULL::numeric AS width_mm,
+    NULL::numeric AS height_mm,
+    NULL::text AS dimension_unit
    FROM ( VALUES ('MTR001'::text,'Ball Pen'::text,'Ball Pen'::text,'BALL PEN'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR002'::text,'Banner'::text,'Banner'::text,'BANNER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR003'::text,'Cap'::text,'Cap'::text,'CAP'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR004'::text,'Card Holder'::text,'Card Holder'::text,'CARD HOLDER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR005'::text,'Cello Tape'::text,'Cello Tape'::text,'CELLO TAPE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR006'::text,'Cup'::text,'Cup'::text,'CUP'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR007'::text,'Diary'::text,'Diary'::text,'DIARY'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR008'::text,'Flag'::text,'Flag'::text,'FLAG'::text,'Pcs'::text,(0)::numeric,(0)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR009'::text,'Flexo Plate'::text,'Flexo Plate'::text,'FLEXO PLATE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR010'::text,'Folder'::text,'Folder'::text,'FOLDER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR011'::text,'Garbage Bag'::text,'Garbage Bag'::text,'GARBAGE BAG'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR012'::text,'Gift Box'::text,'Gift Box'::text,'GIFT BOX'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR013'::text,'Key Chain'::text,'Key Chain'::text,'KEY CHAIN'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR014'::text,'Key CutOut'::text,'Key CutOut'::text,'KEY CUTOUT'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR015'::text,'Pen Holder'::text,'Pen Holder'::text,'PEN HOLDER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR016'::text,'Stamp'::text,'Stamp'::text,'STAMP'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR017'::text,'Standy'::text,'Standy'::text,'STANDY'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR018'::text,'T Shirt'::text,'T Shirt'::text,'T SHIRT'::text,'Pcs'::text,(0)::numeric,(5)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR019'::text,'Table Matt'::text,'Table Matt'::text,'TABLE MATT'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR020'::text,'Designing Charges'::text,'Designing Charges'::text,'DESIGNING CHARGES'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('SLC001'::text,'Flexo Printing Plate'::text,'Flexo Printing Plate'::text,'FLEXO PRINTING PLATE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'SL'::text,30), ('SLC002'::text,'Offset Printing Plate'::text,'Offset Printing Plate'::text,'OFFSET PRINTING PLATE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'SL'::text,30), ('SLC003'::text,'Die'::text,'Die'::text,'DIE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'SL'::text,30)) virtual_items(item_code, item_name, category, hsn_group, unit, default_rate, gst_pct, description, client_code, client_name, active, is_virtual, prefix_scope, sort_rank);
 
 
