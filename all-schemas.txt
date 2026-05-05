@@ -1033,7 +1033,7 @@ $$;
 -- Name: billing_job_dataset(text, text, text, text, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.billing_job_dataset(p_client_code text, p_so_number text DEFAULT NULL::text, p_mode text DEFAULT 'DISPATCH'::text, p_q text DEFAULT NULL::text, p_only_open boolean DEFAULT true) RETURNS TABLE(so_id uuid, so_line_id uuid, so_number text, so_date date, client_code text, client_name text, client_state text, client_gstin text, client_address text, po_number text, po_date date, currency text, sales_remarks text, mode_of_transport text, transport_preference text, transport_payment text, billing_remarks text, sales_rep text, line_no integer, product_code text, product_name text, category text, unit text, rate numeric, gst_pct numeric, hsn_group text, order_qty numeric, packed_qty numeric, dispatched_qty numeric, fg_adjusted_qty numeric, billed_qty numeric, posted_qty numeric, draft_qty numeric, dispatch_billable_qty numeric, fg_billable_qty numeric, direct_billable_qty numeric, billable_qty numeric, latest_packed_at timestamp with time zone, dispatch_no text, dispatch_date timestamp with time zone, transporter text, vehicle_no text, lr_no text, job_reference text, division text, quote_no text, pm_code text, expected_delivery date, final_delivery date, prepress_remarks text, product_remarks text, invoice_refs text)
+CREATE FUNCTION public.billing_job_dataset(p_client_code text, p_so_number text DEFAULT NULL::text, p_mode text DEFAULT 'DISPATCH'::text, p_q text DEFAULT NULL::text, p_only_open boolean DEFAULT true) RETURNS TABLE(so_id uuid, so_line_id uuid, so_number text, so_date date, client_code text, client_name text, client_state text, client_gstin text, client_address text, po_number text, po_date date, currency text, sales_remarks text, mode_of_transport text, transport_preference text, transport_payment text, billing_remarks text, sales_rep text, line_no integer, product_code text, product_name text, category text, unit text, rate numeric, gst_pct numeric, hsn_group text, order_qty numeric, packed_qty numeric, dispatched_qty numeric, fg_adjusted_qty numeric, billed_qty numeric, posted_qty numeric, draft_qty numeric, dispatch_billable_qty numeric, fg_billable_qty numeric, direct_billable_qty numeric, billable_qty numeric, latest_packed_at timestamp with time zone, dispatch_no text, dispatch_date timestamp with time zone, transporter text, vehicle_no text, lr_no text, job_reference text, division text, quote_no text, pm_code text, expected_delivery date, final_delivery date, prepress_remarks text, product_remarks text, invoice_refs text, advance_payment_required boolean, advance_payment_received boolean, advance_payment_status text)
     LANGUAGE sql STABLE
     AS $$
   select
@@ -1092,7 +1092,10 @@ CREATE FUNCTION public.billing_job_dataset(p_client_code text, p_so_number text 
     v.final_delivery,
     v.prepress_remarks,
     v.product_remarks,
-    v.invoice_refs
+    v.invoice_refs,
+    v.advance_payment_required,
+    v.advance_payment_received,
+    v.advance_payment_status
   from public.v_billing_line_read_model v
   where v.client_code = p_client_code
     and (coalesce(trim(p_so_number), '') = '' or v.so_number = trim(p_so_number))
@@ -6643,6 +6646,8 @@ CREATE TABLE public.sales_orders (
     transport_preference text,
     transport_payment text,
     billing_remarks text,
+    advance_payment_required boolean DEFAULT false NOT NULL,
+    advance_payment_received boolean DEFAULT false NOT NULL,
     CONSTRAINT sales_orders_transport_payment_chk CHECK (((transport_payment IS NULL) OR (transport_payment = ANY (ARRAY['To Pay'::text, 'Paid'::text]))))
 );
 
@@ -6676,6 +6681,20 @@ COMMENT ON COLUMN public.sales_orders.billing_remarks IS 'Order-level billing re
 
 
 --
+-- Name: COLUMN sales_orders.advance_payment_required; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.sales_orders.advance_payment_required IS 'Order-level Accounts flag indicating that advance payment is required before invoice billing.';
+
+
+--
+-- Name: COLUMN sales_orders.advance_payment_received; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.sales_orders.advance_payment_received IS 'Order-level Accounts confirmation that advance payment has been received and invoice billing may proceed.';
+
+
+--
 -- Name: sales_orders_list; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -6702,7 +6721,9 @@ CREATE VIEW public.sales_orders_list WITH (security_invoker='on') AS
     so.wo_status,
     l.product_code,
     l.product_name,
-    l.product_remarks
+    l.product_remarks,
+    COALESCE(so.advance_payment_required, false) AS advance_payment_required,
+    COALESCE(so.advance_payment_received, false) AS advance_payment_received
    FROM ((public.sales_orders so
      LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
      LEFT JOIN public.sales_order_lines l ON (((l.so_id = so.id) AND (l.line_no = 1))));
@@ -7687,6 +7708,95 @@ CREATE VIEW public.v_billing_packing_summary WITH (security_invoker='on') AS
    FROM public.packing_records pr
   WHERE (so_line_id IS NOT NULL)
   GROUP BY so_line_id;
+
+
+--
+-- Name: v_billing_line_read_model; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_billing_line_read_model AS
+ WITH fg_adjustments AS (
+         SELECT fa.so_line_id,
+            (COALESCE(sum(fa.adjustment_qty), (0)::numeric))::numeric(18,3) AS adjusted_qty
+           FROM public.fg_stock_adjustments fa
+          WHERE (fa.so_line_id IS NOT NULL)
+          GROUP BY fa.so_line_id
+        )
+ SELECT so.id AS so_id,
+    sol.id AS so_line_id,
+    so.so_number,
+    so.so_date,
+    COALESCE(so.client_code, ''::text) AS client_code,
+    COALESCE(c.client_name, so.client_code, ''::text) AS client_name,
+    COALESCE(c.state, ''::text) AS client_state,
+    COALESCE(c.gstin, ''::text) AS client_gstin,
+    TRIM(BOTH ', '::text FROM concat_ws(', '::text, NULLIF(c.bill_to_address, ''::text), NULLIF(c.bill_to_city, ''::text), NULLIF(c.bill_to_state, ''::text), NULLIF(c.bill_to_pincode, ''::text))) AS client_address,
+    COALESCE(so.po_number, ''::text) AS po_number,
+    so.po_date,
+    COALESCE(so.currency, 'INR'::text) AS currency,
+    COALESCE(so.remarks, ''::text) AS sales_remarks,
+    COALESCE(so.mode_of_transport, ''::text) AS mode_of_transport,
+    COALESCE(so.transport_preference, ''::text) AS transport_preference,
+    COALESCE(so.transport_payment, ''::text) AS transport_payment,
+    COALESCE(so.billing_remarks, ''::text) AS billing_remarks,
+    COALESCE(so.sales_rep, ''::text) AS sales_rep,
+    COALESCE(sol.line_no, 0) AS line_no,
+    COALESCE(sol.product_code, ''::text) AS product_code,
+    COALESCE(sol.product_name, ''::text) AS product_name,
+    COALESCE(sol.category, ''::text) AS category,
+    COALESCE(sol.unit, 'Pcs'::text) AS unit,
+    (COALESCE(sol.rate, (0)::numeric))::numeric(18,2) AS rate,
+    (COALESCE(sol.gst_pct, (0)::numeric))::numeric(18,2) AS gst_pct,
+    COALESCE(sol.hsn_group, ''::text) AS hsn_group,
+    (COALESCE(sol.qty, (0)::numeric))::numeric(18,3) AS order_qty,
+    (COALESCE(pk.packed_qty, (0)::numeric))::numeric(18,3) AS packed_qty,
+    (COALESCE(ds.dispatched_qty, (0)::numeric))::numeric(18,3) AS dispatched_qty,
+    (COALESCE(fg.adjusted_qty, (0)::numeric))::numeric(18,3) AS fg_adjusted_qty,
+    (COALESCE(usg.billed_qty, (0)::numeric))::numeric(18,3) AS billed_qty,
+    (COALESCE(usg.posted_qty, (0)::numeric))::numeric(18,3) AS posted_qty,
+    (COALESCE(usg.draft_qty, (0)::numeric))::numeric(18,3) AS draft_qty,
+    (GREATEST((COALESCE(ds.dispatched_qty, (0)::numeric) - COALESCE(usg.billed_qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS dispatch_billable_qty,
+    (GREATEST(((COALESCE(pk.packed_qty, (0)::numeric) - COALESCE(usg.billed_qty, (0)::numeric)) - COALESCE(fg.adjusted_qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS fg_billable_qty,
+    (GREATEST((COALESCE(sol.qty, (0)::numeric) - COALESCE(usg.billed_qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS direct_billable_qty,
+    pk.latest_packed_at,
+    ds.latest_dispatch_no AS dispatch_no,
+    ds.latest_dispatch_date AS dispatch_date,
+    COALESCE(ds.transporter, ''::text) AS transporter,
+    COALESCE(ds.vehicle_no, ''::text) AS vehicle_no,
+    COALESCE(ds.lr_no, ''::text) AS lr_no,
+    COALESCE(sol.job_reference, ''::text) AS job_reference,
+    COALESCE(sol.division, ''::text) AS division,
+    COALESCE(sol.quote_no, ''::text) AS quote_no,
+    COALESCE(sol.pm_code, ''::text) AS pm_code,
+    sol.expected_delivery,
+    sol.final_delivery,
+    COALESCE(sol.prepress_remarks, ''::text) AS prepress_remarks,
+    COALESCE(sol.product_remarks, ''::text) AS product_remarks,
+    COALESCE(usg.invoice_refs, ''::text) AS invoice_refs,
+    lower(concat_ws(' '::text, COALESCE(so.so_number, ''::text), COALESCE((sol.line_no)::text, ''::text), COALESCE(sol.product_code, ''::text), COALESCE(sol.product_name, ''::text), COALESCE(sol.job_reference, ''::text), COALESCE(c.client_name, ''::text), COALESCE(so.po_number, ''::text),
+        CASE
+            WHEN COALESCE(so.advance_payment_required, false) THEN 'advance payment'::text
+            ELSE ''::text
+        END,
+        CASE
+            WHEN COALESCE(so.advance_payment_received, false) THEN 'payment received'::text
+            ELSE 'payment pending'::text
+        END)) AS match_text,
+    COALESCE(so.advance_payment_required, false) AS advance_payment_required,
+    COALESCE(so.advance_payment_received, false) AS advance_payment_received,
+        CASE
+            WHEN (COALESCE(so.advance_payment_required, false) AND COALESCE(so.advance_payment_received, false)) THEN 'PAYMENT_RECEIVED'::text
+            WHEN COALESCE(so.advance_payment_required, false) THEN 'PAYMENT_PENDING'::text
+            ELSE 'NOT_REQUIRED'::text
+        END AS advance_payment_status
+   FROM ((((((public.sales_order_lines sol
+     JOIN public.sales_orders so ON ((so.id = sol.so_id)))
+     LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+     LEFT JOIN public.v_billing_dispatch_summary ds ON ((ds.so_line_id = sol.id)))
+     LEFT JOIN public.v_billing_packing_summary pk ON ((pk.so_line_id = sol.id)))
+     LEFT JOIN fg_adjustments fg ON ((fg.so_line_id = sol.id)))
+     LEFT JOIN public.v_billing_invoice_usage_summary usg ON ((usg.so_line_id = sol.id)))
+  WHERE (upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text);
 
 
 --
@@ -11595,6 +11705,43 @@ CREATE VIEW public.v_report_unbilled_dispatch AS
 
 
 --
+-- Name: v_sales_order_advance_payment_clearance; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_sales_order_advance_payment_clearance WITH (security_invoker='on') AS
+ SELECT so.id AS so_id,
+    so.so_number,
+    so.so_date,
+    so.created_at AS so_created_at,
+    so.client_code,
+    COALESCE(c.client_name, so.client_code, ''::text) AS client_name,
+    COALESCE(so.sales_rep, ''::text) AS sales_rep,
+    (count(l.id))::integer AS line_count,
+    (COALESCE(sum(COALESCE(l.qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS total_qty,
+    string_agg(DISTINCT COALESCE(NULLIF(l.product_name, ''::text), NULLIF(l.product_code, ''::text), 'Item'::text), ' | '::text ORDER BY COALESCE(NULLIF(l.product_name, ''::text), NULLIF(l.product_code, ''::text), 'Item'::text)) AS product_summary,
+    string_agg(DISTINCT COALESCE(NULLIF(l.category, ''::text), 'Uncategorised'::text), ' | '::text ORDER BY COALESCE(NULLIF(l.category, ''::text), 'Uncategorised'::text)) AS category_summary,
+    string_agg(DISTINCT COALESCE(l.accounts_status, 'PENDING'::text), ' | '::text ORDER BY COALESCE(l.accounts_status, 'PENDING'::text)) AS accounts_status_summary,
+    string_agg(DISTINCT COALESCE(l.business_status, 'PENDING'::text), ' | '::text ORDER BY COALESCE(l.business_status, 'PENDING'::text)) AS business_status_summary,
+    COALESCE(so.advance_payment_required, false) AS advance_payment_required,
+    COALESCE(so.advance_payment_received, false) AS advance_payment_received,
+        CASE
+            WHEN (COALESCE(so.advance_payment_required, false) AND COALESCE(so.advance_payment_received, false)) THEN 'PAYMENT_RECEIVED'::text
+            WHEN COALESCE(so.advance_payment_required, false) THEN 'PAYMENT_PENDING'::text
+            ELSE 'NOT_REQUIRED'::text
+        END AS advance_payment_status,
+    lower(concat_ws(' '::text, COALESCE(so.so_number, ''::text), COALESCE(c.client_name, so.client_code, ''::text), COALESCE(so.sales_rep, ''::text), string_agg(DISTINCT COALESCE(l.product_name, ''::text), ' '::text), string_agg(DISTINCT COALESCE(l.product_code, ''::text), ' '::text), string_agg(DISTINCT COALESCE(l.category, ''::text), ' '::text),
+        CASE
+            WHEN COALESCE(so.advance_payment_received, false) THEN 'payment received'::text
+            ELSE 'payment pending'::text
+        END)) AS match_text
+   FROM ((public.sales_orders so
+     JOIN public.sales_order_lines l ON ((l.so_id = so.id)))
+     LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+  WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> ALL (ARRAY['CANCELLED'::text, 'CLOSED'::text])) AND (upper(COALESCE(l.status, 'OPEN'::text)) <> ALL (ARRAY['CANCELLED'::text, 'CLOSED'::text])) AND (COALESCE(so.advance_payment_required, false) = true))
+  GROUP BY so.id, so.so_number, so.so_date, so.created_at, so.client_code, c.client_name, so.sales_rep, so.advance_payment_required, so.advance_payment_received;
+
+
+--
 -- Name: v_sales_order_item_picker; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -11755,7 +11902,9 @@ CREATE VIEW public.v_sales_order_lines_for_approval WITH (security_invoker='on')
             WHEN (upper(COALESCE(so.status, 'OPEN'::text)) = ANY (ARRAY['CANCELLED'::text, 'CLOSED'::text])) THEN false
             WHEN (upper(COALESCE(l.status, 'OPEN'::text)) = ANY (ARRAY['CANCELLED'::text, 'CLOSED'::text])) THEN false
             ELSE true
-        END AS is_line_active
+        END AS is_line_active,
+    COALESCE(so.advance_payment_required, false) AS advance_payment_required,
+    COALESCE(so.advance_payment_received, false) AS advance_payment_received
    FROM ((public.sales_order_lines l
      JOIN public.sales_orders so ON ((so.id = l.so_id)))
      LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
