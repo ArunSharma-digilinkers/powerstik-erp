@@ -1112,6 +1112,181 @@ $$;
 
 
 --
+-- Name: billing_replace_invoice_lines(uuid, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.billing_replace_invoice_lines(p_invoice_id uuid, p_lines jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+declare
+  v_invoice_id uuid := p_invoice_id;
+  v_line_count integer := 0;
+  v_lock_triggers text[] := '{}'::text[];
+  v_trigger_name text;
+  v_touched_so_line_ids uuid[] := '{}'::uuid[];
+begin
+  if v_invoice_id is null then
+    raise exception 'Invoice id required';
+  end if;
+
+  if not exists (select 1 from public.invoices where id = v_invoice_id) then
+    raise exception 'Invoice % not found', v_invoice_id;
+  end if;
+
+  if jsonb_typeof(coalesce(p_lines, '[]'::jsonb)) <> 'array' then
+    raise exception 'p_lines must be a JSON array';
+  end if;
+
+  select coalesce(array_agg(distinct so_line_id) filter (where so_line_id is not null), '{}'::uuid[])
+  into v_touched_so_line_ids
+  from public.invoice_lines
+  where invoice_id = v_invoice_id;
+
+  select coalesce(array_agg(t.tgname::text), '{}'::text[])
+  into v_lock_triggers
+  from pg_trigger t
+  join pg_class c on c.oid = t.tgrelid
+  join pg_namespace n on n.oid = c.relnamespace
+  join pg_proc p on p.oid = t.tgfoid
+  where n.nspname = 'public'
+    and c.relname = 'invoice_lines'
+    and not t.tgisinternal
+    and p.proname = 'lock_invoice_lines';
+
+  begin
+    foreach v_trigger_name in array v_lock_triggers loop
+      execute format('alter table public.invoice_lines disable trigger %I', v_trigger_name);
+    end loop;
+
+    delete from public.invoice_lines
+    where invoice_id = v_invoice_id;
+
+    insert into public.invoice_lines (
+      invoice_id,
+      so_id,
+      so_line_id,
+      so_number,
+      line_no,
+      product_code,
+      product_name,
+      hsn,
+      unit,
+      qty,
+      rate,
+      gst_pct,
+      division,
+      taxable_amount,
+      line_amount,
+      cgst_pct,
+      sgst_pct,
+      igst_pct,
+      cgst_amt,
+      sgst_amt,
+      igst_amt,
+      line_total,
+      source_mode,
+      dispatch_qty_snapshot,
+      ordered_qty_snapshot,
+      billed_qty_snapshot
+    )
+    select
+      v_invoice_id,
+      nullif(x.so_id, '')::uuid,
+      nullif(x.so_line_id, '')::uuid,
+      coalesce(x.so_number, ''),
+      coalesce(x.line_no, 0),
+      coalesce(x.product_code, ''),
+      coalesce(x.product_name, ''),
+      coalesce(x.hsn, ''),
+      coalesce(x.unit, 'Nos'),
+      coalesce(x.qty, 0),
+      coalesce(x.rate, 0),
+      coalesce(x.gst_pct, 0),
+      coalesce(x.division, ''),
+      coalesce(x.taxable_amount, 0),
+      coalesce(x.line_amount, 0),
+      coalesce(x.cgst_pct, 0),
+      coalesce(x.sgst_pct, 0),
+      coalesce(x.igst_pct, 0),
+      coalesce(x.cgst_amt, 0),
+      coalesce(x.sgst_amt, 0),
+      coalesce(x.igst_amt, 0),
+      coalesce(x.line_total, 0),
+      coalesce(x.source_mode, ''),
+      coalesce(x.dispatch_qty_snapshot, 0),
+      coalesce(x.ordered_qty_snapshot, 0),
+      coalesce(x.billed_qty_snapshot, 0)
+    from jsonb_to_recordset(coalesce(p_lines, '[]'::jsonb)) as x(
+      so_id text,
+      so_line_id text,
+      so_number text,
+      line_no integer,
+      product_code text,
+      product_name text,
+      hsn text,
+      unit text,
+      qty numeric,
+      rate numeric,
+      gst_pct numeric,
+      division text,
+      taxable_amount numeric,
+      line_amount numeric,
+      cgst_pct numeric,
+      sgst_pct numeric,
+      igst_pct numeric,
+      cgst_amt numeric,
+      sgst_amt numeric,
+      igst_amt numeric,
+      line_total numeric,
+      source_mode text,
+      dispatch_qty_snapshot numeric,
+      ordered_qty_snapshot numeric,
+      billed_qty_snapshot numeric
+    )
+    where coalesce(x.qty, 0) > 0;
+
+    get diagnostics v_line_count = row_count;
+
+    select coalesce(array_agg(distinct so_line_id) filter (where so_line_id is not null), '{}'::uuid[])
+    into v_touched_so_line_ids
+    from (
+      select unnest(v_touched_so_line_ids) as so_line_id
+      union
+      select so_line_id
+      from public.invoice_lines
+      where invoice_id = v_invoice_id
+    ) s;
+
+    foreach v_trigger_name in array v_lock_triggers loop
+      execute format('alter table public.invoice_lines enable trigger %I', v_trigger_name);
+    end loop;
+  exception when others then
+    foreach v_trigger_name in array v_lock_triggers loop
+      begin
+        execute format('alter table public.invoice_lines enable trigger %I', v_trigger_name);
+      exception when others then
+        null;
+      end;
+    end loop;
+    raise;
+  end;
+
+  if to_regprocedure('public.refresh_sales_order_line_status(uuid)') is not null then
+    perform public.refresh_sales_order_line_status(x.so_line_id)
+    from unnest(v_touched_so_line_ids) as x(so_line_id);
+  end if;
+
+  return jsonb_build_object(
+    'ok', true,
+    'invoiceId', v_invoice_id,
+    'lineCount', v_line_count
+  );
+end;
+$$;
+
+
+--
 -- Name: create_item_bom_revision(text, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -11780,7 +11955,7 @@ CREATE VIEW public.v_report_unbilled_dispatch AS
 -- Name: v_report_wip_stage_lines; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_report_wip_stage_lines AS
+CREATE VIEW public.v_report_wip_stage_lines WITH (security_invoker='on') AS
  WITH line_base AS (
          SELECT p.so_id,
             p.so_line_id,
@@ -11814,7 +11989,7 @@ CREATE VIEW public.v_report_wip_stage_lines AS
            FROM ((public.v_report_planning_lines p
              LEFT JOIN public.sales_order_lines sol ON ((sol.id = p.so_line_id)))
              LEFT JOIN public.sales_orders so ON ((so.id = p.so_id)))
-          WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, p.so_line_status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) !~~ '%SHORT%CLOSE%'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) !~~ '%SHORT_CLOSE%'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) !~~ '%MANUAL CLOSE%'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) !~~ '%LEGACY%'::text))
+          WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> ALL (ARRAY['CANCELLED'::text, 'CLOSED'::text])) AND (upper(COALESCE(sol.status, p.so_line_status, 'OPEN'::text)) <> ALL (ARRAY['CANCELLED'::text, 'CLOSED'::text])) AND (upper(COALESCE(so.order_prefix, ''::text)) <> 'MB'::text) AND (upper(COALESCE(so.sales_type, ''::text)) <> 'MANUAL_BILLING'::text) AND (COALESCE(so.so_number, ''::text) !~* '^MB[/-]'::text) AND (upper(COALESCE(so.remarks, ''::text)) !~~ '%SYSTEM GENERATED FOR MANUAL BILLING%'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) !~~ '%SHORT%CLOSE%'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) !~~ '%SHORT_CLOSE%'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) !~~ '%MANUAL CLOSE%'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) !~~ '%MANUAL BILLING%'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) !~~ '%LEGACY%'::text))
         ), wo_line_base AS (
          SELECT lb.so_line_id,
             woj.wo_id,
@@ -12842,7 +13017,7 @@ CREATE VIEW public.v_sales_order_lines_for_approval WITH (security_invoker='on')
 -- Name: v_sales_orders_list_fast; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_sales_orders_list_fast AS
+CREATE VIEW public.v_sales_orders_list_fast WITH (security_invoker='on') AS
  SELECT so.id,
     so.so_number,
     so.so_date,
