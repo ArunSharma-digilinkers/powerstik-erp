@@ -1033,7 +1033,7 @@ $$;
 -- Name: billing_job_dataset(text, text, text, text, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.billing_job_dataset(p_client_code text, p_so_number text DEFAULT NULL::text, p_mode text DEFAULT 'DISPATCH'::text, p_q text DEFAULT NULL::text, p_only_open boolean DEFAULT true) RETURNS TABLE(so_id uuid, so_line_id uuid, so_number text, so_date date, client_code text, client_name text, client_state text, client_gstin text, client_address text, po_number text, po_date date, currency text, sales_remarks text, mode_of_transport text, transport_preference text, transport_payment text, billing_remarks text, sales_rep text, line_no integer, product_code text, product_name text, category text, unit text, rate numeric, gst_pct numeric, hsn_group text, order_qty numeric, packed_qty numeric, dispatched_qty numeric, fg_adjusted_qty numeric, billed_qty numeric, posted_qty numeric, draft_qty numeric, dispatch_billable_qty numeric, fg_billable_qty numeric, direct_billable_qty numeric, billable_qty numeric, latest_packed_at timestamp with time zone, dispatch_no text, dispatch_date timestamp with time zone, transporter text, vehicle_no text, lr_no text, job_reference text, division text, quote_no text, pm_code text, expected_delivery date, final_delivery date, prepress_remarks text, product_remarks text, invoice_refs text, advance_payment_required boolean, advance_payment_received boolean, advance_payment_status text)
+CREATE FUNCTION public.billing_job_dataset(p_client_code text, p_so_number text DEFAULT NULL::text, p_mode text DEFAULT 'DISPATCH'::text, p_q text DEFAULT NULL::text, p_only_open boolean DEFAULT true) RETURNS TABLE(so_id uuid, so_line_id uuid, so_number text, so_date date, client_code text, client_name text, client_state text, client_gstin text, client_address text, po_number text, po_date date, currency text, sales_remarks text, mode_of_transport text, transport_preference text, transport_payment text, billing_remarks text, sales_rep text, line_no integer, product_code text, product_name text, category text, unit text, rate numeric, gst_pct numeric, hsn_group text, order_qty numeric, packed_qty numeric, dispatched_qty numeric, fg_adjusted_qty numeric, billed_qty numeric, posted_qty numeric, draft_qty numeric, dispatch_billable_qty numeric, fg_billable_qty numeric, direct_billable_qty numeric, billable_qty numeric, latest_packed_at timestamp with time zone, dispatch_no text, dispatch_date timestamp with time zone, transporter text, vehicle_no text, lr_no text, job_reference text, division text, quote_no text, pm_code text, expected_delivery date, final_delivery date, prepress_remarks text, product_remarks text, invoice_refs text)
     LANGUAGE sql STABLE
     AS $$
   select
@@ -1092,10 +1092,7 @@ CREATE FUNCTION public.billing_job_dataset(p_client_code text, p_so_number text 
     v.final_delivery,
     v.prepress_remarks,
     v.product_remarks,
-    v.invoice_refs,
-    v.advance_payment_required,
-    v.advance_payment_received,
-    v.advance_payment_status
+    v.invoice_refs
   from public.v_billing_line_read_model v
   where v.client_code = p_client_code
     and (coalesce(trim(p_so_number), '') = '' or v.so_number = trim(p_so_number))
@@ -1848,7 +1845,7 @@ begin
   left join public.invoices inv
     on inv.id = il.invoice_id
   where il.so_line_id = p_so_line_id
-    and upper(coalesce(inv.status, 'DRAFT')) not in ('CANCELLED', 'VOID', 'DELETED')
+    and upper(coalesce(inv.status, 'DRAFT')) = 'POSTED'
     and upper(coalesce(inv.document_type, 'INVOICE')) <> 'CHALLAN'
     and coalesce(inv.invoice_no, '') not like 'DC-H/%';
 
@@ -1858,7 +1855,7 @@ begin
   left join public.invoices inv
     on inv.id = il.invoice_id
   where il.so_line_id = p_so_line_id
-    and upper(coalesce(inv.status, 'DRAFT')) not in ('CANCELLED', 'VOID', 'DELETED')
+    and upper(coalesce(inv.status, 'DRAFT')) = 'POSTED'
     and upper(coalesce(inv.document_type, 'INVOICE')) <> 'CHALLAN'
     and coalesce(inv.invoice_no, '') not like 'DC-H/%'
   order by coalesce(inv.posted_at, inv.created_at, inv.invoice_date::timestamptz) desc nulls last,
@@ -1896,7 +1893,8 @@ begin
       else null
     end,
     closed_by = case
-      when v_next_status = 'CLOSED' then coalesce(nullif(closed_by, ''), v_next_closed_by)
+      when v_next_status = 'CLOSED' and v_manual_closed then v_current_closed_by
+      when v_next_status = 'CLOSED' then v_next_closed_by
       else null
     end,
     status_updated_at = now()
@@ -1904,7 +1902,7 @@ begin
     and (
       upper(coalesce(status, '')) is distinct from v_next_status
       or (v_next_status = 'CLOSED' and closed_at is null)
-      or (v_next_status = 'CLOSED' and nullif(closed_by, '') is null and v_next_closed_by is not null)
+      or (v_next_status = 'CLOSED' and nullif(closed_by, '') is distinct from v_next_closed_by and not v_manual_closed)
       or (v_next_status <> 'CLOSED' and closed_at is not null)
       or (v_next_status <> 'CLOSED' and closed_by is not null)
     );
@@ -6501,7 +6499,11 @@ CREATE TABLE public.purchase_po_receipts (
     rate numeric DEFAULT 0 NOT NULL,
     remarks text DEFAULT ''::text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    source_ref text DEFAULT ''::text,
+    job_ref text DEFAULT ''::text,
+    artwork_no text DEFAULT ''::text,
+    so_refs text DEFAULT ''::text
 );
 
 
@@ -7488,7 +7490,7 @@ CREATE VIEW public.v_artwork_workbench_active WITH (security_invoker='on') AS
 -- Name: v_billing_dispatch_summary; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_billing_dispatch_summary WITH (security_invoker='on') AS
+CREATE VIEW public.v_billing_dispatch_summary AS
  WITH dispatch_totals AS (
          SELECT dr.so_line_id,
             (COALESCE(sum(dr.dispatch_qty), (0)::numeric))::numeric(18,3) AS dispatched_qty
@@ -7524,7 +7526,6 @@ CREATE VIEW public.v_billing_dispatch_summary WITH (security_invoker='on') AS
 CREATE VIEW public.v_billed_order_closure WITH (security_invoker='on') AS
  WITH invoice_usage AS (
          SELECT il.so_line_id,
-            (COALESCE(sum(COALESCE(il.qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS billed_qty,
             (COALESCE(sum(
                 CASE
                     WHEN (upper(COALESCE(inv.status, 'DRAFT'::text)) = 'POSTED'::text) THEN COALESCE(il.qty, (0)::numeric)
@@ -7535,11 +7536,11 @@ CREATE VIEW public.v_billed_order_closure WITH (security_invoker='on') AS
                     WHEN (upper(COALESCE(inv.status, 'DRAFT'::text)) <> 'POSTED'::text) THEN COALESCE(il.qty, (0)::numeric)
                     ELSE (0)::numeric
                 END), (0)::numeric))::numeric(18,3) AS draft_qty,
-            (count(DISTINCT inv.id))::integer AS invoice_count,
-            min(inv.invoice_date) AS first_invoice_date,
-            max(inv.invoice_date) AS last_invoice_date,
-            string_agg(DISTINCT inv.invoice_no, ' || '::text ORDER BY inv.invoice_no) FILTER (WHERE (COALESCE(inv.invoice_no, ''::text) <> ''::text)) AS invoice_nos,
-            string_agg(DISTINCT (((inv.invoice_no || ' ['::text) || upper(COALESCE(inv.status, 'DRAFT'::text))) || ']'::text), ' || '::text ORDER BY (((inv.invoice_no || ' ['::text) || upper(COALESCE(inv.status, 'DRAFT'::text))) || ']'::text)) FILTER (WHERE (COALESCE(inv.invoice_no, ''::text) <> ''::text)) AS invoice_refs
+            (count(DISTINCT inv.id) FILTER (WHERE (upper(COALESCE(inv.status, 'DRAFT'::text)) = 'POSTED'::text)))::integer AS invoice_count,
+            min(inv.invoice_date) FILTER (WHERE (upper(COALESCE(inv.status, 'DRAFT'::text)) = 'POSTED'::text)) AS first_invoice_date,
+            max(inv.invoice_date) FILTER (WHERE (upper(COALESCE(inv.status, 'DRAFT'::text)) = 'POSTED'::text)) AS last_invoice_date,
+            string_agg(DISTINCT inv.invoice_no, ' || '::text ORDER BY inv.invoice_no) FILTER (WHERE ((COALESCE(inv.invoice_no, ''::text) <> ''::text) AND (upper(COALESCE(inv.status, 'DRAFT'::text)) = 'POSTED'::text))) AS invoice_nos,
+            string_agg(DISTINCT (((inv.invoice_no || ' ['::text) || upper(COALESCE(inv.status, 'DRAFT'::text))) || ']'::text), ' || '::text ORDER BY (((inv.invoice_no || ' ['::text) || upper(COALESCE(inv.status, 'DRAFT'::text))) || ']'::text)) FILTER (WHERE ((COALESCE(inv.invoice_no, ''::text) <> ''::text) AND (upper(COALESCE(inv.status, 'DRAFT'::text)) = 'POSTED'::text))) AS invoice_refs
            FROM (public.invoice_lines il
              JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
           WHERE ((il.so_line_id IS NOT NULL) AND ((il.so_line_id)::text !~~ 'MANUAL-%'::text) AND (upper(COALESCE(inv.status, 'DRAFT'::text)) <> ALL (ARRAY['CANCELLED'::text, 'VOID'::text, 'DELETED'::text])) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
@@ -7561,10 +7562,10 @@ CREATE VIEW public.v_billed_order_closure WITH (security_invoker='on') AS
     COALESCE(sol.category, ''::text) AS category,
     COALESCE(sol.unit, 'Pcs'::text) AS unit,
     (COALESCE(sol.qty, (0)::numeric))::numeric(18,3) AS order_qty,
-    (COALESCE(iu.billed_qty, (0)::numeric))::numeric(18,3) AS dispatched_qty,
-    (GREATEST((COALESCE(sol.qty, (0)::numeric) - COALESCE(iu.billed_qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS dispatch_balance_qty,
-    (COALESCE(iu.billed_qty, (0)::numeric))::numeric(18,3) AS billed_qty,
-    (GREATEST((COALESCE(sol.qty, (0)::numeric) - COALESCE(iu.billed_qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS billing_gap_qty,
+    (COALESCE(iu.posted_qty, (0)::numeric))::numeric(18,3) AS dispatched_qty,
+    (GREATEST((COALESCE(sol.qty, (0)::numeric) - COALESCE(iu.posted_qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS dispatch_balance_qty,
+    (COALESCE(iu.posted_qty, (0)::numeric))::numeric(18,3) AS billed_qty,
+    (GREATEST((COALESCE(sol.qty, (0)::numeric) - COALESCE(iu.posted_qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS billing_gap_qty,
     (COALESCE(iu.posted_qty, (0)::numeric))::numeric(18,3) AS posted_qty,
     (COALESCE(iu.draft_qty, (0)::numeric))::numeric(18,3) AS draft_qty,
     COALESCE(iu.invoice_count, 0) AS invoice_count,
@@ -7583,19 +7584,20 @@ CREATE VIEW public.v_billed_order_closure WITH (security_invoker='on') AS
     sol.closed_at,
     COALESCE(sol.closed_by, ''::text) AS closed_by,
     sol.status_updated_at,
-    ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(iu.billed_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) AS auto_closed_by_dispatch,
+    ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(iu.posted_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) AS auto_closed_by_dispatch,
         CASE
-            WHEN ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(iu.billed_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) THEN 'CLOSED'::text
+            WHEN ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(iu.posted_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) THEN 'CLOSED'::text
             WHEN ((upper(COALESCE(sol.closed_by, ''::text)) ~~ '%SHORT CLOSE%'::text) OR (upper(COALESCE(sol.closed_by, ''::text)) ~~ '%SHORT_CLOSE%'::text)) THEN 'SHORT_CLOSED'::text
             WHEN (upper(COALESCE(sol.status, 'OPEN'::text)) = 'PARTIAL_DISPATCHED'::text) THEN 'PARTIAL_DISPATCHED'::text
             WHEN ((upper(COALESCE(sol.status, 'OPEN'::text)) = 'CLOSED'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) ~~ '%MANUAL%'::text)) THEN 'CLOSED'::text
             ELSE 'OPEN'::text
         END AS closure_status,
         CASE
-            WHEN ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(iu.billed_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) THEN 'Fully billed'::text
+            WHEN ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(iu.posted_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) THEN 'Fully billed'::text
             WHEN ((upper(COALESCE(sol.closed_by, ''::text)) ~~ '%SHORT CLOSE%'::text) OR (upper(COALESCE(sol.closed_by, ''::text)) ~~ '%SHORT_CLOSE%'::text)) THEN COALESCE(NULLIF(sol.closed_by, ''::text), 'Manual short close'::text)
             WHEN ((upper(COALESCE(sol.status, 'OPEN'::text)) = 'CLOSED'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) ~~ '%MANUAL%'::text)) THEN COALESCE(NULLIF(sol.closed_by, ''::text), 'Manual close'::text)
             WHEN (upper(COALESCE(sol.status, 'OPEN'::text)) = 'PARTIAL_DISPATCHED'::text) THEN 'Marked for partial dispatch'::text
+            WHEN (COALESCE(iu.draft_qty, (0)::numeric) > (0)::numeric) THEN 'Draft billing exists, not posted'::text
             ELSE 'Billed but not fully closed'::text
         END AS closure_reason,
     lower(concat_ws(' '::text, COALESCE(so.so_number, ''::text), COALESCE((sol.line_no)::text, ''::text), COALESCE(so.po_number, ''::text), COALESCE(so.sales_rep, ''::text), COALESCE(c.client_name, so.client_code, ''::text), COALESCE(sol.division, ''::text), COALESCE(sol.product_code, ''::text), COALESCE(sol.product_name, ''::text), COALESCE(sol.category, ''::text), COALESCE(iu.invoice_nos, ''::text), COALESCE(iu.invoice_refs, ''::text), COALESCE(sol.closed_by, ''::text))) AS match_text
@@ -7706,15 +7708,20 @@ CREATE VIEW public.v_billing_document_register AS
 -- Name: v_billing_invoice_usage_summary; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_billing_invoice_usage_summary WITH (security_invoker='on') AS
+CREATE VIEW public.v_billing_invoice_usage_summary AS
  WITH usage_base AS (
          SELECT il.so_line_id,
             il.qty,
             COALESCE(inv.invoice_no, ''::text) AS invoice_no,
-            COALESCE(inv.status, 'DRAFT'::text) AS invoice_status
+            COALESCE(inv.status, 'DRAFT'::text) AS invoice_status,
+                CASE
+                    WHEN (upper(COALESCE(inv.document_type, ''::text)) = ANY (ARRAY['INVOICE'::text, 'CHALLAN'::text])) THEN upper(inv.document_type)
+                    WHEN (COALESCE(inv.invoice_no, ''::text) ~~ 'DC-H/%'::text) THEN 'CHALLAN'::text
+                    ELSE 'INVOICE'::text
+                END AS document_type
            FROM (public.invoice_lines il
-             LEFT JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
-          WHERE (il.so_line_id IS NOT NULL)
+             JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+          WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'DRAFT'::text)) <> ALL (ARRAY['CANCELLED'::text, 'VOID'::text, 'DELETED'::text])))
         ), usage_totals AS (
          SELECT ub.so_line_id,
             (COALESCE(sum(ub.qty), (0)::numeric))::numeric(18,3) AS billed_qty,
@@ -7734,7 +7741,7 @@ CREATE VIEW public.v_billing_invoice_usage_summary WITH (security_invoker='on') 
          SELECT x.so_line_id,
             string_agg(x.invoice_ref, ' || '::text ORDER BY x.invoice_ref) AS invoice_refs
            FROM ( SELECT DISTINCT ub.so_line_id,
-                    (((ub.invoice_no || ' ['::text) || ub.invoice_status) || ']'::text) AS invoice_ref
+                    (((((ub.invoice_no || ' ['::text) || ub.document_type) || ' / '::text) || ub.invoice_status) || ']'::text) AS invoice_ref
                    FROM usage_base ub
                   WHERE (ub.invoice_no <> ''::text)) x
           GROUP BY x.so_line_id
@@ -7752,7 +7759,7 @@ CREATE VIEW public.v_billing_invoice_usage_summary WITH (security_invoker='on') 
 -- Name: v_billing_packing_summary; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_billing_packing_summary WITH (security_invoker='on') AS
+CREATE VIEW public.v_billing_packing_summary AS
  SELECT so_line_id,
     (COALESCE(sum(packed_qty), (0)::numeric))::numeric(18,3) AS packed_qty,
     max(packed_at) AS latest_packed_at
@@ -7777,7 +7784,7 @@ CREATE VIEW public.v_billing_line_read_model AS
     sol.id AS so_line_id,
     so.so_number,
     so.so_date,
-    COALESCE(so.client_code, ''::text) AS client_code,
+    so.client_code,
     COALESCE(c.client_name, so.client_code, ''::text) AS client_name,
     COALESCE(c.state, ''::text) AS client_state,
     COALESCE(c.gstin, ''::text) AS client_gstin,
@@ -7824,22 +7831,7 @@ CREATE VIEW public.v_billing_line_read_model AS
     COALESCE(sol.prepress_remarks, ''::text) AS prepress_remarks,
     COALESCE(sol.product_remarks, ''::text) AS product_remarks,
     COALESCE(usg.invoice_refs, ''::text) AS invoice_refs,
-    lower(concat_ws(' '::text, COALESCE(so.so_number, ''::text), COALESCE((sol.line_no)::text, ''::text), COALESCE(sol.product_code, ''::text), COALESCE(sol.product_name, ''::text), COALESCE(sol.job_reference, ''::text), COALESCE(c.client_name, ''::text), COALESCE(so.po_number, ''::text),
-        CASE
-            WHEN COALESCE(so.advance_payment_required, false) THEN 'advance payment'::text
-            ELSE ''::text
-        END,
-        CASE
-            WHEN COALESCE(so.advance_payment_received, false) THEN 'payment received'::text
-            ELSE 'payment pending'::text
-        END)) AS match_text,
-    COALESCE(so.advance_payment_required, false) AS advance_payment_required,
-    COALESCE(so.advance_payment_received, false) AS advance_payment_received,
-        CASE
-            WHEN (COALESCE(so.advance_payment_required, false) AND COALESCE(so.advance_payment_received, false)) THEN 'PAYMENT_RECEIVED'::text
-            WHEN COALESCE(so.advance_payment_required, false) THEN 'PAYMENT_PENDING'::text
-            ELSE 'NOT_REQUIRED'::text
-        END AS advance_payment_status
+    lower(concat_ws(' '::text, COALESCE(so.so_number, ''::text), COALESCE((sol.line_no)::text, ''::text), COALESCE(sol.product_code, ''::text), COALESCE(sol.product_name, ''::text), COALESCE(sol.job_reference, ''::text), COALESCE(c.client_name, ''::text), COALESCE(so.po_number, ''::text))) AS match_text
    FROM ((((((public.sales_order_lines sol
      JOIN public.sales_orders so ON ((so.id = sol.so_id)))
      LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
@@ -8518,13 +8510,16 @@ CREATE VIEW public.v_pr_po_receipt_cycle WITH (security_invoker='on') AS
           GROUP BY r_1.po_line_id
         ), po_by_pr AS (
          SELECT pol_1.source_ref AS pr_no,
-            (count(DISTINCT pol_1.po_id))::integer AS po_count,
-            (count(*))::integer AS po_line_count,
-            string_agg(DISTINCT pol_1.po_no, ', '::text ORDER BY pol_1.po_no) FILTER (WHERE (COALESCE(pol_1.po_no, ''::text) <> ''::text)) AS po_refs,
-            (sum(COALESCE(pol_1.qty, (0)::numeric)))::numeric(14,4) AS total_ordered_qty,
-            (sum(COALESCE(rbl_1.line_received_qty, (0)::numeric)))::numeric(14,4) AS total_po_received_qty,
-            max(rbl_1.latest_receipt_date) AS latest_po_receipt_date
-           FROM (public.purchase_order_lines pol_1
+            (count(DISTINCT pol_1.po_id) FILTER (WHERE (upper(COALESCE(po_1.status, 'OPEN'::text)) <> 'CANCELLED'::text)))::integer AS po_count,
+            (count(*) FILTER (WHERE (upper(COALESCE(po_1.status, 'OPEN'::text)) <> 'CANCELLED'::text)))::integer AS po_line_count,
+            string_agg(DISTINCT pol_1.po_no, ', '::text ORDER BY pol_1.po_no) FILTER (WHERE ((COALESCE(pol_1.po_no, ''::text) <> ''::text) AND (upper(COALESCE(po_1.status, 'OPEN'::text)) <> 'CANCELLED'::text))) AS po_refs,
+            (sum(COALESCE(pol_1.qty, (0)::numeric)) FILTER (WHERE (upper(COALESCE(po_1.status, 'OPEN'::text)) <> 'CANCELLED'::text)))::numeric(14,4) AS total_ordered_qty,
+            (sum(COALESCE(rbl_1.line_received_qty, (0)::numeric)) FILTER (WHERE (upper(COALESCE(po_1.status, 'OPEN'::text)) <> 'CANCELLED'::text)))::numeric(14,4) AS total_po_received_qty,
+            max(rbl_1.latest_receipt_date) FILTER (WHERE (upper(COALESCE(po_1.status, 'OPEN'::text)) <> 'CANCELLED'::text)) AS latest_po_receipt_date,
+            (count(DISTINCT pol_1.po_id) FILTER (WHERE (upper(COALESCE(po_1.status, 'OPEN'::text)) = 'CANCELLED'::text)))::integer AS cancelled_po_count,
+            string_agg(DISTINCT pol_1.po_no, ', '::text ORDER BY pol_1.po_no) FILTER (WHERE ((COALESCE(pol_1.po_no, ''::text) <> ''::text) AND (upper(COALESCE(po_1.status, 'OPEN'::text)) = 'CANCELLED'::text))) AS cancelled_po_refs
+           FROM ((public.purchase_order_lines pol_1
+             LEFT JOIN public.purchase_orders po_1 ON ((po_1.id = pol_1.po_id)))
              LEFT JOIN receipt_by_line rbl_1 ON ((rbl_1.po_line_id = pol_1.id)))
           WHERE ((upper(COALESCE(pol_1.source_type, ''::text)) = 'INVENTORY_PR'::text) AND (COALESCE(pol_1.source_ref, ''::text) <> ''::text))
           GROUP BY pol_1.source_ref
@@ -8541,7 +8536,12 @@ CREATE VIEW public.v_pr_po_receipt_cycle WITH (security_invoker='on') AS
     pr.pr_no,
     pr.created_at AS pr_created_at,
     pr.closed_at AS pr_closed_at,
-    COALESCE(pr.status, 'OPEN'::text) AS pr_status,
+        CASE
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = 'CANCELLED'::text) THEN 'CANCELLED'::text
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = ANY (ARRAY['CLOSED'::text, 'SHORT_CLOSED'::text])) THEN 'CLOSED'::text
+            WHEN ((COALESCE(pr.requested_qty, (0)::numeric) > (0)::numeric) AND (GREATEST(COALESCE(pr.received_qty, (0)::numeric), (COALESCE(pbp.total_po_received_qty, (0)::numeric) + COALESCE(dpr.direct_received_qty, (0)::numeric))) >= COALESCE(pr.requested_qty, (0)::numeric))) THEN 'CLOSED'::text
+            ELSE COALESCE(pr.status, 'OPEN'::text)
+        END AS pr_status,
     COALESCE(pr.item_code, i.item_code, ''::text) AS pr_item_code,
     COALESCE(pr.item_name, i.item_name, ''::text) AS pr_item_name,
     COALESCE(i.category, ''::text) AS item_category,
@@ -8550,10 +8550,16 @@ CREATE VIEW public.v_pr_po_receipt_cycle WITH (security_invoker='on') AS
     COALESCE(pr.job_ref, ''::text) AS pr_job_ref,
     COALESCE(pr.remarks, ''::text) AS pr_remarks,
     (COALESCE(pr.requested_qty, (0)::numeric))::numeric(14,4) AS pr_requested_qty,
-    (COALESCE(pr.received_qty, (0)::numeric))::numeric(14,4) AS pr_received_qty,
-    (GREATEST((COALESCE(pr.requested_qty, (0)::numeric) - COALESCE(pr.received_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS pr_pending_receipt_qty,
+    (GREATEST(COALESCE(pr.received_qty, (0)::numeric), (COALESCE(pbp.total_po_received_qty, (0)::numeric) + COALESCE(dpr.direct_received_qty, (0)::numeric))))::numeric(14,4) AS pr_received_qty,
+        CASE
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = ANY (ARRAY['CLOSED'::text, 'SHORT_CLOSED'::text, 'CANCELLED'::text])) THEN (0)::numeric(14,4)
+            ELSE (GREATEST((COALESCE(pr.requested_qty, (0)::numeric) - GREATEST(COALESCE(pr.received_qty, (0)::numeric), (COALESCE(pbp.total_po_received_qty, (0)::numeric) + COALESCE(dpr.direct_received_qty, (0)::numeric)))), (0)::numeric))::numeric(14,4)
+        END AS pr_pending_receipt_qty,
     (COALESCE(pbp.total_ordered_qty, (0)::numeric))::numeric(14,4) AS pr_ordered_qty,
-    (GREATEST((COALESCE(pr.requested_qty, (0)::numeric) - COALESCE(pbp.total_ordered_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS pr_pending_to_order_qty,
+        CASE
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = ANY (ARRAY['CLOSED'::text, 'SHORT_CLOSED'::text, 'CANCELLED'::text])) THEN (0)::numeric(14,4)
+            ELSE (GREATEST(((COALESCE(pr.requested_qty, (0)::numeric) - GREATEST(COALESCE(pr.received_qty, (0)::numeric), (COALESCE(pbp.total_po_received_qty, (0)::numeric) + COALESCE(dpr.direct_received_qty, (0)::numeric)))) - GREATEST((COALESCE(pbp.total_ordered_qty, (0)::numeric) - COALESCE(pbp.total_po_received_qty, (0)::numeric)), (0)::numeric)), (0)::numeric))::numeric(14,4)
+        END AS pr_pending_to_order_qty,
     (COALESCE(pbp.total_po_received_qty, (0)::numeric))::numeric(14,4) AS pr_po_received_qty,
     (GREATEST((COALESCE(pbp.total_ordered_qty, (0)::numeric) - COALESCE(pbp.total_po_received_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS pr_open_po_qty,
     (COALESCE(dpr.direct_received_qty, (0)::numeric))::numeric(14,4) AS pr_direct_received_qty,
@@ -8594,7 +8600,10 @@ CREATE VIEW public.v_pr_po_receipt_cycle WITH (security_invoker='on') AS
     (COALESCE(pol.tax_amount, (0)::numeric))::numeric(18,2) AS po_line_tax_amount,
     (COALESCE(pol.total_amount, pol.amount, (0)::numeric))::numeric(18,2) AS po_line_total_amount,
     (COALESCE(rbl.line_received_qty, (0)::numeric))::numeric(14,4) AS po_line_received_qty,
-    (GREATEST((COALESCE(pol.qty, (0)::numeric) - COALESCE(rbl.line_received_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS po_line_pending_qty,
+        CASE
+            WHEN (upper(COALESCE(po.status, 'OPEN'::text)) = 'CANCELLED'::text) THEN (0)::numeric(14,4)
+            ELSE (GREATEST((COALESCE(pol.qty, (0)::numeric) - COALESCE(rbl.line_received_qty, (0)::numeric)), (0)::numeric))::numeric(14,4)
+        END AS po_line_pending_qty,
     (GREATEST((COALESCE(rbl.line_received_qty, (0)::numeric) - COALESCE(pol.qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS po_line_over_received_qty,
     COALESCE(rbl.receipt_count, 0) AS po_line_receipt_count,
     rbl.latest_receipt_date AS po_line_latest_receipt_date,
@@ -8608,6 +8617,10 @@ CREATE VIEW public.v_pr_po_receipt_cycle WITH (security_invoker='on') AS
     ((COALESCE(r.qty, (0)::numeric) * COALESCE(r.rate, (0)::numeric)))::numeric(18,2) AS receipt_value,
     COALESCE(r.remarks, ''::text) AS receipt_remarks,
         CASE
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = 'CANCELLED'::text) THEN 'PR_CANCELLED'::text
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = ANY (ARRAY['CLOSED'::text, 'SHORT_CLOSED'::text])) THEN 'PR_CLOSED'::text
+            WHEN ((COALESCE(pr.requested_qty, (0)::numeric) > (0)::numeric) AND (pol.id IS NULL) AND (GREATEST(COALESCE(pr.received_qty, (0)::numeric), (COALESCE(pbp.total_po_received_qty, (0)::numeric) + COALESCE(dpr.direct_received_qty, (0)::numeric))) >= COALESCE(pr.requested_qty, (0)::numeric))) THEN 'PR_DIRECT_RECEIVED'::text
+            WHEN (upper(COALESCE(po.status, 'OPEN'::text)) = 'CANCELLED'::text) THEN 'PO_CANCELLED'::text
             WHEN (pol.id IS NULL) THEN 'PR_PENDING_PO'::text
             WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) <= (0)::numeric) THEN 'PO_PENDING_RECEIPT'::text
             WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) < COALESCE(pol.qty, (0)::numeric)) THEN 'PO_PARTIAL_RECEIPT'::text
@@ -8616,6 +8629,10 @@ CREATE VIEW public.v_pr_po_receipt_cycle WITH (security_invoker='on') AS
             ELSE 'UNKNOWN'::text
         END AS cycle_status,
         CASE
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = 'CANCELLED'::text) THEN 8
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = ANY (ARRAY['CLOSED'::text, 'SHORT_CLOSED'::text])) THEN 4
+            WHEN ((COALESCE(pr.requested_qty, (0)::numeric) > (0)::numeric) AND (pol.id IS NULL) AND (GREATEST(COALESCE(pr.received_qty, (0)::numeric), (COALESCE(pbp.total_po_received_qty, (0)::numeric) + COALESCE(dpr.direct_received_qty, (0)::numeric))) >= COALESCE(pr.requested_qty, (0)::numeric))) THEN 4
+            WHEN (upper(COALESCE(po.status, 'OPEN'::text)) = 'CANCELLED'::text) THEN 8
             WHEN (pol.id IS NULL) THEN 1
             WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) <= (0)::numeric) THEN 2
             WHEN (COALESCE(rbl.line_received_qty, (0)::numeric) < COALESCE(pol.qty, (0)::numeric)) THEN 3
@@ -15726,6 +15743,13 @@ CREATE INDEX idx_purchase_po_receipts_po_no ON public.purchase_po_receipts USING
 
 
 --
+-- Name: idx_purchase_po_receipts_source_ref; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_purchase_po_receipts_source_ref ON public.purchase_po_receipts USING btree (source_ref);
+
+
+--
 -- Name: idx_purchase_po_receipts_source_type; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -16296,7 +16320,7 @@ CREATE TRIGGER trg_sales_order_line_status_from_dispatch AFTER INSERT OR DELETE 
 -- Name: invoices trg_sales_order_line_status_from_invoice; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER trg_sales_order_line_status_from_invoice AFTER DELETE OR UPDATE OF status, document_type, invoice_no ON public.invoices FOR EACH ROW EXECUTE FUNCTION public.sales_order_line_status_from_invoice_trg();
+CREATE TRIGGER trg_sales_order_line_status_from_invoice AFTER DELETE OR UPDATE OF status, document_type, invoice_no, posted_at ON public.invoices FOR EACH ROW EXECUTE FUNCTION public.sales_order_line_status_from_invoice_trg();
 
 
 --
