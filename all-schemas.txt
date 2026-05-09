@@ -1967,6 +1967,7 @@ declare
   v_latest_dispatch_by text := null;
   v_latest_invoice_by text := null;
   v_manual_closed boolean := false;
+  v_manual_cancelled boolean := false;
   v_is_manual_billing boolean := false;
 begin
   if p_so_line_id is null then
@@ -1995,6 +1996,13 @@ begin
 
   v_manual_closed :=
     v_current_status = 'CLOSED'
+    and (
+      upper(coalesce(v_current_closed_by, '')) like '%MANUAL%'
+      or upper(coalesce(v_current_closed_by, '')) like '%LEGACY%'
+    );
+
+  v_manual_cancelled :=
+    v_current_status = 'CANCELLED'
     and (
       upper(coalesce(v_current_closed_by, '')) like '%MANUAL%'
       or upper(coalesce(v_current_closed_by, '')) like '%LEGACY%'
@@ -2039,7 +2047,10 @@ begin
 
   if v_header_status = 'CANCELLED' then
     v_next_status := 'CANCELLED';
-    v_next_closed_by := null;
+    v_next_closed_by := coalesce(v_current_closed_by, 'System - order cancelled');
+  elsif v_manual_cancelled then
+    v_next_status := 'CANCELLED';
+    v_next_closed_by := v_current_closed_by;
   elsif v_is_manual_billing then
     v_next_status := 'CLOSED';
     v_next_closed_by := coalesce(v_current_closed_by, 'System - manual billing');
@@ -2064,10 +2075,12 @@ begin
   set
     status = v_next_status,
     closed_at = case
-      when v_next_status = 'CLOSED' then coalesce(closed_at, now())
+      when v_next_status in ('CLOSED', 'CANCELLED') then coalesce(closed_at, now())
       else null
     end,
     closed_by = case
+      when v_next_status = 'CANCELLED' and v_manual_cancelled then v_current_closed_by
+      when v_next_status = 'CANCELLED' then v_next_closed_by
       when v_next_status = 'CLOSED' and v_manual_closed then v_current_closed_by
       when v_next_status = 'CLOSED' then v_next_closed_by
       else null
@@ -2076,10 +2089,12 @@ begin
   where id = p_so_line_id
     and (
       upper(coalesce(status, '')) is distinct from v_next_status
+      or (v_next_status = 'CANCELLED' and closed_at is null)
+      or (v_next_status = 'CANCELLED' and nullif(closed_by, '') is distinct from v_next_closed_by and not v_manual_cancelled)
       or (v_next_status = 'CLOSED' and closed_at is null)
       or (v_next_status = 'CLOSED' and nullif(closed_by, '') is distinct from v_next_closed_by and not v_manual_closed)
-      or (v_next_status <> 'CLOSED' and closed_at is not null)
-      or (v_next_status <> 'CLOSED' and closed_by is not null)
+      or (v_next_status not in ('CLOSED', 'CANCELLED') and closed_at is not null)
+      or (v_next_status not in ('CLOSED', 'CANCELLED') and closed_by is not null)
     );
 end;
 $$;
@@ -10086,7 +10101,7 @@ CREATE VIEW public.v_report_billing_register AS
     so.so_date,
     COALESCE(il.line_no, sol.line_no) AS line_no,
     COALESCE(so.sales_rep, ''::text) AS sales_rep,
-    COALESCE(NULLIF(btrim(il.division), ''::text), NULLIF(btrim(sol.division), ''::text), ''::text) AS division,
+    COALESCE(NULLIF(btrim(sol.division), ''::text), NULLIF(btrim(il.division), ''::text), ''::text) AS division,
     COALESCE(sol.product_code, il.product_code, ''::text) AS product_code,
     COALESCE(sol.product_name, il.product_name, ''::text) AS product_name,
     COALESCE(sol.category, ''::text) AS category,
@@ -13338,56 +13353,59 @@ CREATE VIEW public.v_workorder_candidates AS
 --
 
 CREATE VIEW public.v_workorder_candidates_active AS
- SELECT so_id,
-    so_line_id,
-    so_number,
-    so_date,
-    so_created_at,
-    so_time,
-    sales_rep,
-    client_code,
-    client_name,
-    line_no,
-    product_code,
-    product_name,
-    category,
-    department_category,
-    qty,
-    unit,
-    po_number,
-    expected_delivery,
-    job_priority,
-    job_type,
-    so_remarks,
-    product_remarks,
-    prepress_remark,
-    job_reference,
-    accounts_status,
-    business_status,
-    artwork_no,
-    product_type,
-    sheet_length,
-    sheet_width,
-    sheet_ups,
-    printing_colors,
-    artwork_status,
-    artwork_approved_at,
-    processed_qty,
-    remaining_qty,
-    wo_list,
-    approval_stage,
-    can_create_wo,
-    stock_qty_to_bill,
-    across_ups,
-    along_ups,
-    total_ups,
-    across_width,
-    teeth,
-    across_gap_mm,
-    along_gap_mm,
-    sales_type,
-    order_prefix
-   FROM public.v_workorder_candidates wc;
+ SELECT wc.so_id,
+    wc.so_line_id,
+    wc.so_number,
+    wc.so_date,
+    wc.so_created_at,
+    wc.so_time,
+    wc.sales_rep,
+    wc.client_code,
+    wc.client_name,
+    wc.line_no,
+    wc.product_code,
+    wc.product_name,
+    wc.category,
+    wc.department_category,
+    wc.qty,
+    wc.unit,
+    wc.po_number,
+    wc.expected_delivery,
+    wc.job_priority,
+    wc.job_type,
+    wc.so_remarks,
+    wc.product_remarks,
+    wc.prepress_remark,
+    wc.job_reference,
+    wc.accounts_status,
+    wc.business_status,
+    wc.artwork_no,
+    wc.product_type,
+    wc.sheet_length,
+    wc.sheet_width,
+    wc.sheet_ups,
+    wc.printing_colors,
+    wc.artwork_status,
+    wc.artwork_approved_at,
+    wc.processed_qty,
+    wc.remaining_qty,
+    wc.wo_list,
+    wc.approval_stage,
+    wc.can_create_wo,
+    wc.stock_qty_to_bill,
+    wc.across_ups,
+    wc.along_ups,
+    wc.total_ups,
+    wc.across_width,
+    wc.teeth,
+    wc.across_gap_mm,
+    wc.along_gap_mm,
+    wc.sales_type,
+    wc.order_prefix
+   FROM ((public.v_workorder_candidates wc
+     JOIN public.sales_orders so ON ((so.so_number = wc.so_number)))
+     JOIN public.sales_order_lines sol ON (((sol.so_id = so.id) AND ((sol.line_no)::text = (wc.line_no)::text))))
+  WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> ALL (ARRAY['CLOSED'::text, 'CANCELLED'::text])));
 
 
 --
