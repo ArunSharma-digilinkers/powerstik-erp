@@ -891,6 +891,47 @@ $$;
 
 
 --
+-- Name: billing_client_search(text, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.billing_client_search(p_q text DEFAULT NULL::text, p_limit integer DEFAULT 80) RETURNS TABLE(id uuid, client_code text, client_name text, state text, gstin text, credit_days integer, category text, active boolean, pan_no text, payment_terms text, bill_to_address text, bill_to_city text, bill_to_state text, bill_to_pincode text, ship_to_address text, ship_to_city text, ship_to_state text, ship_to_pincode text)
+    LANGUAGE sql STABLE
+    AS $$
+  select
+    c.id,
+    c.client_code,
+    c.client_name,
+    c.state,
+    c.gstin,
+    c.credit_days,
+    c.category,
+    c.active,
+    c.pan_no,
+    c.payment_terms,
+    c.bill_to_address,
+    c.bill_to_city,
+    c.bill_to_state,
+    c.bill_to_pincode,
+    c.ship_to_address,
+    c.ship_to_city,
+    c.ship_to_state,
+    c.ship_to_pincode
+  from public.clients c
+  where c.active is distinct from false
+    and (
+      coalesce(trim(p_q), '') = ''
+      or (
+        coalesce(c.client_code, '') || ' ' ||
+        coalesce(c.client_name, '') || ' ' ||
+        coalesce(c.gstin, '')
+      ) ilike '%' || trim(p_q) || '%'
+    )
+  order by c.client_name nulls last, c.client_code
+  limit least(greatest(coalesce(p_limit, 80), 1), 200);
+$$;
+
+
+--
 -- Name: billing_document_register_v2(date, date, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -987,6 +1028,117 @@ CREATE FUNCTION public.billing_document_register_v2(p_date_from date DEFAULT NUL
   left join line_preview lp on lp.id = b.id
   order by b.invoice_date desc, b.id desc
   limit 500;
+$$;
+
+
+--
+-- Name: billing_document_register_v3(date, date, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.billing_document_register_v3(p_date_from date DEFAULT NULL::date, p_date_to date DEFAULT NULL::date, p_status text DEFAULT 'ALL'::text, p_q text DEFAULT NULL::text) RETURNS TABLE(id text, invoice_no text, invoice_date date, document_type text, client_code text, client_name text, status text, billing_mode text, total_qty numeric, line_count integer, product_preview text, remarks text, subtotal numeric, tax_total numeric, grand_total numeric, created_at timestamp with time zone, posted_at timestamp with time zone, sort_ts timestamp with time zone)
+    LANGUAGE sql STABLE
+    AS $$
+  with base as (
+    select
+      inv.id,
+      inv.id::text as id_text,
+      inv.invoice_no,
+      inv.invoice_date,
+      case
+        when upper(coalesce(inv.document_type, '')) in ('INVOICE', 'CHALLAN') then upper(inv.document_type)
+        when coalesce(inv.invoice_no, '') like 'DC-H/%' then 'CHALLAN'
+        else 'INVOICE'
+      end as document_type,
+      coalesce(inv.client_code, 'MANUAL') as client_code,
+      coalesce(nullif(inv.bill_to_name, ''), nullif(inv.client_name, ''), c.client_name, inv.client_code, 'MANUAL') as client_name,
+      coalesce(inv.status, 'DRAFT') as status,
+      coalesce(inv.billing_mode, '') as billing_mode,
+      coalesce(inv.remarks, '') as remarks,
+      coalesce(inv.subtotal, 0)::numeric(18,2) as subtotal,
+      coalesce(inv.tax_total, greatest(coalesce(inv.grand_total, 0) - coalesce(inv.subtotal, 0) - coalesce(inv.freight, 0), 0))::numeric(18,2) as tax_total,
+      coalesce(inv.grand_total, 0)::numeric(18,2) as grand_total,
+      inv.created_at,
+      inv.posted_at,
+      coalesce(inv.posted_at, inv.created_at, inv.invoice_date::timestamp) as sort_ts
+    from public.invoices inv
+    left join public.clients c on c.client_code = inv.client_code
+    where (p_date_from is null or inv.invoice_date >= p_date_from)
+      and (p_date_to is null or inv.invoice_date <= p_date_to)
+      and (
+        coalesce(upper(p_status), 'ALL') = 'ALL'
+        or upper(coalesce(inv.status, '')) = upper(p_status)
+      )
+      and (
+        coalesce(trim(p_q), '') = ''
+        or (
+          coalesce(inv.invoice_no, '') || ' ' ||
+          coalesce(inv.client_code, '') || ' ' ||
+          coalesce(inv.client_name, '') || ' ' ||
+          coalesce(inv.bill_to_name, '') || ' ' ||
+          coalesce(inv.status, '') || ' ' ||
+          coalesce(inv.billing_mode, '') || ' ' ||
+          coalesce(inv.remarks, '') || ' ' ||
+          coalesce(inv.invoice_date::text, '')
+        ) ilike '%' || trim(p_q) || '%'
+      )
+    order by inv.invoice_date desc, coalesce(inv.posted_at, inv.created_at, inv.invoice_date::timestamp) desc, inv.invoice_no desc
+    limit 5000
+  ),
+  line_meta as (
+    select
+      il.invoice_id,
+      count(*)::integer as line_count,
+      coalesce(sum(il.qty), 0)::numeric(18,3) as total_qty,
+      min(upper(coalesce(nullif(il.source_mode, ''), 'UNKNOWN'))) as derived_billing_mode
+    from public.invoice_lines il
+    join base b on b.id = il.invoice_id
+    group by il.invoice_id
+  ),
+  preview_distinct as (
+    select distinct
+      il.invoice_id,
+      coalesce(nullif(il.product_name, ''), nullif(il.product_code, ''), 'Item') as product_label
+    from public.invoice_lines il
+    join base b on b.id = il.invoice_id
+  ),
+  preview_ranked as (
+    select
+      pd.invoice_id,
+      pd.product_label,
+      row_number() over (partition by pd.invoice_id order by pd.product_label) as rn
+    from preview_distinct pd
+  ),
+  preview as (
+    select
+      pr.invoice_id,
+      string_agg(pr.product_label, ', ' order by pr.product_label) as product_preview
+    from preview_ranked pr
+    where pr.rn <= 2
+    group by pr.invoice_id
+  )
+  select
+    b.id_text as id,
+    b.invoice_no,
+    b.invoice_date,
+    b.document_type,
+    b.client_code,
+    b.client_name,
+    b.status,
+    coalesce(nullif(b.billing_mode, ''), lm.derived_billing_mode, 'UNKNOWN') as billing_mode,
+    coalesce(lm.total_qty, 0)::numeric(18,3) as total_qty,
+    coalesce(lm.line_count, 0)::integer as line_count,
+    coalesce(pv.product_preview, '') as product_preview,
+    b.remarks,
+    b.subtotal,
+    b.tax_total,
+    b.grand_total,
+    b.created_at,
+    b.posted_at,
+    b.sort_ts
+  from base b
+  left join line_meta lm on lm.invoice_id = b.id
+  left join preview pv on pv.invoice_id = b.id
+  order by b.invoice_date desc, b.sort_ts desc, b.invoice_no desc;
 $$;
 
 
@@ -1765,7 +1917,7 @@ $$;
 -- Name: inv_stock_snapshot_ui(text, text, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.inv_stock_snapshot_ui(p_location text DEFAULT NULL::text, p_search text DEFAULT NULL::text, p_limit integer DEFAULT 20000) RETURNS TABLE(itemcode text, itemname text, category text, department text, uom text, location text, qty numeric, avgrate numeric, avg_rate numeric, value numeric, last_movement_at timestamp with time zone, oldest_receipt_at timestamp with time zone, ageing_days integer, movement_class text, next_batch_no text, batch_count integer, avg_lead_time_days numeric, avg_daily_consumption numeric, safety_factor numeric, minimum_stock_level numeric, msl_status text, msl_gap numeric)
+CREATE FUNCTION public.inv_stock_snapshot_ui(p_location text DEFAULT NULL::text, p_search text DEFAULT NULL::text, p_limit integer DEFAULT NULL::integer) RETURNS TABLE(itemcode text, itemname text, category text, department text, uom text, location text, qty numeric, avgrate numeric, avg_rate numeric, value numeric, last_movement_at timestamp with time zone, oldest_receipt_at timestamp with time zone, ageing_days integer, movement_class text, next_batch_no text, batch_count integer, avg_lead_time_days numeric, avg_daily_consumption numeric, safety_factor numeric, minimum_stock_level numeric, msl_status text, msl_gap numeric)
     LANGUAGE sql STABLE
     AS $$
   with base_rows as (
@@ -1813,9 +1965,8 @@ CREATE FUNCTION public.inv_stock_snapshot_ui(p_location text DEFAULT NULL::text,
       0::numeric as avg_rate,
       0::numeric as value,
       null::timestamptz as last_movement_at
-    from public.inv_items i
-    where coalesce(i.active, true) = true
-      and not exists (
+      from public.inv_items i
+    where not exists (
         select 1
         from public.inv_stock_mv s0
         where s0.item_id = i.id
@@ -1865,7 +2016,10 @@ CREATE FUNCTION public.inv_stock_snapshot_ui(p_location text DEFAULT NULL::text,
     on a.item_id = b.item_id
    and a.location = b.location
   order by b.item_name asc, b.item_code asc, b.location asc
-  limit greatest(coalesce(p_limit, 20000), 1);
+  limit case
+    when p_limit is null or p_limit <= 0 then null
+    else greatest(p_limit, 1)
+  end;
 $$;
 
 
@@ -1995,9 +2149,11 @@ begin
   end if;
 
   v_manual_closed :=
-    v_current_status = 'CLOSED'
+    v_current_status in ('CLOSED', 'SHORT_CLOSED')
     and (
       upper(coalesce(v_current_closed_by, '')) like '%MANUAL%'
+      or upper(coalesce(v_current_closed_by, '')) like '%SHORT CLOSE%'
+      or upper(coalesce(v_current_closed_by, '')) like '%SHORT_CLOSE%'
       or upper(coalesce(v_current_closed_by, '')) like '%LEGACY%'
     );
 
@@ -2079,10 +2235,7 @@ begin
       else null
     end,
     closed_by = case
-      when v_next_status = 'CANCELLED' and v_manual_cancelled then v_current_closed_by
-      when v_next_status = 'CANCELLED' then v_next_closed_by
-      when v_next_status = 'CLOSED' and v_manual_closed then v_current_closed_by
-      when v_next_status = 'CLOSED' then v_next_closed_by
+      when v_next_status in ('CLOSED', 'CANCELLED') then coalesce(nullif(closed_by, ''), v_next_closed_by)
       else null
     end,
     status_updated_at = now()
@@ -2090,9 +2243,9 @@ begin
     and (
       upper(coalesce(status, '')) is distinct from v_next_status
       or (v_next_status = 'CANCELLED' and closed_at is null)
-      or (v_next_status = 'CANCELLED' and nullif(closed_by, '') is distinct from v_next_closed_by and not v_manual_cancelled)
+      or (v_next_status = 'CANCELLED' and nullif(closed_by, '') is null and v_next_closed_by is not null)
       or (v_next_status = 'CLOSED' and closed_at is null)
-      or (v_next_status = 'CLOSED' and nullif(closed_by, '') is distinct from v_next_closed_by and not v_manual_closed)
+      or (v_next_status = 'CLOSED' and nullif(closed_by, '') is null and v_next_closed_by is not null)
       or (v_next_status not in ('CLOSED', 'CANCELLED') and closed_at is not null)
       or (v_next_status not in ('CLOSED', 'CANCELLED') and closed_by is not null)
     );
@@ -3367,71 +3520,6 @@ $$;
 
 
 --
--- Name: delete_leaf_prefixes(text[], text[]); Type: FUNCTION; Schema: storage; Owner: -
---
-
-CREATE FUNCTION storage.delete_leaf_prefixes(bucket_ids text[], names text[]) RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER
-    AS $$
-DECLARE
-    v_rows_deleted integer;
-BEGIN
-    LOOP
-        WITH candidates AS (
-            SELECT DISTINCT
-                t.bucket_id,
-                unnest(storage.get_prefixes(t.name)) AS name
-            FROM unnest(bucket_ids, names) AS t(bucket_id, name)
-        ),
-        uniq AS (
-             SELECT
-                 bucket_id,
-                 name,
-                 storage.get_level(name) AS level
-             FROM candidates
-             WHERE name <> ''
-             GROUP BY bucket_id, name
-        ),
-        leaf AS (
-             SELECT
-                 p.bucket_id,
-                 p.name,
-                 p.level
-             FROM storage.prefixes AS p
-                  JOIN uniq AS u
-                       ON u.bucket_id = p.bucket_id
-                           AND u.name = p.name
-                           AND u.level = p.level
-             WHERE NOT EXISTS (
-                 SELECT 1
-                 FROM storage.objects AS o
-                 WHERE o.bucket_id = p.bucket_id
-                   AND o.level = p.level + 1
-                   AND o.name COLLATE "C" LIKE p.name || '/%'
-             )
-             AND NOT EXISTS (
-                 SELECT 1
-                 FROM storage.prefixes AS c
-                 WHERE c.bucket_id = p.bucket_id
-                   AND c.level = p.level + 1
-                   AND c.name COLLATE "C" LIKE p.name || '/%'
-             )
-        )
-        DELETE
-        FROM storage.prefixes AS p
-            USING leaf AS l
-        WHERE p.bucket_id = l.bucket_id
-          AND p.name = l.name
-          AND p.level = l.level;
-
-        GET DIAGNOSTICS v_rows_deleted = ROW_COUNT;
-        EXIT WHEN v_rows_deleted = 0;
-    END LOOP;
-END;
-$$;
-
-
---
 -- Name: enforce_bucket_name_length(); Type: FUNCTION; Schema: storage; Owner: -
 --
 
@@ -3458,8 +3546,11 @@ DECLARE
     _parts text[];
     _filename text;
 BEGIN
+    -- Split on "/" to get path segments
     SELECT string_to_array(name, '/') INTO _parts;
-    SELECT _parts[array_length(_parts,1)] INTO _filename;
+    -- Get the last path segment (the actual filename)
+    SELECT _parts[array_length(_parts, 1)] INTO _filename;
+    -- Extract extension: reverse, split on '.', then reverse again
     RETURN reverse(split_part(reverse(_filename), '.', 1));
 END
 $$;
@@ -3515,60 +3606,6 @@ $$;
 
 
 --
--- Name: get_level(text); Type: FUNCTION; Schema: storage; Owner: -
---
-
-CREATE FUNCTION storage.get_level(name text) RETURNS integer
-    LANGUAGE sql IMMUTABLE STRICT
-    AS $$
-SELECT array_length(string_to_array("name", '/'), 1);
-$$;
-
-
---
--- Name: get_prefix(text); Type: FUNCTION; Schema: storage; Owner: -
---
-
-CREATE FUNCTION storage.get_prefix(name text) RETURNS text
-    LANGUAGE sql IMMUTABLE STRICT
-    AS $_$
-SELECT
-    CASE WHEN strpos("name", '/') > 0 THEN
-             regexp_replace("name", '[\/]{1}[^\/]+\/?$', '')
-         ELSE
-             ''
-        END;
-$_$;
-
-
---
--- Name: get_prefixes(text); Type: FUNCTION; Schema: storage; Owner: -
---
-
-CREATE FUNCTION storage.get_prefixes(name text) RETURNS text[]
-    LANGUAGE plpgsql IMMUTABLE STRICT
-    AS $$
-DECLARE
-    parts text[];
-    prefixes text[];
-    prefix text;
-BEGIN
-    -- Split the name into parts by '/'
-    parts := string_to_array("name", '/');
-    prefixes := '{}';
-
-    -- Construct the prefixes, stopping one level below the last part
-    FOR i IN 1..array_length(parts, 1) - 1 LOOP
-            prefix := array_to_string(parts[1:i], '/');
-            prefixes := array_append(prefixes, prefix);
-    END LOOP;
-
-    RETURN prefixes;
-END;
-$$;
-
-
---
 -- Name: get_size_by_bucket(); Type: FUNCTION; Schema: storage; Owner: -
 --
 
@@ -3577,7 +3614,7 @@ CREATE FUNCTION storage.get_size_by_bucket() RETURNS TABLE(size bigint, bucket_i
     AS $$
 BEGIN
     return query
-        select sum((metadata->>'size')::bigint) as size, obj.bucket_id
+        select sum((metadata->>'size')::bigint)::bigint as size, obj.bucket_id
         from "storage".objects as obj
         group by obj.bucket_id;
 END
@@ -4235,75 +4272,6 @@ BEGIN
     RETURN QUERY EXECUTE v_query
     USING v_prefix, p_bucket_id, p_level, p_limit, p_start_after, p_sort_column_after;
 END;
-$_$;
-
-
---
--- Name: search_legacy_v1(text, text, integer, integer, integer, text, text, text); Type: FUNCTION; Schema: storage; Owner: -
---
-
-CREATE FUNCTION storage.search_legacy_v1(prefix text, bucketname text, limits integer DEFAULT 100, levels integer DEFAULT 1, offsets integer DEFAULT 0, search text DEFAULT ''::text, sortcolumn text DEFAULT 'name'::text, sortorder text DEFAULT 'asc'::text) RETURNS TABLE(name text, id uuid, updated_at timestamp with time zone, created_at timestamp with time zone, last_accessed_at timestamp with time zone, metadata jsonb)
-    LANGUAGE plpgsql STABLE
-    AS $_$
-declare
-    v_order_by text;
-    v_sort_order text;
-begin
-    case
-        when sortcolumn = 'name' then
-            v_order_by = 'name';
-        when sortcolumn = 'updated_at' then
-            v_order_by = 'updated_at';
-        when sortcolumn = 'created_at' then
-            v_order_by = 'created_at';
-        when sortcolumn = 'last_accessed_at' then
-            v_order_by = 'last_accessed_at';
-        else
-            v_order_by = 'name';
-        end case;
-
-    case
-        when sortorder = 'asc' then
-            v_sort_order = 'asc';
-        when sortorder = 'desc' then
-            v_sort_order = 'desc';
-        else
-            v_sort_order = 'asc';
-        end case;
-
-    v_order_by = v_order_by || ' ' || v_sort_order;
-
-    return query execute
-        'with folders as (
-           select path_tokens[$1] as folder
-           from storage.objects
-             where objects.name ilike $2 || $3 || ''%''
-               and bucket_id = $4
-               and array_length(objects.path_tokens, 1) <> $1
-           group by folder
-           order by folder ' || v_sort_order || '
-     )
-     (select folder as "name",
-            null as id,
-            null as updated_at,
-            null as created_at,
-            null as last_accessed_at,
-            null as metadata from folders)
-     union all
-     (select path_tokens[$1] as "name",
-            id,
-            updated_at,
-            created_at,
-            last_accessed_at,
-            metadata
-     from storage.objects
-     where objects.name ilike $2 || $3 || ''%''
-       and bucket_id = $4
-       and array_length(objects.path_tokens, 1) = $1
-     order by ' || v_order_by || ')
-     limit $5
-     offset $6' using levels, prefix, search, bucketname, limits, offsets;
-end;
 $_$;
 
 
@@ -5522,7 +5490,8 @@ CREATE TABLE public.grn (
     item_code text,
     qty numeric,
     rate numeric,
-    received_at timestamp without time zone DEFAULT now()
+    received_at timestamp without time zone DEFAULT now(),
+    division text
 );
 
 
@@ -5759,10 +5728,41 @@ CREATE TABLE public.inv_purchase_requests (
 
 
 --
+-- Name: inv_rate_corrections; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inv_rate_corrections (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    source_ledger_id uuid NOT NULL,
+    lot_id uuid,
+    item_id uuid,
+    item_code text,
+    batch_no text,
+    source_type text,
+    source_ref text,
+    old_rate numeric NOT NULL,
+    new_rate numeric NOT NULL,
+    qty_received numeric DEFAULT 0,
+    qty_available numeric DEFAULT 0,
+    qty_issued numeric DEFAULT 0,
+    source_value_old numeric DEFAULT 0,
+    source_value_new numeric DEFAULT 0,
+    stock_value_delta numeric DEFAULT 0,
+    issue_value_delta numeric DEFAULT 0,
+    affected_issue_count integer DEFAULT 0,
+    affected_ledger_ids jsonb DEFAULT '[]'::jsonb,
+    reason text NOT NULL,
+    corrected_by text,
+    corrected_at timestamp with time zone DEFAULT now(),
+    created_at timestamp with time zone DEFAULT now()
+);
+
+
+--
 -- Name: inv_receipt_register_v; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.inv_receipt_register_v AS
+CREATE VIEW public.inv_receipt_register_v WITH (security_invoker='on') AS
  SELECT id,
     item_id,
     created_at,
@@ -6080,6 +6080,88 @@ CREATE MATERIALIZED VIEW public.inv_stock_analytics_mv AS
 
 
 --
+-- Name: inv_stock_reconciled_v; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.inv_stock_reconciled_v AS
+ WITH ledger_balance AS (
+         SELECT l.item_id,
+            upper(COALESCE(l.location, 'MAIN'::text)) AS location,
+            sum((COALESCE(l.qty_in, (0)::numeric) - COALESCE(l.qty_out, (0)::numeric))) AS ledger_qty,
+            max(l.created_at) AS last_movement_at,
+            sum(
+                CASE
+                    WHEN (COALESCE(l.qty_in, (0)::numeric) > (0)::numeric) THEN COALESCE(l.value, (0)::numeric)
+                    ELSE (0)::numeric
+                END) AS inbound_value,
+            sum(
+                CASE
+                    WHEN (COALESCE(l.qty_in, (0)::numeric) > (0)::numeric) THEN COALESCE(l.qty_in, (0)::numeric)
+                    ELSE (0)::numeric
+                END) AS inbound_qty
+           FROM public.inv_ledger l
+          GROUP BY l.item_id, (upper(COALESCE(l.location, 'MAIN'::text)))
+        ), lot_balance AS (
+         SELECT lt.item_id,
+            upper(COALESCE(lt.location, 'MAIN'::text)) AS location,
+            sum(
+                CASE
+                    WHEN (COALESCE(lt.qty_available, (0)::numeric) > (0)::numeric) THEN COALESCE(lt.qty_available, (0)::numeric)
+                    ELSE (0)::numeric
+                END) AS lot_qty,
+            sum(
+                CASE
+                    WHEN (COALESCE(lt.qty_available, (0)::numeric) > (0)::numeric) THEN (COALESCE(lt.qty_available, (0)::numeric) * COALESCE(lt.rate, (0)::numeric))
+                    ELSE (0)::numeric
+                END) AS lot_value,
+            max(lt.created_at) AS last_lot_movement_at
+           FROM public.inv_lots lt
+          GROUP BY lt.item_id, (upper(COALESCE(lt.location, 'MAIN'::text)))
+        ), keys AS (
+         SELECT ledger_balance.item_id,
+            ledger_balance.location
+           FROM ledger_balance
+        UNION
+         SELECT lot_balance.item_id,
+            lot_balance.location
+           FROM lot_balance
+          WHERE (COALESCE(lot_balance.lot_qty, (0)::numeric) <> (0)::numeric)
+        )
+ SELECT i.id AS item_id,
+    i.item_code,
+    i.item_name,
+    COALESCE(i.category, ''::text) AS category,
+    COALESCE(i.department, ''::text) AS department,
+    COALESCE(i.uom, ''::text) AS uom,
+    k.location,
+    COALESCE(lb.ledger_qty, (0)::numeric) AS ledger_qty,
+    COALESCE(lotb.lot_qty, (0)::numeric) AS lot_qty,
+    round(COALESCE(lb.ledger_qty, (0)::numeric), 6) AS qty,
+        CASE
+            WHEN (COALESCE(lotb.lot_qty, (0)::numeric) > (0)::numeric) THEN round((lotb.lot_value / NULLIF(lotb.lot_qty, (0)::numeric)), 6)
+            WHEN (COALESCE(lb.inbound_qty, (0)::numeric) > (0)::numeric) THEN round((lb.inbound_value / NULLIF(lb.inbound_qty, (0)::numeric)), 6)
+            ELSE (0)::numeric
+        END AS avg_rate,
+    round((COALESCE(lb.ledger_qty, (0)::numeric) *
+        CASE
+            WHEN (COALESCE(lotb.lot_qty, (0)::numeric) > (0)::numeric) THEN (lotb.lot_value / NULLIF(lotb.lot_qty, (0)::numeric))
+            WHEN (COALESCE(lb.inbound_qty, (0)::numeric) > (0)::numeric) THEN (lb.inbound_value / NULLIF(lb.inbound_qty, (0)::numeric))
+            ELSE (0)::numeric
+        END), 2) AS value,
+    round((COALESCE(lotb.lot_qty, (0)::numeric) - COALESCE(lb.ledger_qty, (0)::numeric)), 6) AS qty_gap,
+    round((COALESCE(lotb.lot_value, (0)::numeric) - COALESCE((COALESCE(lb.ledger_qty, (0)::numeric) *
+        CASE
+            WHEN (COALESCE(lb.inbound_qty, (0)::numeric) > (0)::numeric) THEN (lb.inbound_value / NULLIF(lb.inbound_qty, (0)::numeric))
+            ELSE (0)::numeric
+        END), (0)::numeric)), 2) AS value_gap,
+    COALESCE(lotb.last_lot_movement_at, lb.last_movement_at) AS last_movement_at
+   FROM (((keys k
+     JOIN public.inv_items i ON ((i.id = k.item_id)))
+     LEFT JOIN ledger_balance lb ON (((lb.item_id = k.item_id) AND (lb.location = k.location))))
+     LEFT JOIN lot_balance lotb ON (((lotb.item_id = k.item_id) AND (lotb.location = k.location))));
+
+
+--
 -- Name: work_order_materials; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6157,7 +6239,7 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
             COALESCE((NULLIF((wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}'::text[]), ''::text))::numeric, (0)::numeric) AS flexo_running_meter,
             COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text) AS raw_department
            FROM public.work_orders wo
-          WHERE (COALESCE(upper(wo.status), ''::text) <> 'CLOSED'::text)
+          WHERE (COALESCE(upper(wo.status), ''::text) <> ALL (ARRAY['CANCELLED'::text, 'CANCELED'::text, 'VOID'::text, 'DELETED'::text]))
         ), prepared AS (
          SELECT wb.id AS wo_id,
             wb.wo_number,
@@ -7777,6 +7859,7 @@ CREATE VIEW public.v_billed_order_closure WITH (security_invoker='on') AS
     ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(iu.posted_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) AS auto_closed_by_dispatch,
         CASE
             WHEN ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(iu.posted_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) THEN 'CLOSED'::text
+            WHEN (upper(COALESCE(sol.status, 'OPEN'::text)) = 'SHORT_CLOSED'::text) THEN 'SHORT_CLOSED'::text
             WHEN ((upper(COALESCE(sol.closed_by, ''::text)) ~~ '%SHORT CLOSE%'::text) OR (upper(COALESCE(sol.closed_by, ''::text)) ~~ '%SHORT_CLOSE%'::text)) THEN 'SHORT_CLOSED'::text
             WHEN (upper(COALESCE(sol.status, 'OPEN'::text)) = 'PARTIAL_DISPATCHED'::text) THEN 'PARTIAL_DISPATCHED'::text
             WHEN ((upper(COALESCE(sol.status, 'OPEN'::text)) = 'CLOSED'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) ~~ '%MANUAL%'::text)) THEN 'CLOSED'::text
@@ -7784,6 +7867,7 @@ CREATE VIEW public.v_billed_order_closure WITH (security_invoker='on') AS
         END AS closure_status,
         CASE
             WHEN ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(iu.posted_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) THEN 'Fully billed'::text
+            WHEN (upper(COALESCE(sol.status, 'OPEN'::text)) = 'SHORT_CLOSED'::text) THEN COALESCE(NULLIF(sol.closed_by, ''::text), 'Manual short close'::text)
             WHEN ((upper(COALESCE(sol.closed_by, ''::text)) ~~ '%SHORT CLOSE%'::text) OR (upper(COALESCE(sol.closed_by, ''::text)) ~~ '%SHORT_CLOSE%'::text)) THEN COALESCE(NULLIF(sol.closed_by, ''::text), 'Manual short close'::text)
             WHEN ((upper(COALESCE(sol.status, 'OPEN'::text)) = 'CLOSED'::text) AND (upper(COALESCE(sol.closed_by, ''::text)) ~~ '%MANUAL%'::text)) THEN COALESCE(NULLIF(sol.closed_by, ''::text), 'Manual close'::text)
             WHEN (upper(COALESCE(sol.status, 'OPEN'::text)) = 'PARTIAL_DISPATCHED'::text) THEN 'Marked for partial dispatch'::text
@@ -10158,6 +10242,348 @@ CREATE VIEW public.v_report_delivery_performance AS
 
 
 --
+-- Name: v_report_department_purchase_grn; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_department_purchase_grn AS
+ WITH receipt_ledger AS (
+         SELECT l.id AS ledger_id,
+            l.item_id,
+            l.location,
+            upper(COALESCE(l.ref_type, ''::text)) AS receipt_type,
+            l.ref_no AS source_ref,
+            COALESCE(l.qty_in, (0)::numeric) AS receipt_qty,
+            COALESCE(l.rate, (0)::numeric) AS receipt_rate,
+            abs(COALESCE(NULLIF(l.value, (0)::numeric), (COALESCE(l.qty_in, (0)::numeric) * COALESCE(l.rate, (0)::numeric)))) AS basic_value,
+            COALESCE(l.department, ''::text) AS ledger_department,
+            COALESCE(l.batch_no, ''::text) AS batch_no,
+            COALESCE(l.remarks, ''::text) AS remarks,
+            l.created_at AS receipt_created_at,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'GRN:([^|]+)'::text)), ''::text) AS grn_no,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'INV:([^|]+)'::text)), ''::text) AS supplier_invoice_no,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'InvoiceDate:([^|]+)'::text)), ''::text) AS supplier_invoice_date_text,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'PO:([^|]+)'::text)), ''::text) AS note_po_no,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'Vendor:([^|]+)'::text)), ''::text) AS note_vendor_name,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'ChallanNo:([^|]+)'::text)), ''::text) AS challan_no,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'ChallanDate:([^|]+)'::text)), ''::text) AS challan_date_text,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'Pay:([^|]+)'::text)), ''::text) AS payment_terms_note,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'Freight:([^|]+)'::text)), ''::text) AS freight_terms_note,
+            NULLIF(btrim("substring"(COALESCE(l.remarks, ''::text), 'TaxPct:([^|]+)'::text)), ''::text) AS tax_pct_text
+           FROM public.inv_ledger l
+          WHERE ((upper(COALESCE(l.ref_type, ''::text)) = ANY (ARRAY['PO-RECEIPT'::text, 'PR-RECEIPT'::text, 'DIRECT-RECEIPT'::text])) AND (COALESCE(l.qty_in, (0)::numeric) > (0)::numeric) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.inv_ledger rev
+                  WHERE ((rev.ref_no = (l.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
+        ), inventory_prepared AS (
+         SELECT rl.ledger_id,
+            rl.item_id,
+            rl.location,
+            rl.receipt_type,
+            rl.source_ref,
+            rl.receipt_qty,
+            rl.receipt_rate,
+            rl.basic_value,
+            rl.ledger_department,
+            rl.batch_no,
+            rl.remarks,
+            rl.receipt_created_at,
+            rl.grn_no,
+            rl.supplier_invoice_no,
+            rl.supplier_invoice_date_text,
+            rl.note_po_no,
+            rl.note_vendor_name,
+            rl.challan_no,
+            rl.challan_date_text,
+            rl.payment_terms_note,
+            rl.freight_terms_note,
+            rl.tax_pct_text,
+            i.item_code,
+            i.item_name,
+            COALESCE(i.category, ''::text) AS item_category,
+            COALESCE(i.uom, ''::text) AS item_uom,
+                CASE
+                    WHEN (rl.receipt_type = 'PO-RECEIPT'::text) THEN COALESCE(NULLIF(rl.note_po_no, ''::text), rl.source_ref)
+                    ELSE ''::text
+                END AS po_no_for_match,
+                CASE
+                    WHEN (rl.tax_pct_text ~ '^[0-9]+([.][0-9]+)?$'::text) THEN (rl.tax_pct_text)::numeric
+                    ELSE (0)::numeric
+                END AS tax_pct
+           FROM (receipt_ledger rl
+             LEFT JOIN public.inv_items i ON ((i.id = rl.item_id)))
+        ), inventory_enriched AS (
+         SELECT p.ledger_id,
+            p.item_id,
+            p.location,
+            p.receipt_type,
+            p.source_ref,
+            p.receipt_qty,
+            p.receipt_rate,
+            p.basic_value,
+            p.ledger_department,
+            p.batch_no,
+            p.remarks,
+            p.receipt_created_at,
+            p.grn_no,
+            p.supplier_invoice_no,
+            p.supplier_invoice_date_text,
+            p.note_po_no,
+            p.note_vendor_name,
+            p.challan_no,
+            p.challan_date_text,
+            p.payment_terms_note,
+            p.freight_terms_note,
+            p.tax_pct_text,
+            p.item_code,
+            p.item_name,
+            p.item_category,
+            p.item_uom,
+            p.po_no_for_match,
+            p.tax_pct,
+            po.id AS po_id,
+            po.order_date AS po_date,
+            COALESCE(po.status, ''::text) AS po_status,
+            COALESCE(po.vendor_name, p.note_vendor_name, ''::text) AS po_vendor_name,
+            COALESCE(po.payment_terms, p.payment_terms_note, ''::text) AS payment_terms,
+            COALESCE(po.freight_terms, p.freight_terms_note, ''::text) AS freight_terms,
+            pol.id AS po_line_id,
+            pol.line_no AS po_line_no,
+            COALESCE(pol.source_type, ''::text) AS po_source_type,
+            COALESCE(pol.source_ref, ''::text) AS po_source_ref,
+            COALESCE(pol.department, ''::text) AS po_line_department,
+            COALESCE(pol.job_ref, ''::text) AS po_line_job_ref,
+            pr.pr_no,
+            COALESCE(pr.department, ''::text) AS pr_department,
+            COALESCE(pr.job_ref, ''::text) AS pr_job_ref,
+            COALESCE(pr.status, ''::text) AS pr_status
+           FROM (((inventory_prepared p
+             LEFT JOIN public.purchase_orders po ON (((p.receipt_type = 'PO-RECEIPT'::text) AND (po.po_no = p.po_no_for_match))))
+             LEFT JOIN LATERAL ( SELECT pol1.id,
+                    pol1.po_id,
+                    pol1.po_no,
+                    pol1.line_no,
+                    pol1.source_type,
+                    pol1.source_ref,
+                    pol1.item_code,
+                    pol1.item_name,
+                    pol1.qty,
+                    pol1.rate,
+                    pol1.amount,
+                    pol1.department,
+                    pol1.job_ref,
+                    pol1.remarks,
+                    pol1.created_at,
+                    pol1.tax_pct,
+                    pol1.tax_amount,
+                    pol1.total_amount
+                   FROM public.purchase_order_lines pol1
+                  WHERE ((p.receipt_type = 'PO-RECEIPT'::text) AND (pol1.po_no = p.po_no_for_match) AND (upper(COALESCE(pol1.item_code, ''::text)) = upper(COALESCE(p.item_code, ''::text))))
+                  ORDER BY
+                        CASE
+                            WHEN (COALESCE(pol1.department, ''::text) = COALESCE(p.ledger_department, ''::text)) THEN 0
+                            ELSE 1
+                        END, pol1.line_no, pol1.id
+                 LIMIT 1) pol ON (true))
+             LEFT JOIN public.inv_purchase_requests pr ON ((((p.receipt_type = 'PR-RECEIPT'::text) AND (pr.pr_no = p.source_ref)) OR ((p.receipt_type = 'PO-RECEIPT'::text) AND (pr.pr_no = pol.source_ref)))))
+        ), inventory_rows AS (
+         SELECT (e.ledger_id)::text AS receipt_id,
+            COALESCE(e.grn_no, (e.ledger_id)::text) AS grn_no,
+            (timezone('Asia/Kolkata'::text, e.receipt_created_at))::date AS grn_date,
+            timezone('Asia/Kolkata'::text, e.receipt_created_at) AS grn_datetime,
+            e.receipt_type,
+            e.source_ref,
+            COALESCE(NULLIF(e.po_no_for_match, ''::text), ''::text) AS po_no,
+            (e.po_id)::text AS po_id,
+            e.po_date,
+            e.po_status,
+            (e.po_line_id)::text AS po_line_id,
+            e.po_line_no,
+            e.po_source_type,
+            e.po_source_ref,
+            COALESCE(e.pr_no,
+                CASE
+                    WHEN (e.receipt_type = 'PR-RECEIPT'::text) THEN e.source_ref
+                    ELSE ''::text
+                END, ''::text) AS pr_no,
+            e.pr_status,
+            COALESCE(NULLIF(btrim(e.ledger_department), ''::text), NULLIF(btrim(e.po_line_department), ''::text), NULLIF(btrim(e.pr_department), ''::text), 'Unassigned'::text) AS department,
+            COALESCE(NULLIF(btrim(e.po_line_job_ref), ''::text), NULLIF(btrim(e.pr_job_ref), ''::text), ''::text) AS job_ref,
+            COALESCE(e.item_code, ''::text) AS item_code,
+            COALESCE(e.item_name, ''::text) AS item_name,
+            e.item_category,
+            e.item_uom AS uom,
+            e.location,
+            e.batch_no,
+            (e.receipt_qty)::numeric(18,4) AS receipt_qty,
+            (e.receipt_rate)::numeric(18,4) AS receipt_rate,
+            (e.basic_value)::numeric(18,2) AS basic_value,
+            (e.tax_pct)::numeric(8,2) AS tax_pct,
+            round(((e.basic_value * e.tax_pct) / 100.0), 2) AS tax_value,
+            round((e.basic_value + ((e.basic_value * e.tax_pct) / 100.0)), 2) AS total_value,
+            COALESCE(e.po_vendor_name, ''::text) AS vendor_name,
+            COALESCE(e.supplier_invoice_no, ''::text) AS supplier_invoice_no,
+            e.supplier_invoice_date_text AS supplier_invoice_date,
+            COALESCE(e.challan_no, ''::text) AS challan_no,
+            e.challan_date_text AS challan_date,
+            COALESCE(e.payment_terms, ''::text) AS payment_terms,
+            COALESCE(e.freight_terms, ''::text) AS freight_terms,
+            e.remarks
+           FROM inventory_enriched e
+        ), tooling_artwork AS (
+         SELECT a.artwork_no,
+            max(a.product_type) AS artwork_product_type,
+            max(so.so_number) AS so_number,
+            max(sol.line_no) AS so_line_no,
+            max(sol.division) AS so_line_division,
+            max(sol.category) AS so_line_category
+           FROM ((public.artworks a
+             LEFT JOIN public.sales_orders so ON ((so.id = a.so_id)))
+             LEFT JOIN public.sales_order_lines sol ON (((sol.so_id = a.so_id) AND (sol.line_no = a.line_no))))
+          WHERE (COALESCE(a.artwork_no, ''::text) <> ''::text)
+          GROUP BY a.artwork_no
+        ), tooling_receipts AS (
+         SELECT ('TOOL-'::text || (r.id)::text) AS receipt_id,
+            COALESCE(NULLIF(btrim(r.challan_no), ''::text), (r.id)::text) AS grn_no,
+            r.receipt_date AS grn_date,
+            timezone('Asia/Kolkata'::text, r.created_at) AS grn_datetime,
+            upper(COALESCE(r.source_type, pol.source_type, 'TOOLING_RECEIPT'::text)) AS receipt_type,
+            COALESCE(NULLIF(r.source_ref, ''::text), NULLIF(pol.source_ref, ''::text), NULLIF(r.artwork_no, ''::text), ''::text) AS source_ref,
+            COALESCE(r.po_no, pol.po_no, ''::text) AS po_no,
+            (po.id)::text AS po_id,
+            po.order_date AS po_date,
+            COALESCE(po.status, ''::text) AS po_status,
+            (pol.id)::text AS po_line_id,
+            pol.line_no AS po_line_no,
+            COALESCE(pol.source_type, r.source_type, ''::text) AS po_source_type,
+            COALESCE(pol.source_ref, r.source_ref, ''::text) AS po_source_ref,
+            ''::text AS pr_no,
+            ''::text AS pr_status,
+            COALESCE(NULLIF(btrim(pol.department), ''::text), NULLIF(btrim(ta.so_line_division), ''::text), NULLIF(btrim(
+                CASE
+                    WHEN (upper(COALESCE(ta.artwork_product_type, ''::text)) ~~ '%FLEXO%'::text) THEN 'Flexo'::text
+                    WHEN (upper(COALESCE(ta.artwork_product_type, ''::text)) ~~ '%DIGITAL%'::text) THEN 'Digital'::text
+                    WHEN (upper(COALESCE(ta.artwork_product_type, ''::text)) ~~ '%CORR%'::text) THEN 'Corrugation'::text
+                    WHEN (upper(COALESCE(ta.artwork_product_type, ''::text)) ~~ '%OFFSET%'::text) THEN 'Offset'::text
+                    WHEN (upper(COALESCE(ta.artwork_product_type, ''::text)) ~~ '%FLAT%'::text) THEN 'Offset'::text
+                    ELSE COALESCE(ta.artwork_product_type, ''::text)
+                END), ''::text), NULLIF(btrim(ta.so_line_category), ''::text), 'Tooling'::text) AS department,
+            COALESCE(NULLIF(btrim(r.job_ref), ''::text), NULLIF(btrim(pol.job_ref), ''::text), NULLIF(btrim(r.so_refs), ''::text), ''::text) AS job_ref,
+            COALESCE(pol.item_code, ''::text) AS item_code,
+            COALESCE(pol.item_name,
+                CASE
+                    WHEN (upper(COALESCE(r.source_type, pol.source_type, ''::text)) = ANY (ARRAY['ARTWORK_PLATE'::text, 'DIRECT_PLATE'::text])) THEN 'Plate'::text
+                    WHEN (upper(COALESCE(r.source_type, pol.source_type, ''::text)) = ANY (ARRAY['ARTWORK_DIE'::text, 'DIRECT_DIE'::text])) THEN 'Die'::text
+                    ELSE 'Plate / Die'::text
+                END, ''::text) AS item_name,
+                CASE
+                    WHEN (upper(COALESCE(r.source_type, pol.source_type, ''::text)) = ANY (ARRAY['ARTWORK_PLATE'::text, 'DIRECT_PLATE'::text])) THEN 'Plate'::text
+                    WHEN (upper(COALESCE(r.source_type, pol.source_type, ''::text)) = ANY (ARRAY['ARTWORK_DIE'::text, 'DIRECT_DIE'::text])) THEN 'Die'::text
+                    ELSE 'Tooling'::text
+                END AS item_category,
+            'Pcs'::text AS uom,
+            ''::text AS location,
+            ''::text AS batch_no,
+            (COALESCE(r.qty, (0)::numeric))::numeric(18,4) AS receipt_qty,
+            (COALESCE(r.rate, pol.rate, (0)::numeric))::numeric(18,4) AS receipt_rate,
+            (abs((COALESCE(r.qty, (0)::numeric) * COALESCE(NULLIF(r.rate, (0)::numeric), pol.rate, (0)::numeric))))::numeric(18,2) AS basic_value,
+            (COALESCE(pol.tax_pct, (0)::numeric))::numeric(8,2) AS tax_pct,
+            round(((abs((COALESCE(r.qty, (0)::numeric) * COALESCE(NULLIF(r.rate, (0)::numeric), pol.rate, (0)::numeric))) * COALESCE(pol.tax_pct, (0)::numeric)) / 100.0), 2) AS tax_value,
+            round((abs((COALESCE(r.qty, (0)::numeric) * COALESCE(NULLIF(r.rate, (0)::numeric), pol.rate, (0)::numeric))) * ((1)::numeric + (COALESCE(pol.tax_pct, (0)::numeric) / 100.0))), 2) AS total_value,
+            COALESCE(po.vendor_name, ''::text) AS vendor_name,
+            ''::text AS supplier_invoice_no,
+            NULL::text AS supplier_invoice_date,
+            COALESCE(r.challan_no, ''::text) AS challan_no,
+            (r.receipt_date)::text AS challan_date,
+            COALESCE(po.payment_terms, ''::text) AS payment_terms,
+            COALESCE(po.freight_terms, ''::text) AS freight_terms,
+            COALESCE(r.remarks, ''::text) AS remarks
+           FROM (((public.purchase_po_receipts r
+             LEFT JOIN public.purchase_order_lines pol ON ((pol.id = r.po_line_id)))
+             LEFT JOIN public.purchase_orders po ON ((po.po_no = COALESCE(r.po_no, pol.po_no))))
+             LEFT JOIN tooling_artwork ta ON ((ta.artwork_no = COALESCE(NULLIF(r.artwork_no, ''::text), NULLIF(r.source_ref, ''::text), NULLIF(pol.source_ref, ''::text)))))
+          WHERE ((upper(COALESCE(r.source_type, pol.source_type, ''::text)) = ANY (ARRAY['ARTWORK_PLATE'::text, 'ARTWORK_DIE'::text, 'DIRECT_PLATE'::text, 'DIRECT_DIE'::text])) AND (COALESCE(r.qty, (0)::numeric) > (0)::numeric) AND (upper(COALESCE(po.status, 'OPEN'::text)) <> 'CANCELLED'::text))
+        )
+ SELECT inventory_rows.receipt_id,
+    inventory_rows.grn_no,
+    inventory_rows.grn_date,
+    inventory_rows.grn_datetime,
+    inventory_rows.receipt_type,
+    inventory_rows.source_ref,
+    inventory_rows.po_no,
+    inventory_rows.po_id,
+    inventory_rows.po_date,
+    inventory_rows.po_status,
+    inventory_rows.po_line_id,
+    inventory_rows.po_line_no,
+    inventory_rows.po_source_type,
+    inventory_rows.po_source_ref,
+    inventory_rows.pr_no,
+    inventory_rows.pr_status,
+    inventory_rows.department,
+    inventory_rows.job_ref,
+    inventory_rows.item_code,
+    inventory_rows.item_name,
+    inventory_rows.item_category,
+    inventory_rows.uom,
+    inventory_rows.location,
+    inventory_rows.batch_no,
+    inventory_rows.receipt_qty,
+    inventory_rows.receipt_rate,
+    inventory_rows.basic_value,
+    inventory_rows.tax_pct,
+    inventory_rows.tax_value,
+    inventory_rows.total_value,
+    inventory_rows.vendor_name,
+    inventory_rows.supplier_invoice_no,
+    inventory_rows.supplier_invoice_date,
+    inventory_rows.challan_no,
+    inventory_rows.challan_date,
+    inventory_rows.payment_terms,
+    inventory_rows.freight_terms,
+    inventory_rows.remarks
+   FROM inventory_rows
+UNION ALL
+ SELECT tooling_receipts.receipt_id,
+    tooling_receipts.grn_no,
+    tooling_receipts.grn_date,
+    tooling_receipts.grn_datetime,
+    tooling_receipts.receipt_type,
+    tooling_receipts.source_ref,
+    tooling_receipts.po_no,
+    tooling_receipts.po_id,
+    tooling_receipts.po_date,
+    tooling_receipts.po_status,
+    tooling_receipts.po_line_id,
+    tooling_receipts.po_line_no,
+    tooling_receipts.po_source_type,
+    tooling_receipts.po_source_ref,
+    tooling_receipts.pr_no,
+    tooling_receipts.pr_status,
+    tooling_receipts.department,
+    tooling_receipts.job_ref,
+    tooling_receipts.item_code,
+    tooling_receipts.item_name,
+    tooling_receipts.item_category,
+    tooling_receipts.uom,
+    tooling_receipts.location,
+    tooling_receipts.batch_no,
+    tooling_receipts.receipt_qty,
+    tooling_receipts.receipt_rate,
+    tooling_receipts.basic_value,
+    tooling_receipts.tax_pct,
+    tooling_receipts.tax_value,
+    tooling_receipts.total_value,
+    tooling_receipts.vendor_name,
+    tooling_receipts.supplier_invoice_no,
+    tooling_receipts.supplier_invoice_date,
+    tooling_receipts.challan_no,
+    tooling_receipts.challan_date,
+    tooling_receipts.payment_terms,
+    tooling_receipts.freight_terms,
+    tooling_receipts.remarks
+   FROM tooling_receipts;
+
+
+--
 -- Name: v_report_dispatch_register; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -10498,6 +10924,49 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
            FROM (wo_job_share wjs
              LEFT JOIN issue_base ib ON ((ib.wo_id = wjs.wo_id)))
           GROUP BY wjs.so_line_id, wjs.job_key
+        ), production_stage_base AS (
+         SELECT lb.so_line_id,
+            COALESCE(NULLIF(pe.job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ((lb.so_number || '||'::text) || (lb.line_no)::text)) AS job_key,
+            pe.routing_id,
+            COALESCE(NULLIF(wor.process_name, ''::text), NULLIF(wor.department, ''::text), 'Production'::text) AS stage_name,
+            COALESCE(NULLIF(wor.planned_machine, ''::text), NULLIF(pe.machine, ''::text), ''::text) AS stage_machine,
+            wor.sequence_no,
+            sum(COALESCE(pe.ok_qty, GREATEST((COALESCE(pe.produced_qty, (0)::numeric) - COALESCE(pe.rejected_qty, (0)::numeric)), (0)::numeric))) AS ok_qty,
+            max(COALESCE(pe.entry_datetime, pe.created_at)) AS last_entry_at
+           FROM (((public.production_entries pe
+             JOIN line_base lb ON (((lb.so_number = pe.so_number) AND ((lb.line_no)::text = btrim(pe.line_no)))))
+             LEFT JOIN public.work_order_routing wor ON ((wor.id = pe.routing_id)))
+             LEFT JOIN LATERAL ( SELECT woj1.job_reference
+                   FROM public.work_order_jobs woj1
+                  WHERE ((woj1.wo_id = pe.wo_id) AND (woj1.so_number = pe.so_number) AND ((woj1.line_no)::text = btrim(pe.line_no)))
+                  ORDER BY
+                        CASE
+                            WHEN (COALESCE(woj1.job_reference, ''::text) = COALESCE(pe.job_reference, ''::text)) THEN 0
+                            ELSE 1
+                        END, woj1.id
+                 LIMIT 1) woj ON (true))
+          WHERE ((COALESCE(pe.so_number, ''::text) <> ''::text) AND (COALESCE(pe.line_no, ''::text) <> ''::text) AND (COALESCE(pe.ok_qty, GREATEST((COALESCE(pe.produced_qty, (0)::numeric) - COALESCE(pe.rejected_qty, (0)::numeric)), (0)::numeric)) > (0)::numeric))
+          GROUP BY lb.so_line_id, COALESCE(NULLIF(pe.job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ((lb.so_number || '||'::text) || (lb.line_no)::text)), pe.routing_id, COALESCE(NULLIF(wor.process_name, ''::text), NULLIF(wor.department, ''::text), 'Production'::text), COALESCE(NULLIF(wor.planned_machine, ''::text), NULLIF(pe.machine, ''::text), ''::text), wor.sequence_no
+        ), production_stage_ranked AS (
+         SELECT psb.so_line_id,
+            psb.job_key,
+            psb.routing_id,
+            psb.stage_name,
+            psb.stage_machine,
+            psb.sequence_no,
+            psb.ok_qty,
+            psb.last_entry_at,
+            row_number() OVER (PARTITION BY psb.so_line_id, psb.job_key ORDER BY psb.sequence_no DESC NULLS LAST, psb.last_entry_at DESC NULLS LAST, psb.stage_name) AS rn
+           FROM production_stage_base psb
+        ), latest_production AS (
+         SELECT production_stage_ranked.so_line_id,
+            production_stage_ranked.job_key,
+            production_stage_ranked.stage_name AS latest_production_stage,
+            production_stage_ranked.stage_machine AS latest_production_machine,
+            production_stage_ranked.ok_qty AS latest_stage_ok_qty,
+            production_stage_ranked.last_entry_at AS latest_production_at
+           FROM production_stage_ranked
+          WHERE (production_stage_ranked.rn = 1)
         ), po_tooling_base AS (
          SELECT
                 CASE
@@ -10620,15 +11089,21 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             round(COALESCE(jrm.rm_issued_value, (0)::numeric), 2) AS rm_issued_value,
             round((COALESCE(lt.plate_cost, (0)::numeric) * COALESCE(ljs.job_share, (0)::numeric)), 2) AS plate_cost,
             round((COALESCE(lt.die_cost, (0)::numeric) * COALESCE(ljs.job_share, (0)::numeric)), 2) AS die_cost,
+            COALESCE(lp.latest_production_stage, ''::text) AS latest_production_stage,
+            COALESCE(lp.latest_production_machine, ''::text) AS latest_production_machine,
+            round(COALESCE(lp.latest_stage_ok_qty, (0)::numeric), 3) AS latest_stage_ok_qty,
+            round((COALESCE(lp.latest_stage_ok_qty, (0)::numeric) * COALESCE(ljs.rate, (0)::numeric)), 2) AS produced_goods_value,
+            lp.latest_production_at,
             ib.invoice_nos,
             ib.first_invoice_date,
             ib.last_invoice_date,
             db.last_dispatch_date
-           FROM ((((line_job_share ljs
+           FROM (((((line_job_share ljs
              LEFT JOIN dispatch_base db ON ((db.so_line_id = ljs.so_line_id)))
              LEFT JOIN invoice_base ib ON ((ib.so_line_id = ljs.so_line_id)))
              LEFT JOIN job_rm_cost jrm ON (((jrm.so_line_id = ljs.so_line_id) AND (jrm.job_key = ljs.job_key))))
              LEFT JOIN line_tooling lt ON ((lt.so_line_id = ljs.so_line_id)))
+             LEFT JOIN latest_production lp ON (((lp.so_line_id = ljs.so_line_id) AND (lp.job_key = ljs.job_key))))
         )
  SELECT so_id,
     so_line_id,
@@ -10691,8 +11166,173 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
     COALESCE(invoice_nos, ''::text) AS invoice_nos,
     first_invoice_date,
     last_invoice_date,
-    last_dispatch_date
+    last_dispatch_date,
+    latest_production_stage,
+    latest_production_machine,
+    latest_stage_ok_qty,
+    round(
+        CASE
+            WHEN (COALESCE(order_qty, (0)::numeric) > (0)::numeric) THEN ((COALESCE(latest_stage_ok_qty, (0)::numeric) / NULLIF(order_qty, (0)::numeric)) * 100.0)
+            ELSE (0)::numeric
+        END, 2) AS latest_stage_produced_pct,
+    latest_production_at,
+    produced_goods_value,
+    round((COALESCE(produced_goods_value, (0)::numeric) - ((COALESCE(rm_issued_value, (0)::numeric) + COALESCE(plate_cost, (0)::numeric)) + COALESCE(die_cost, (0)::numeric))), 2) AS profit_on_produced_value,
+    round(
+        CASE
+            WHEN (COALESCE(produced_goods_value, (0)::numeric) > (0)::numeric) THEN (((COALESCE(produced_goods_value, (0)::numeric) - ((COALESCE(rm_issued_value, (0)::numeric) + COALESCE(plate_cost, (0)::numeric)) + COALESCE(die_cost, (0)::numeric))) / NULLIF(produced_goods_value, (0)::numeric)) * 100.0)
+            ELSE (0)::numeric
+        END, 2) AS profit_pct_on_produced_value
    FROM final_base fb;
+
+
+--
+-- Name: v_report_job_profitability_production_stages; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_job_profitability_production_stages AS
+ WITH line_base AS (
+         SELECT so.id AS so_id,
+            sol.id AS so_line_id,
+            so.so_number,
+            COALESCE(so.so_date, (so.created_at)::date) AS so_date,
+            so.client_code,
+            COALESCE(c.client_name, so.client_code) AS client_name,
+            so.sales_rep,
+            sol.line_no,
+            sol.division,
+            sol.product_code,
+            sol.product_name,
+            sol.category,
+            COALESCE(sol.qty, (0)::numeric) AS order_qty,
+            COALESCE(sol.unit, ''::text) AS unit,
+            COALESCE(sol.rate, (0)::numeric) AS rate,
+            COALESCE(sol.job_reference, ''::text) AS sales_job_reference,
+            COALESCE(sol.status, 'OPEN'::text) AS so_line_status
+           FROM ((public.sales_orders so
+             JOIN public.sales_order_lines sol ON ((sol.so_id = so.id)))
+             LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+          WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text))
+        ), production_stage_base AS (
+         SELECT lb.so_id,
+            lb.so_line_id,
+            lb.so_number,
+            lb.so_date,
+            lb.client_code,
+            lb.client_name,
+            lb.sales_rep,
+            lb.line_no,
+            lb.division,
+            lb.product_code,
+            lb.product_name,
+            lb.category,
+            lb.order_qty,
+            lb.unit,
+            lb.rate,
+            lb.so_line_status,
+            COALESCE(NULLIF(pe.job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ((lb.so_number || '||'::text) || (lb.line_no)::text)) AS job_key,
+            COALESCE(NULLIF(pe.job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ''::text) AS job_reference,
+            pe.routing_id,
+            COALESCE(NULLIF(wor.process_name, ''::text), NULLIF(wor.department, ''::text), 'Production'::text) AS production_stage,
+            COALESCE(NULLIF(wor.planned_machine, ''::text), NULLIF(pe.machine, ''::text), ''::text) AS production_machine,
+            wor.sequence_no AS stage_sequence,
+            count(*) AS production_entry_count,
+            sum(COALESCE(pe.ok_qty, GREATEST((COALESCE(pe.produced_qty, (0)::numeric) - COALESCE(pe.rejected_qty, (0)::numeric)), (0)::numeric))) AS ok_qty,
+            sum(COALESCE(pe.produced_qty, (0)::numeric)) AS produced_qty,
+            sum(COALESCE(pe.rejected_qty, (0)::numeric)) AS rejected_qty,
+            min(COALESCE(pe.entry_datetime, pe.created_at)) AS first_production_at,
+            max(COALESCE(pe.entry_datetime, pe.created_at)) AS last_production_at
+           FROM (((public.production_entries pe
+             JOIN line_base lb ON (((lb.so_number = pe.so_number) AND ((lb.line_no)::text = btrim(pe.line_no)))))
+             LEFT JOIN public.work_order_routing wor ON ((wor.id = pe.routing_id)))
+             LEFT JOIN LATERAL ( SELECT woj1.job_reference
+                   FROM public.work_order_jobs woj1
+                  WHERE ((woj1.wo_id = pe.wo_id) AND (woj1.so_number = pe.so_number) AND ((woj1.line_no)::text = btrim(pe.line_no)))
+                  ORDER BY
+                        CASE
+                            WHEN (COALESCE(woj1.job_reference, ''::text) = COALESCE(pe.job_reference, ''::text)) THEN 0
+                            ELSE 1
+                        END, woj1.id
+                 LIMIT 1) woj ON (true))
+          WHERE ((COALESCE(pe.so_number, ''::text) <> ''::text) AND (COALESCE(pe.line_no, ''::text) <> ''::text) AND (COALESCE(pe.ok_qty, GREATEST((COALESCE(pe.produced_qty, (0)::numeric) - COALESCE(pe.rejected_qty, (0)::numeric)), (0)::numeric)) > (0)::numeric))
+          GROUP BY lb.so_id, lb.so_line_id, lb.so_number, lb.so_date, lb.client_code, lb.client_name, lb.sales_rep, lb.line_no, lb.division, lb.product_code, lb.product_name, lb.category, lb.order_qty, lb.unit, lb.rate, lb.so_line_status, COALESCE(NULLIF(pe.job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ((lb.so_number || '||'::text) || (lb.line_no)::text)), COALESCE(NULLIF(pe.job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ''::text), pe.routing_id, COALESCE(NULLIF(wor.process_name, ''::text), NULLIF(wor.department, ''::text), 'Production'::text), COALESCE(NULLIF(wor.planned_machine, ''::text), NULLIF(pe.machine, ''::text), ''::text), wor.sequence_no
+        ), production_stage_ranked AS (
+         SELECT psb.so_id,
+            psb.so_line_id,
+            psb.so_number,
+            psb.so_date,
+            psb.client_code,
+            psb.client_name,
+            psb.sales_rep,
+            psb.line_no,
+            psb.division,
+            psb.product_code,
+            psb.product_name,
+            psb.category,
+            psb.order_qty,
+            psb.unit,
+            psb.rate,
+            psb.so_line_status,
+            psb.job_key,
+            psb.job_reference,
+            psb.routing_id,
+            psb.production_stage,
+            psb.production_machine,
+            psb.stage_sequence,
+            psb.production_entry_count,
+            psb.ok_qty,
+            psb.produced_qty,
+            psb.rejected_qty,
+            psb.first_production_at,
+            psb.last_production_at,
+            row_number() OVER (PARTITION BY psb.so_line_id, psb.job_key ORDER BY psb.stage_sequence DESC NULLS LAST, psb.last_production_at DESC NULLS LAST, psb.production_stage) AS latest_rank
+           FROM production_stage_base psb
+        )
+ SELECT psr.so_id,
+    psr.so_line_id,
+    psr.so_number,
+    psr.so_date,
+    psr.client_code,
+    psr.client_name,
+    psr.sales_rep,
+    psr.line_no,
+    psr.division,
+    psr.product_code,
+    psr.product_name,
+    psr.category,
+    psr.order_qty,
+    psr.unit,
+    psr.rate,
+    psr.so_line_status,
+    COALESCE(jp.billing_status, 'PENDING'::text) AS billing_status,
+    psr.job_key,
+    psr.job_reference,
+    jp.artwork_no,
+    COALESCE(jp.wo_numbers, ''::text) AS wo_numbers,
+    psr.routing_id,
+    psr.production_stage,
+    psr.production_machine,
+    psr.stage_sequence,
+        CASE
+            WHEN (psr.latest_rank = 1) THEN 'LATEST'::text
+            ELSE 'STAGE'::text
+        END AS stage_position,
+    psr.production_entry_count,
+    round(psr.ok_qty, 3) AS ok_qty,
+    round(psr.produced_qty, 3) AS produced_qty,
+    round(psr.rejected_qty, 3) AS rejected_qty,
+    round((psr.ok_qty * COALESCE(psr.rate, (0)::numeric)), 2) AS produced_goods_value,
+    round(COALESCE(jp.actual_cost_till_date, (0)::numeric), 2) AS actual_cost_till_date,
+    round(((psr.ok_qty * COALESCE(psr.rate, (0)::numeric)) - COALESCE(jp.actual_cost_till_date, (0)::numeric)), 2) AS profit_on_stage_value,
+    round(
+        CASE
+            WHEN ((psr.ok_qty * COALESCE(psr.rate, (0)::numeric)) > (0)::numeric) THEN ((((psr.ok_qty * COALESCE(psr.rate, (0)::numeric)) - COALESCE(jp.actual_cost_till_date, (0)::numeric)) / NULLIF((psr.ok_qty * COALESCE(psr.rate, (0)::numeric)), (0)::numeric)) * 100.0)
+            ELSE (0)::numeric
+        END, 2) AS profit_pct_on_stage_value,
+    psr.first_production_at,
+    psr.last_production_at
+   FROM (production_stage_ranked psr
+     LEFT JOIN public.v_report_job_profitability_phase1 jp ON (((jp.so_line_id = psr.so_line_id) AND (jp.job_key = psr.job_key))));
 
 
 --
@@ -14133,6 +14773,14 @@ ALTER TABLE ONLY public.inv_purchase_requests
 
 
 --
+-- Name: inv_rate_corrections inv_rate_corrections_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inv_rate_corrections
+    ADD CONSTRAINT inv_rate_corrections_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: inv_sheet_conversion_allocations inv_sheet_conversion_allocations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -15152,6 +15800,13 @@ CREATE INDEX idx_clients_active ON public.clients USING btree (active);
 
 
 --
+-- Name: idx_clients_billing_search_v3; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_clients_billing_search_v3 ON public.clients USING btree (active, client_name, client_code);
+
+
+--
 -- Name: idx_clients_client_name_trgm; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15607,6 +16262,13 @@ CREATE INDEX idx_invoice_lines_invoice_source_fast ON public.invoice_lines USING
 
 
 --
+-- Name: idx_invoice_lines_register_v3; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_invoice_lines_register_v3 ON public.invoice_lines USING btree (invoice_id, line_no);
+
+
+--
 -- Name: idx_invoice_lines_so_line; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15653,6 +16315,20 @@ CREATE INDEX idx_invoices_client_code ON public.invoices USING btree (client_cod
 --
 
 CREATE INDEX idx_invoices_register_fast ON public.invoices USING btree (invoice_date DESC, status, client_code);
+
+
+--
+-- Name: idx_invoices_register_status_v3; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_invoices_register_status_v3 ON public.invoices USING btree (status, invoice_date DESC, created_at DESC);
+
+
+--
+-- Name: idx_invoices_register_v3; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_invoices_register_v3 ON public.invoices USING btree (invoice_date DESC, created_at DESC, id);
 
 
 --
@@ -16283,6 +16959,34 @@ CREATE UNIQUE INDEX idx_work_orders_wo_number ON public.work_orders USING btree 
 --
 
 CREATE INDEX idx_work_orders_wo_number_trgm ON public.work_orders USING gin (wo_number public.gin_trgm_ops);
+
+
+--
+-- Name: inv_rate_corrections_corrected_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inv_rate_corrections_corrected_at_idx ON public.inv_rate_corrections USING btree (corrected_at DESC);
+
+
+--
+-- Name: inv_rate_corrections_item_batch_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inv_rate_corrections_item_batch_idx ON public.inv_rate_corrections USING btree (item_id, batch_no);
+
+
+--
+-- Name: inv_rate_corrections_lot_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inv_rate_corrections_lot_idx ON public.inv_rate_corrections USING btree (lot_id);
+
+
+--
+-- Name: inv_rate_corrections_source_ledger_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX inv_rate_corrections_source_ledger_idx ON public.inv_rate_corrections USING btree (source_ledger_id);
 
 
 --
@@ -17327,6 +18031,12 @@ ALTER TABLE public.inv_pr_sequences ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.inv_purchase_requests ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inv_rate_corrections; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inv_rate_corrections ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: inv_sheet_conversion_allocations; Type: ROW SECURITY; Schema: public; Owner: -
