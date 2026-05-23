@@ -249,10 +249,6 @@ function selectArtworkGroupsView_(opts) {
   return _selectArtworkGroupsFromView_('v_artwork_groups', opts);
 }
 
-function selectArtworkGroupsActiveView_(opts) {
-  return _selectArtworkGroupsFromView_('v_artwork_groups_active', opts);
-}
-
 function selectArtworkWorkbenchActiveView_(opts) {
   try {
     return supabaseSelect('v_artwork_workbench_active', opts || {}) || [];
@@ -270,33 +266,12 @@ function supabaseInsert(table, payload) {
   );
 }
 
-function supabaseInsertMinimal(table, payload) {
-  return _supabaseFetch_(
-    `/rest/v1/${table}`,
-    'post',
-    payload,
-    null,
-    { Prefer: 'return=minimal' }
-  );
-}
-
 function supabaseBulkInsert(table, rows) {
   if (!Array.isArray(rows) || !rows.length) return [];
   return _supabaseFetch_(
     `/rest/v1/${table}`,
     'post',
     rows
-  );
-}
-
-function supabaseBulkInsertMinimal(table, rows) {
-  if (!Array.isArray(rows) || !rows.length) return [];
-  return _supabaseFetch_(
-    `/rest/v1/${table}`,
-    'post',
-    rows,
-    null,
-    { Prefer: 'return=minimal' }
   );
 }
 
@@ -339,21 +314,6 @@ function supabaseUpdate(table, filters, data) {
     'patch',
     data,
     params
-  );
-}
-
-function supabaseUpdateMinimal(table, filters, data) {
-  const params = {};
-  Object.keys(filters).forEach(k => {
-    params[k] = filters[k];
-  });
-
-  return _supabaseFetch_(
-    `/rest/v1/${table}`,
-    'patch',
-    data,
-    params,
-    { Prefer: 'return=minimal' }
   );
 }
 
@@ -755,6 +715,7 @@ const PAGE_MODULE_MAP = {
   'planning':'PLANNING',
   'reports':'REPORTS',
   'costing':'COSTING',
+  'checklist':'CHECKLIST',
   'menu': 'MENU',
   'masteradmin':'MASTERADMIN'
 };
@@ -797,14 +758,6 @@ function getUnifiedMasters() {
   }
 
   return merged;
-}
-
-function getMastersSecure(token) {
-  const user = getSessionUser(token);
-  if (!user) {
-    throw new Error('Unauthorized');
-  }
-  return getMasters();
 }
 
 function getMasters() {
@@ -1029,15 +982,6 @@ function getFlexoFilmRollItems_() {
   });
 }
 
-function _woCategoryMatchesAny_(value, targets) {
-  const raw = String(value || '').trim().toUpperCase();
-  if (!raw) return false;
-  return (targets || []).some(function(target) {
-    const token = String(target || '').trim().toUpperCase();
-    return token && (raw === token || raw.indexOf(token) !== -1);
-  });
-}
-
 function getFlexoArtworkApprovalData(soNo, lineNo, artworkNo) {
   const artNo = String(artworkNo || '').trim();
   const soNumber = String(soNo || '').trim();
@@ -1224,18 +1168,6 @@ function _clientSelectRows_(opts) {
   }
 }
 
-function _clientNextCode_() {
-  const rows = _clientSelectRows_({
-    order: 'client_code.asc',
-    limit: 2000
-  }) || [];
-  const max = rows.reduce(function(acc, row) {
-    const num = Number(String(row.client_code || '').replace(/[^0-9]/g, ''));
-    return Math.max(acc, num || 0);
-  }, 0);
-  return 'C' + String(max + 1).padStart(5, '0');
-}
-
 function _clientNormalizePayload_(payload, existing) {
   const src = payload || {};
   const gstin = String(src.gstin || '').trim().toUpperCase();
@@ -1278,14 +1210,6 @@ function _clientPartyNormalizeRow_(row) {
     is_default: row.is_default === true,
     active: row.active !== false
   };
-}
-
-function _clientPartySelectRows_(opts) {
-  return (supabaseSelect('client_parties', Object.assign({
-    select: 'id,client_id,client_code,party_name,address_type,label,address_line1,address_line2,city,state,pincode,gstin,pan_no,payment_terms,contact_person,contact_phone,is_default,active',
-    order: 'client_code.asc,address_type.asc,label.asc,party_name.asc',
-    limit: 5000
-  }, opts || {})) || []).map(_clientPartyNormalizeRow_);
 }
 
 function _clientPartySelectRowsByClientIds_(clientIds, order) {
@@ -2264,10 +2188,6 @@ function _purchaseIsCancelledStatus_(status) {
   return String(status || '').trim().toUpperCase() === 'CANCELLED';
 }
 
-function _purchaseIsShortClosedStatus_(status) {
-  return String(status || '').trim().toUpperCase() === 'SHORT_CLOSED';
-}
-
 function _purchaseParsePOShortClose_(remarks) {
   const text = String(remarks || '');
   const matches = text.match(/\[PO_SHORT_CLOSE[^\]]*\]/gi) || [];
@@ -2563,16 +2483,6 @@ function _purchaseArtworkPOStatus_(orderedQty, receivedQty) {
   if (pending <= 0) return 'RECEIVED';
   if (received > 0) return 'PARTIAL';
   return 'ORDERED';
-}
-
-function _purchaseDerivePOStatus_(totalQty, receivedQty) {
-  const ordered = Number(totalQty || 0);
-  const received = Number(receivedQty || 0);
-  const pending = Math.max(0, ordered - received);
-  if (ordered <= 0) return 'OPEN';
-  if (pending <= 0) return 'RECEIVED';
-  if (received > 0) return 'PARTIAL';
-  return 'OPEN';
 }
 
 function _purchaseIsPlateDieSource_(sourceType) {
@@ -9226,6 +9136,7 @@ const MODULES = [
   'PLANNING',
   'REPORTS',
   'COSTING',
+  'CHECKLIST',
   'MASTERADMIN'
 ];
 
@@ -9291,6 +9202,1095 @@ function adminSaveRolePermissions(payload, token){
   invalidateAffectedRoleUsers();
 
   return { ok:true };
+}
+
+/******************************************************
+ * CHECKLIST / RECURRING TASK MODULE
+ ******************************************************/
+
+const CHECKLIST_TIMEZONE = 'Asia/Kolkata';
+const CHECKLIST_DEFAULT_HORIZON_DAYS = 45;
+
+function _checklistDateString_(value) {
+  const dt = value ? new Date(value) : new Date();
+  return Utilities.formatDate(dt, CHECKLIST_TIMEZONE, 'yyyy-MM-dd');
+}
+
+function _checklistToday_() {
+  return _checklistDateString_(new Date());
+}
+
+function _checklistNowIso_() {
+  return new Date().toISOString();
+}
+
+function _checklistParseLocalDate_(dateStr) {
+  const parts = String(dateStr || '').split('-').map(function(part) { return Number(part); });
+  return new Date(parts[0] || 1970, (parts[1] || 1) - 1, parts[2] || 1);
+}
+
+function _checklistAddDays_(dateStr, days) {
+  const dt = _checklistParseLocalDate_(dateStr);
+  dt.setDate(dt.getDate() + Number(days || 0));
+  return Utilities.formatDate(dt, CHECKLIST_TIMEZONE, 'yyyy-MM-dd');
+}
+
+function _checklistDiffDays_(fromDate, toDate) {
+  const a = _checklistParseLocalDate_(fromDate);
+  const b = _checklistParseLocalDate_(toDate);
+  return Math.floor((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function _checklistDueAt_(dateStr, dueTime, graceMinutes) {
+  const hm = String(dueTime || '23:59').slice(0, 5);
+  const local = new Date(String(dateStr) + 'T' + hm + ':00+05:30');
+  local.setMinutes(local.getMinutes() + (Number(graceMinutes || 0) || 0));
+  return local.toISOString();
+}
+
+function _checklistConfig_(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(String(value)); } catch (err) { return {}; }
+}
+
+function _checklistNormalizeFrequencyConfig_(frequencyType, input) {
+  const type = String(frequencyType || 'DAILY').trim().toUpperCase();
+  const src = _checklistConfig_(input);
+  const out = {};
+
+  if (type === 'DAILY') {
+    out.interval = Math.max(1, Number(src.interval || 1) || 1);
+  } else if (type === 'WEEKLY') {
+    out.days_of_week = Array.isArray(src.days_of_week) && src.days_of_week.length
+      ? src.days_of_week.map(function(v) { return String(v).toUpperCase().slice(0, 3); })
+      : ['MON'];
+    out.interval = Math.max(1, Number(src.interval || 1) || 1);
+  } else if (type === 'MONTHLY') {
+    out.day_of_month = Math.min(31, Math.max(1, Number(src.day_of_month || 1) || 1));
+    out.interval = Math.max(1, Number(src.interval || 1) || 1);
+  } else if (type === 'QUARTERLY') {
+    out.months = Array.isArray(src.months) && src.months.length
+      ? src.months.map(function(v) { return Number(v); }).filter(function(v) { return v >= 1 && v <= 12; })
+      : [1, 4, 7, 10];
+    out.day_of_month = Math.min(31, Math.max(1, Number(src.day_of_month || 1) || 1));
+  } else if (type === 'YEARLY') {
+    out.month = Math.min(12, Math.max(1, Number(src.month || 1) || 1));
+    out.day_of_month = Math.min(31, Math.max(1, Number(src.day_of_month || 1) || 1));
+  } else {
+    out.unit = String(src.unit || 'DAYS').trim().toUpperCase();
+    out.interval = Math.max(1, Number(src.interval || 1) || 1);
+  }
+
+  return out;
+}
+
+function _checklistDateParts_(dateStr) {
+  const dt = _checklistParseLocalDate_(dateStr);
+  const days = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  return {
+    day: dt.getDate(),
+    month: dt.getMonth() + 1,
+    dayOfWeek: days[dt.getDay()]
+  };
+}
+
+function _checklistCalendarFallback_() {
+  return {
+    weeklyOffDays: {},
+    holidayDates: {},
+    holidayTitles: {},
+    missingSchema: false
+  };
+}
+
+function _checklistLoadCalendar_(fromDate, toDate) {
+  const calendar = _checklistCalendarFallback_();
+  try {
+    (_checklistSelectAll_('checklist_weekly_offs', {
+      select: 'day_of_week,day_code,label,active',
+      filters: { active: 'eq.true' },
+      order: 'day_of_week.asc'
+    }) || []).forEach(function(row) {
+      calendar.weeklyOffDays[Number(row.day_of_week)] = true;
+    });
+
+    (_checklistSelectAll_('checklist_holidays', {
+      select: 'holiday_date,title,active',
+      filters: {
+        active: 'eq.true',
+        and: '(holiday_date.gte.' + fromDate + ',holiday_date.lte.' + toDate + ')'
+      },
+      order: 'holiday_date.asc'
+    }) || []).forEach(function(row) {
+      const key = String(row.holiday_date || '').slice(0, 10);
+      if (key) {
+        calendar.holidayDates[key] = true;
+        calendar.holidayTitles[key] = row.title || 'Holiday';
+      }
+    });
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'checklist_weekly_offs') || _supabaseRelationMissing_(err, 'checklist_holidays')) {
+      calendar.missingSchema = true;
+      return calendar;
+    }
+    throw err;
+  }
+  return calendar;
+}
+
+function _checklistIsNonWorkingDay_(dateStr, calendar) {
+  const cal = calendar || _checklistCalendarFallback_();
+  const dt = _checklistParseLocalDate_(dateStr);
+  return !!(cal.weeklyOffDays[dt.getDay()] || cal.holidayDates[String(dateStr).slice(0, 10)]);
+}
+
+function _checklistPreviousWorkingDate_(dateStr, calendar, minDate) {
+  let current = String(dateStr).slice(0, 10);
+  const lower = minDate ? String(minDate).slice(0, 10) : '';
+  for (let i = 0; i < 60; i++) {
+    if (lower && current < lower) return null;
+    if (!_checklistIsNonWorkingDay_(current, calendar)) return current;
+    current = _checklistAddDays_(current, -1);
+  }
+  return null;
+}
+
+function _checklistAssignmentVersionStart_(assignment, version) {
+  return [assignment && assignment.start_date, version && version.effective_from]
+    .filter(Boolean)
+    .map(function(v) { return String(v).slice(0, 10); })
+    .sort()
+    .pop() || '';
+}
+
+function _checklistResolveScheduledDate_(naturalDate, assignment, version, calendar) {
+  if (!_checklistIsDueOnDate_(naturalDate, assignment, version)) return null;
+  const type = String(version.frequency_type || 'DAILY').toUpperCase();
+  if (type === 'DAILY') {
+    return _checklistIsNonWorkingDay_(naturalDate, calendar) ? null : naturalDate;
+  }
+  if (!_checklistIsNonWorkingDay_(naturalDate, calendar)) return naturalDate;
+  return _checklistPreviousWorkingDate_(
+    _checklistAddDays_(naturalDate, -1),
+    calendar,
+    _checklistAssignmentVersionStart_(assignment, version)
+  );
+}
+
+function _checklistIsDueOnDate_(dateStr, assignment, version) {
+  if (!assignment || !version) return false;
+  if (assignment.start_date && dateStr < String(assignment.start_date).slice(0, 10)) return false;
+  if (assignment.end_date && dateStr > String(assignment.end_date).slice(0, 10)) return false;
+  if (version.effective_from && dateStr < String(version.effective_from).slice(0, 10)) return false;
+  if (version.effective_to && dateStr > String(version.effective_to).slice(0, 10)) return false;
+  if (version.active === false) return false;
+
+  const type = String(version.frequency_type || 'DAILY').toUpperCase();
+  const cfg = _checklistNormalizeFrequencyConfig_(type, version.frequency_config);
+  const start = [assignment.start_date, version.effective_from].filter(Boolean).map(function(v) {
+    return String(v).slice(0, 10);
+  }).sort().pop() || dateStr;
+  const diff = Math.max(0, _checklistDiffDays_(start, dateStr));
+  const parts = _checklistDateParts_(dateStr);
+
+  if (type === 'DAILY') {
+    return diff % Math.max(1, Number(cfg.interval || 1)) === 0;
+  }
+  if (type === 'WEEKLY') {
+    const weekNo = Math.floor(diff / 7);
+    return weekNo % Math.max(1, Number(cfg.interval || 1)) === 0 &&
+      (cfg.days_of_week || []).indexOf(parts.dayOfWeek) !== -1;
+  }
+  if (type === 'MONTHLY') {
+    const startParts = _checklistDateParts_(start);
+    const months = (parts.month - startParts.month) + (Number(dateStr.slice(0, 4)) - Number(start.slice(0, 4))) * 12;
+    return months >= 0 &&
+      months % Math.max(1, Number(cfg.interval || 1)) === 0 &&
+      parts.day === Number(cfg.day_of_month || 1);
+  }
+  if (type === 'QUARTERLY') {
+    return (cfg.months || []).indexOf(parts.month) !== -1 && parts.day === Number(cfg.day_of_month || 1);
+  }
+  if (type === 'YEARLY') {
+    return parts.month === Number(cfg.month || 1) && parts.day === Number(cfg.day_of_month || 1);
+  }
+  if (type === 'CUSTOM') {
+    const unit = String(cfg.unit || 'DAYS').toUpperCase();
+    const interval = Math.max(1, Number(cfg.interval || 1));
+    if (unit === 'WEEKS') return diff % (interval * 7) === 0;
+    if (unit === 'MONTHS') {
+      const sp = _checklistDateParts_(start);
+      const months = (parts.month - sp.month) + (Number(dateStr.slice(0, 4)) - Number(start.slice(0, 4))) * 12;
+      return months >= 0 && months % interval === 0 && parts.day === sp.day;
+    }
+    return diff % interval === 0;
+  }
+  return false;
+}
+
+function _checklistInsertIgnoreMinimal_(table, rows, onConflict) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+  let path = '/rest/v1/' + table;
+  if (onConflict) path += '?on_conflict=' + encodeURIComponent(onConflict);
+  return _supabaseFetch_(path, 'post', rows, null, {
+    Prefer: 'return=minimal,resolution=ignore-duplicates'
+  });
+}
+
+function _checklistSelectAll_(table, opts) {
+  return _supabaseSelectAll_(table, opts || {}, 1000, 50000) || [];
+}
+
+function _checklistGetActiveVersion_(versions, templateId, dateStr) {
+  const list = (versions || []).filter(function(v) {
+    return String(v.template_id) === String(templateId) &&
+      v.active !== false &&
+      (!v.effective_from || dateStr >= String(v.effective_from).slice(0, 10)) &&
+      (!v.effective_to || dateStr <= String(v.effective_to).slice(0, 10));
+  });
+  list.sort(function(a, b) {
+    return String(b.effective_from || '').localeCompare(String(a.effective_from || ''));
+  });
+  return list[0] || null;
+}
+
+function _checklistGenerateInstancesInternal_(opts) {
+  opts = opts || {};
+  const today = opts.fromDate || _checklistToday_();
+  const horizonDays = Math.max(1, Math.min(120, Number(opts.horizonDays || CHECKLIST_DEFAULT_HORIZON_DAYS) || CHECKLIST_DEFAULT_HORIZON_DAYS));
+  const until = opts.toDate || _checklistAddDays_(today, horizonDays);
+  const userId = String(opts.userId || '').trim();
+  const calendarStart = _checklistAddDays_(today, -60);
+  const calendar = _checklistLoadCalendar_(calendarStart, until);
+
+  let templates;
+  try {
+    templates = _checklistSelectAll_('checklist_task_templates', {
+      select: 'id,task_code,title,description,category,priority,is_mandatory,active',
+      filters: { active: 'eq.true' },
+      order: 'title.asc'
+    });
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'checklist_task_templates')) return { ok: false, generated: 0, missingSchema: true };
+    throw err;
+  }
+
+  const templateById = {};
+  templates.forEach(function(t) { templateById[String(t.id)] = t; });
+
+  const assignmentFilters = {
+    active: 'eq.true',
+    start_date: 'lte.' + until
+  };
+  if (userId) assignmentFilters.assigned_user_id = 'eq.' + userId;
+
+  const assignments = _checklistSelectAll_('checklist_task_assignments', {
+    select: 'id,template_id,assigned_user_id,start_date,end_date,active',
+    filters: assignmentFilters,
+    order: 'start_date.asc'
+  }).filter(function(a) {
+    return !a.end_date || String(a.end_date).slice(0, 10) >= today;
+  });
+
+  if (!assignments.length || !templates.length) return { ok: true, generated: 0 };
+
+  const versions = _checklistSelectAll_('checklist_task_versions', {
+    select: 'id,template_id,effective_from,effective_to,frequency_type,frequency_config,due_time,grace_minutes,instructions,active',
+    filters: { active: 'eq.true' },
+    order: 'effective_from.desc'
+  });
+
+  const existing = _checklistSelectAll_('checklist_task_instances', {
+    select: 'template_id,assigned_user_id,scheduled_date',
+    filters: Object.assign({
+      and: '(scheduled_date.gte.' + calendarStart + ',scheduled_date.lte.' + until + ')',
+      status: 'in.("PENDING","OVERDUE","DONE","SKIPPED")'
+    }, userId ? { assigned_user_id: 'eq.' + userId } : {})
+  });
+  const existingKeys = {};
+  existing.forEach(function(row) {
+    existingKeys[[row.template_id, row.assigned_user_id, String(row.scheduled_date).slice(0, 10)].join('|')] = true;
+  });
+
+  const rows = [];
+  assignments.forEach(function(assignment) {
+    const template = templateById[String(assignment.template_id)];
+    if (!template) return;
+    for (let i = 0; i <= horizonDays; i++) {
+      const dateStr = _checklistAddDays_(today, i);
+      if (dateStr > until) break;
+      const version = _checklistGetActiveVersion_(versions, assignment.template_id, dateStr);
+      const scheduledDate = _checklistResolveScheduledDate_(dateStr, assignment, version, calendar);
+      if (!scheduledDate) continue;
+      const key = [assignment.template_id, assignment.assigned_user_id, scheduledDate].join('|');
+      if (existingKeys[key]) continue;
+      existingKeys[key] = true;
+      rows.push({
+        template_id: assignment.template_id,
+        version_id: version.id,
+        assignment_id: assignment.id,
+        assigned_user_id: assignment.assigned_user_id,
+        original_scheduled_date: scheduledDate === dateStr ? null : dateStr,
+        scheduled_date: scheduledDate,
+        due_at: _checklistDueAt_(scheduledDate, version.due_time, version.grace_minutes),
+        title: template.title,
+        description: template.description || '',
+        category: template.category || '',
+        priority: template.priority || 'NORMAL',
+        is_mandatory: template.is_mandatory !== false,
+        instructions: version.instructions || '',
+        status: 'PENDING'
+      });
+    }
+  });
+
+  for (let start = 0; start < rows.length; start += 500) {
+    _checklistInsertIgnoreMinimal_(
+      'checklist_task_instances',
+      rows.slice(start, start + 500),
+      'template_id,assigned_user_id,scheduled_date'
+    );
+  }
+
+  return { ok: true, generated: rows.length };
+}
+
+function checklistGenerateInstances(payload) {
+  return _checklistGenerateInstancesInternal_(payload || {});
+}
+
+function _checklistUpdateOverdueForUser_(userId) {
+  const nowIso = _checklistNowIso_();
+  try {
+    supabaseUpdateMinimal('checklist_task_instances', {
+      assigned_user_id: 'eq.' + userId,
+      status: 'eq.PENDING',
+      due_at: 'lt.' + nowIso
+    }, {
+      status: 'OVERDUE',
+      updated_at: nowIso
+    });
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'checklist_task_instances')) throw err;
+  }
+}
+
+function _checklistUpdateOverdueAll_() {
+  const nowIso = _checklistNowIso_();
+  try {
+    supabaseUpdateMinimal('checklist_task_instances', {
+      status: 'eq.PENDING',
+      due_at: 'lt.' + nowIso
+    }, {
+      status: 'OVERDUE',
+      updated_at: nowIso
+    });
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'checklist_task_instances')) throw err;
+  }
+}
+
+function _checklistBlockingRowsForUser_(userId) {
+  if (!userId) return [];
+  return supabaseSelect('checklist_task_instances', {
+    select: 'id,title,due_at,scheduled_date,priority,status',
+    filters: {
+      assigned_user_id: 'eq.' + userId,
+      is_mandatory: 'eq.true',
+      status: 'in.("PENDING","OVERDUE")',
+      due_at: 'lte.' + _checklistNowIso_()
+    },
+    order: 'due_at.asc',
+    limit: 20
+  }) || [];
+}
+
+function _checklistBlockCacheKey_(userId) {
+  return 'checklist_block_v2_' + String(userId || '').trim();
+}
+
+function _checklistCancelInvalidDailyOpen_(userId, fromDate, toDate) {
+  const start = String(fromDate || _checklistToday_()).slice(0, 10);
+  const until = String(toDate || _checklistAddDays_(start, CHECKLIST_DEFAULT_HORIZON_DAYS)).slice(0, 10);
+  const calendar = _checklistLoadCalendar_(_checklistAddDays_(start, -7), until);
+  const filters = {
+    status: 'in.("PENDING","OVERDUE")',
+    and: '(scheduled_date.gte.' + start + ',scheduled_date.lte.' + until + ')'
+  };
+  if (userId) filters.assigned_user_id = 'eq.' + userId;
+  const rows = _checklistSelectAll_('checklist_task_instances', {
+    select: 'id,version_id,scheduled_date,status',
+    filters: filters
+  });
+  if (!rows.length) return 0;
+
+  const versionIds = Array.from(new Set(rows.map(function(row) { return row.version_id; }).filter(Boolean)));
+  if (!versionIds.length) return 0;
+  const versions = _checklistSelectAll_('checklist_task_versions', {
+    select: 'id,frequency_type',
+    filters: { id: _supabaseInFilter_(versionIds) }
+  });
+  const versionTypeById = {};
+  versions.forEach(function(row) {
+    versionTypeById[String(row.id)] = String(row.frequency_type || '').toUpperCase();
+  });
+
+  const cancelIds = [];
+  rows.forEach(function(row) {
+    const type = versionTypeById[String(row.version_id)];
+    const dateStr = String(row.scheduled_date || '').slice(0, 10);
+    if (type === 'DAILY' && _checklistIsNonWorkingDay_(dateStr, calendar)) {
+      cancelIds.push(row.id);
+    }
+  });
+  if (cancelIds.length) {
+    supabaseUpdateMinimal('checklist_task_instances', { id: _supabaseInFilter_(cancelIds) }, {
+      status: 'CANCELLED',
+      updated_at: _checklistNowIso_()
+    });
+  }
+  return cancelIds.length;
+}
+
+function _checklistCancelInvalidDailyOpenForUser_(userId, fromDate, toDate) {
+  if (!userId) return 0;
+  return _checklistCancelInvalidDailyOpen_(userId, fromDate, toDate);
+}
+
+function checklistGetMyTasks(token, filters) {
+  const user = getSessionUser(token);
+  if (!user) throw new Error('Unauthorized');
+  _checklistGenerateInstancesInternal_({ userId: user.userId, horizonDays: 45 });
+  _checklistUpdateOverdueForUser_(user.userId);
+  _checklistCancelInvalidDailyOpenForUser_(user.userId, _checklistToday_(), _checklistAddDays_(_checklistToday_(), 45));
+
+  filters = filters || {};
+  const mode = String(filters.mode || 'OPEN').toUpperCase();
+  const today = _checklistToday_();
+  const qFilters = { assigned_user_id: 'eq.' + user.userId };
+  const dateFrom = String(filters.dateFrom || '').slice(0, 10);
+  const dateTo = String(filters.dateTo || '').slice(0, 10);
+  const category = String(filters.category || '').trim().toUpperCase();
+  const frequency = String(filters.frequency || '').trim().toUpperCase();
+  const priority = String(filters.priority || '').trim().toUpperCase();
+  const mandatory = String(filters.mandatory || '').trim().toUpperCase();
+  let rangeFrom = '';
+  let rangeTo = '';
+
+  function maxDate(a, b) {
+    if (!a) return b || '';
+    if (!b) return a || '';
+    return a > b ? a : b;
+  }
+  function minDate(a, b) {
+    if (!a) return b || '';
+    if (!b) return a || '';
+    return a < b ? a : b;
+  }
+
+  if (mode === 'TODAY') qFilters.scheduled_date = 'eq.' + today;
+  else if (mode === 'DONE') qFilters.status = 'eq.DONE';
+  else if (mode === 'OVERDUE') qFilters.effective_status = 'eq.OVERDUE';
+  else if (mode === 'UPCOMING') {
+    qFilters.effective_status = 'eq.PENDING';
+    rangeFrom = _checklistAddDays_(today, 1);
+  } else if (mode === 'OPEN') {
+    qFilters.effective_status = 'in.("PENDING","OVERDUE")';
+  }
+  if (!qFilters.status) qFilters.status = 'neq.CANCELLED';
+  if (dateFrom) rangeFrom = maxDate(rangeFrom, dateFrom);
+  if (dateTo) rangeTo = minDate(rangeTo, dateTo);
+  if (rangeFrom || rangeTo) {
+    const clauses = [];
+    if (rangeFrom) clauses.push('scheduled_date.gte.' + rangeFrom);
+    if (rangeTo) clauses.push('scheduled_date.lte.' + rangeTo);
+    qFilters.and = '(' + clauses.join(',') + ')';
+  }
+  if (category && category !== 'ALL') qFilters.category = 'eq.' + category;
+  if (frequency && frequency !== 'ALL') qFilters.frequency_type = 'eq.' + frequency;
+  if (priority && priority !== 'ALL') qFilters.priority = 'eq.' + priority;
+  if (mandatory === 'YES') qFilters.is_mandatory = 'eq.true';
+  if (mandatory === 'NO') qFilters.is_mandatory = 'eq.false';
+
+  let rows;
+  try {
+    rows = _checklistSelectAll_('v_checklist_task_instances_ui', {
+      select: 'id,template_id,task_code,frequency_type,original_scheduled_date,scheduled_date,due_at,title,description,category,priority,is_mandatory,instructions,status,effective_status,completed_at,completion_note',
+      filters: qFilters,
+      order: 'scheduled_date.asc,due_at.asc,title.asc'
+    }).slice(0, 500);
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_checklist_task_instances_ui')) throw err;
+    const fallbackFilters = Object.assign({}, qFilters);
+    delete fallbackFilters.frequency_type;
+    if (fallbackFilters.effective_status) {
+      if (mode === 'OVERDUE') fallbackFilters.status = 'eq.OVERDUE';
+      else if (mode === 'OPEN') fallbackFilters.status = 'in.("PENDING","OVERDUE")';
+      else if (mode === 'UPCOMING') fallbackFilters.status = 'eq.PENDING';
+      delete fallbackFilters.effective_status;
+    }
+    rows = _checklistSelectAll_('checklist_task_instances', {
+      select: 'id,template_id,original_scheduled_date,scheduled_date,due_at,title,description,category,priority,is_mandatory,instructions,status,completed_at,completion_note',
+      filters: fallbackFilters,
+      order: 'scheduled_date.asc,due_at.asc,title.asc'
+    }).slice(0, 500);
+  }
+  const blockingRows = _checklistBlockingRowsForUser_(user.userId);
+
+  return {
+    ok: true,
+    user: user.userId,
+    mode: mode,
+    today: today,
+    tasks: rows,
+    blocking: {
+      blocked: blockingRows.length > 0,
+      pendingCount: blockingRows.length,
+      tasks: blockingRows
+    }
+  };
+}
+
+function checklistMarkDone(token, taskInstanceId, note) {
+  const user = getSessionUser(token);
+  if (!user) throw new Error('Unauthorized');
+  const id = String(taskInstanceId || '').trim();
+  if (!id) throw new Error('Task instance required');
+
+  const rows = supabaseSelect('checklist_task_instances', {
+    select: 'id,template_id,assigned_user_id,status',
+    filters: { id: 'eq.' + id },
+    limit: 1
+  }) || [];
+  const task = rows[0];
+  if (!task) throw new Error('Task not found');
+  if (String(task.assigned_user_id) !== String(user.userId) && String(user.role).toUpperCase() !== 'ADMIN') {
+    throw new Error('Unauthorized');
+  }
+  if (task.status === 'CANCELLED') throw new Error('Cancelled tasks cannot be completed');
+
+  const nowIso = _checklistNowIso_();
+  supabaseUpdateMinimal('checklist_task_instances', { id: 'eq.' + id }, {
+    status: 'DONE',
+    completed_at: nowIso,
+    completed_by: user.userId,
+    completion_note: String(note || '').trim(),
+    updated_at: nowIso
+  });
+  supabaseInsertMinimal('checklist_task_audit_log', {
+    task_instance_id: id,
+    template_id: task.template_id,
+    action: 'MARK_DONE',
+    new_value: JSON.stringify({ note: String(note || '').trim() }),
+    actor_user_id: user.userId
+  });
+  try { CacheService.getScriptCache().remove(_checklistBlockCacheKey_(task.assigned_user_id)); } catch (err) {}
+  return { ok: true };
+}
+
+function _checklistGetBlockingStatusInternal_(sessionUser, token) {
+  const user = sessionUser || getSessionUser(token);
+  if (!user) return { blocked: false, pendingCount: 0, tasks: [] };
+  if (String(user.role || '').toUpperCase() === 'ADMIN') return { blocked: false, pendingCount: 0, tasks: [] };
+  const cache = CacheService.getScriptCache();
+  const cacheKey = _checklistBlockCacheKey_(user.userId);
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    try { return JSON.parse(cached); } catch (err) {}
+  }
+  try {
+    _checklistGenerateInstancesInternal_({ userId: user.userId, horizonDays: 1 });
+    _checklistUpdateOverdueForUser_(user.userId);
+    const rows = _checklistBlockingRowsForUser_(user.userId);
+    const result = {
+      blocked: rows.length > 0,
+      pendingCount: rows.length,
+      tasks: rows,
+      message: rows.length ? (rows.length + ' mandatory checklist task(s) are overdue.') : ''
+    };
+    cache.put(cacheKey, JSON.stringify(result), 30);
+    return result;
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'checklist_task_instances') || _supabaseRelationMissing_(err, 'checklist_task_templates')) {
+      return { blocked: false, pendingCount: 0, tasks: [], missingSchema: true };
+    }
+    throw err;
+  }
+}
+
+function checklistGetBlockingStatus(token) {
+  return _checklistGetBlockingStatusInternal_(null, token);
+}
+
+function _checklistCanOpenWhileBlocked_(page, sessionUser) {
+  const currentPage = String(page || '').toLowerCase();
+  if (String(sessionUser && sessionUser.role || '').toUpperCase() === 'ADMIN') return true;
+  return ['menu', 'checklist', 'login', 'masteradmin'].indexOf(currentPage) !== -1;
+}
+
+function renderChecklistBlockedPage(block, token) {
+  const webUrl = ScriptApp.getService().getUrl();
+  const checklistUrl = webUrl + '?p=checklist&token=' + encodeURIComponent(token || '');
+  const rows = (block.tasks || []).map(function(t) {
+    return '<li><strong>' + _htmlEsc_(t.title || 'Checklist task') + '</strong> <span>Due: ' + _htmlEsc_(String(t.due_at || '').replace('T', ' ').slice(0, 16)) + '</span></li>';
+  }).join('');
+  return HtmlService.createHtmlOutput(
+    '<!doctype html><html><head><base target="_top"><style>' +
+    'body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#111827}' +
+    '.box{width:min(560px,calc(100% - 32px));background:#fff;border:1px solid #e5e7eb;border-radius:14px;box-shadow:0 18px 46px rgba(15,23,42,.16);padding:24px}' +
+    'h1{font-size:20px;margin:0 0 8px}p{color:#64748b;font-size:13px;line-height:1.5}ul{padding-left:20px;color:#334155;font-size:13px}.btn{display:inline-flex;margin-top:12px;height:36px;align-items:center;padding:0 14px;border-radius:999px;background:#2563eb;color:white;text-decoration:none;font-weight:700;font-size:13px}' +
+    '</style></head><body><div class="box"><h1>Checklist tasks pending</h1>' +
+    '<p>Your mandatory checklist needs attention before continuing with other ERP modules.</p>' +
+    '<ul>' + rows + '</ul><a class="btn" href="' + _htmlEsc_(checklistUrl) + '">Open Checklist</a></div></body></html>'
+  ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function _htmlEsc_(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+  });
+}
+
+function _checklistRequireAdminOrEdit_(token) {
+  const user = getSessionUser(token);
+  if (!user) throw new Error('Unauthorized');
+  if (String(user.role || '').toUpperCase() === 'ADMIN') return user;
+  if (_userHasPermission_(user, 'CHECKLIST', 'can_edit')) return user;
+  throw new Error('Unauthorized');
+}
+
+function adminChecklistListTemplates(token) {
+  _checklistRequireAdminOrEdit_(token);
+  const templates = _checklistSelectAll_('checklist_task_templates', {
+    select: 'id,task_code,title,description,category,priority,is_mandatory,active,created_by,created_at,updated_at',
+    order: 'title.asc'
+  });
+  const versions = _checklistSelectAll_('checklist_task_versions', {
+    select: 'id,template_id,effective_from,effective_to,frequency_type,frequency_config,due_time,grace_minutes,instructions,active,created_at',
+    order: 'effective_from.desc'
+  });
+  const assignmentRows = _checklistSelectAll_('checklist_task_assignments', {
+    select: 'template_id,assigned_user_id,active',
+    filters: { active: 'eq.true' }
+  });
+  const assignmentCounts = {};
+  assignmentRows.forEach(function(row) {
+    const key = String(row.template_id);
+    assignmentCounts[key] = (assignmentCounts[key] || 0) + 1;
+  });
+  return templates.map(function(t) {
+    const current = _checklistGetActiveVersion_(versions, t.id, _checklistToday_()) ||
+      versions.filter(function(v) { return String(v.template_id) === String(t.id); })[0] || null;
+    return Object.assign({}, t, {
+      current_version: current,
+      assignment_count: assignmentCounts[String(t.id)] || 0
+    });
+  });
+}
+
+function adminChecklistCreateTemplate(payload, token) {
+  const admin = _checklistRequireAdminOrEdit_(token);
+  payload = payload || {};
+  const title = String(payload.title || '').trim();
+  if (!title) throw new Error('Task title required');
+  const taskCode = String(payload.taskCode || ('CHK-' + Utilities.getUuid().slice(0, 8))).trim().toUpperCase();
+  const frequencyType = String(payload.frequencyType || 'DAILY').trim().toUpperCase();
+  const effectiveFrom = String(payload.effectiveFrom || _checklistToday_()).slice(0, 10);
+  const dueTime = String(payload.dueTime || '23:59').slice(0, 5);
+
+  const inserted = supabaseInsert('checklist_task_templates', {
+    task_code: taskCode,
+    title: title,
+    description: String(payload.description || '').trim(),
+    category: String(payload.category || '').trim(),
+    priority: String(payload.priority || 'NORMAL').trim().toUpperCase(),
+    is_mandatory: payload.isMandatory === false ? false : true,
+    active: payload.active === false ? false : true,
+    created_by: admin.userId,
+    updated_by: admin.userId
+  }) || [];
+  const template = inserted[0];
+  if (!template) throw new Error('Task creation failed');
+
+  const version = (supabaseInsert('checklist_task_versions', {
+    template_id: template.id,
+    effective_from: effectiveFrom,
+    frequency_type: frequencyType,
+    frequency_config: JSON.stringify(_checklistNormalizeFrequencyConfig_(frequencyType, payload.frequencyConfig)),
+    due_time: dueTime,
+    grace_minutes: Math.max(0, Number(payload.graceMinutes || 0) || 0),
+    instructions: String(payload.instructions || '').trim(),
+    active: true,
+    created_by: admin.userId
+  }) || [])[0];
+
+  supabaseInsertMinimal('checklist_task_audit_log', {
+    template_id: template.id,
+    action: 'CREATE_TEMPLATE',
+    new_value: JSON.stringify({ template: template, version: version }),
+    actor_user_id: admin.userId
+  });
+
+  return { ok: true, template: template, version: version };
+}
+
+function adminChecklistUpdateFromDate(payload, token) {
+  const admin = _checklistRequireAdminOrEdit_(token);
+  payload = payload || {};
+  const templateId = String(payload.templateId || '').trim();
+  const effectiveFrom = String(payload.effectiveFrom || '').slice(0, 10);
+  if (!templateId || !effectiveFrom) throw new Error('Task and effective date are required');
+
+  const existing = (supabaseSelect('checklist_task_templates', {
+    select: 'id,title,description,category,priority,is_mandatory,active',
+    filters: { id: 'eq.' + templateId },
+    limit: 1
+  }) || [])[0];
+  if (!existing) throw new Error('Task not found');
+
+  const frequencyType = String(payload.frequencyType || 'DAILY').trim().toUpperCase();
+  const previousDay = _checklistAddDays_(effectiveFrom, -1);
+  const oldVersions = supabaseSelect('checklist_task_versions', {
+    select: 'id,effective_from,effective_to',
+    filters: {
+      template_id: 'eq.' + templateId,
+      active: 'eq.true',
+      effective_from: 'lte.' + effectiveFrom
+    },
+    order: 'effective_from.desc',
+    limit: 1
+  }) || [];
+  if (oldVersions[0]) {
+    const oldFrom = String(oldVersions[0].effective_from || '').slice(0, 10);
+    supabaseUpdateMinimal('checklist_task_versions', { id: 'eq.' + oldVersions[0].id }, oldFrom === effectiveFrom ? {
+      active: false
+    } : {
+      effective_to: previousDay
+    });
+  }
+
+  supabaseUpdateMinimal('checklist_task_templates', { id: 'eq.' + templateId }, {
+    title: String(payload.title || existing.title || '').trim(),
+    description: String(payload.description || '').trim(),
+    category: String(payload.category || '').trim(),
+    priority: String(payload.priority || existing.priority || 'NORMAL').trim().toUpperCase(),
+    is_mandatory: payload.isMandatory === false ? false : true,
+    active: payload.active === false ? false : true,
+    updated_by: admin.userId,
+    updated_at: _checklistNowIso_()
+  });
+
+  const version = (supabaseInsert('checklist_task_versions', {
+    template_id: templateId,
+    effective_from: effectiveFrom,
+    frequency_type: frequencyType,
+    frequency_config: JSON.stringify(_checklistNormalizeFrequencyConfig_(frequencyType, payload.frequencyConfig)),
+    due_time: String(payload.dueTime || '23:59').slice(0, 5),
+    grace_minutes: Math.max(0, Number(payload.graceMinutes || 0) || 0),
+    instructions: String(payload.instructions || '').trim(),
+    active: true,
+    created_by: admin.userId
+  }) || [])[0];
+
+  supabaseUpdateMinimal('checklist_task_instances', {
+    template_id: 'eq.' + templateId,
+    scheduled_date: 'gte.' + effectiveFrom,
+    status: 'in.("PENDING","OVERDUE")'
+  }, {
+    status: 'CANCELLED',
+    updated_at: _checklistNowIso_()
+  });
+
+  _checklistGenerateInstancesInternal_({ fromDate: effectiveFrom, horizonDays: CHECKLIST_DEFAULT_HORIZON_DAYS });
+
+  supabaseInsertMinimal('checklist_task_audit_log', {
+    template_id: templateId,
+    action: 'UPDATE_FROM_DATE',
+    new_value: JSON.stringify(Object.assign({}, payload, { versionId: version && version.id })),
+    actor_user_id: admin.userId
+  });
+
+  return { ok: true, version: version };
+}
+
+function adminChecklistAssignTasksToUser(payload, token) {
+  const admin = _checklistRequireAdminOrEdit_(token);
+  payload = payload || {};
+  const userId = String(payload.userId || '').trim();
+  const taskIds = Array.isArray(payload.taskIds) ? payload.taskIds.map(String).filter(Boolean) : [];
+  const startDate = String(payload.startDate || _checklistToday_()).slice(0, 10);
+  const endDate = payload.endDate ? String(payload.endDate).slice(0, 10) : null;
+  if (!userId) throw new Error('User is required');
+  if (!taskIds.length) throw new Error('Select at least one task');
+
+  const user = _getUserByUserId_(userId);
+  if (!user || user.active === false) throw new Error('Active user not found');
+
+  const existing = _checklistSelectAll_('checklist_task_assignments', {
+    select: 'template_id,assigned_user_id,active,end_date',
+    filters: {
+      assigned_user_id: 'eq.' + userId,
+      active: 'eq.true'
+    }
+  });
+  const activeKeys = {};
+  existing.forEach(function(row) {
+    if (!row.end_date || String(row.end_date).slice(0, 10) >= startDate) {
+      activeKeys[String(row.template_id)] = true;
+    }
+  });
+
+  const rows = taskIds.filter(function(taskId) {
+    return !activeKeys[String(taskId)];
+  }).map(function(taskId) {
+    return {
+      template_id: taskId,
+      assigned_user_id: userId,
+      start_date: startDate,
+      end_date: endDate,
+      active: true,
+      created_by: admin.userId
+    };
+  });
+
+  if (rows.length) supabaseBulkInsertMinimal('checklist_task_assignments', rows);
+  _checklistGenerateInstancesInternal_({ userId: userId, fromDate: startDate, horizonDays: CHECKLIST_DEFAULT_HORIZON_DAYS });
+
+  supabaseInsertMinimal('checklist_task_audit_log', {
+    action: 'ASSIGN_TASKS_TO_USER',
+    new_value: JSON.stringify({ userId: userId, taskIds: taskIds, inserted: rows.length, startDate: startDate, endDate: endDate }),
+    actor_user_id: admin.userId
+  });
+
+  return { ok: true, assigned: rows.length, skippedExisting: taskIds.length - rows.length };
+}
+
+function adminChecklistListAssignments(token, userId) {
+  _checklistRequireAdminOrEdit_(token);
+  const filters = { active: 'eq.true' };
+  if (userId) filters.assigned_user_id = 'eq.' + String(userId).trim();
+  const assignments = _checklistSelectAll_('checklist_task_assignments', {
+    select: 'id,template_id,assigned_user_id,start_date,end_date,active,created_by,created_at',
+    filters: filters,
+    order: 'assigned_user_id.asc,start_date.desc'
+  });
+  const templates = _checklistSelectAll_('checklist_task_templates', {
+    select: 'id,title,task_code,priority,is_mandatory,active'
+  });
+  const templateById = {};
+  templates.forEach(function(t) { templateById[String(t.id)] = t; });
+  return assignments.map(function(a) {
+    return Object.assign({}, a, { template: templateById[String(a.template_id)] || null });
+  });
+}
+
+function adminChecklistDeactivateAssignment(token, assignmentId) {
+  const admin = _checklistRequireAdminOrEdit_(token);
+  const id = String(assignmentId || '').trim();
+  if (!id) throw new Error('Assignment required');
+  supabaseUpdateMinimal('checklist_task_assignments', { id: 'eq.' + id }, {
+    active: false,
+    end_date: _checklistToday_()
+  });
+  supabaseUpdateMinimal('checklist_task_instances', {
+    assignment_id: 'eq.' + id,
+    scheduled_date: 'gte.' + _checklistToday_(),
+    status: 'in.("PENDING","OVERDUE")'
+  }, {
+    status: 'CANCELLED',
+    updated_at: _checklistNowIso_()
+  });
+  supabaseInsertMinimal('checklist_task_audit_log', {
+    action: 'DEACTIVATE_ASSIGNMENT',
+    new_value: JSON.stringify({ assignmentId: id }),
+    actor_user_id: admin.userId
+  });
+  return { ok: true };
+}
+
+function adminChecklistDashboard(token) {
+  _checklistRequireAdminOrEdit_(token);
+  _checklistGenerateInstancesInternal_({ horizonDays: 14 });
+  _checklistUpdateOverdueAll_();
+  const today = _checklistToday_();
+  try {
+    const summary = _checklistSelectAll_('v_checklist_user_summary', {
+      select: 'assigned_user_id,assigned_display_name,today_pending,overdue,mandatory_open,done_window,pending_window',
+      order: 'overdue.desc,pending_window.desc,assigned_user_id.asc'
+    });
+    const metrics = summary.reduce(function(out, row) {
+      out.todayPending += Number(row.today_pending || 0);
+      out.overdue += Number(row.overdue || 0);
+      out.done30Days += Number(row.done_window || 0);
+      out.mandatoryOpen += Number(row.mandatory_open || 0);
+      return out;
+    }, { todayPending: 0, overdue: 0, done30Days: 0, mandatoryOpen: 0 });
+    return {
+      ok: true,
+      today: today,
+      metrics: metrics,
+      byUser: summary.map(function(row) {
+        return {
+          userId: row.assigned_user_id,
+          displayName: row.assigned_display_name,
+          pending: Number(row.pending_window || 0),
+          overdue: Number(row.overdue || 0),
+          done: Number(row.done_window || 0),
+          mandatoryOpen: Number(row.mandatory_open || 0)
+        };
+      })
+    };
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_checklist_user_summary')) throw err;
+  }
+  const rows = _checklistSelectAll_('checklist_task_instances', {
+    select: 'assigned_user_id,scheduled_date,status,is_mandatory,priority',
+    filters: { and: '(scheduled_date.gte.' + _checklistAddDays_(today, -30) + ',scheduled_date.lte.' + _checklistAddDays_(today, 14) + ')' }
+  });
+  const metrics = {
+    todayPending: 0,
+    overdue: 0,
+    done30Days: 0,
+    mandatoryOpen: 0
+  };
+  const byUser = {};
+  rows.forEach(function(row) {
+    const status = String(row.status || '').toUpperCase();
+    if (String(row.scheduled_date).slice(0, 10) === today && status === 'PENDING') metrics.todayPending++;
+    if (status === 'OVERDUE') metrics.overdue++;
+    if (status === 'DONE') metrics.done30Days++;
+    if (row.is_mandatory && (status === 'PENDING' || status === 'OVERDUE')) metrics.mandatoryOpen++;
+    const user = row.assigned_user_id || 'Unassigned';
+    byUser[user] = byUser[user] || { userId: user, pending: 0, overdue: 0, done: 0 };
+    if (status === 'PENDING') byUser[user].pending++;
+    else if (status === 'OVERDUE') byUser[user].overdue++;
+    else if (status === 'DONE') byUser[user].done++;
+  });
+  return {
+    ok: true,
+    today: today,
+    metrics: metrics,
+    byUser: Object.keys(byUser).map(function(k) { return byUser[k]; }).sort(function(a, b) {
+      return (b.overdue - a.overdue) || (b.pending - a.pending) || String(a.userId).localeCompare(String(b.userId));
+    })
+  };
+}
+
+function _checklistRegenerateFutureOpen_(fromDate) {
+  const start = String(fromDate || _checklistToday_()).slice(0, 10);
+  supabaseUpdateMinimal('checklist_task_instances', {
+    scheduled_date: 'gte.' + start,
+    status: 'in.("PENDING","OVERDUE")'
+  }, {
+    status: 'CANCELLED',
+    updated_at: _checklistNowIso_()
+  });
+  const generated = _checklistGenerateInstancesInternal_({
+    fromDate: start,
+    horizonDays: CHECKLIST_DEFAULT_HORIZON_DAYS
+  });
+  _checklistCancelInvalidDailyOpen_(null, _checklistAddDays_(start, -60), _checklistAddDays_(start, CHECKLIST_DEFAULT_HORIZON_DAYS));
+  return generated;
+}
+
+function adminChecklistGetCalendar(token) {
+  _checklistRequireAdminOrEdit_(token);
+  const today = _checklistToday_();
+  const weeklyOffs = _checklistSelectAll_('checklist_weekly_offs', {
+    select: 'id,day_of_week,day_code,label,active',
+    order: 'day_of_week.asc'
+  });
+  const holidays = _checklistSelectAll_('checklist_holidays', {
+    select: 'id,holiday_date,title,active,created_by,created_at,updated_at',
+    filters: {
+      and: '(holiday_date.gte.' + _checklistAddDays_(today, -30) + ',holiday_date.lte.' + _checklistAddDays_(today, 365) + ')'
+    },
+    order: 'holiday_date.asc'
+  });
+  return {
+    ok: true,
+    today: today,
+    weeklyOffs: weeklyOffs,
+    holidays: holidays
+  };
+}
+
+function adminChecklistSaveWeeklyOffs(payload, token) {
+  const admin = _checklistRequireAdminOrEdit_(token);
+  payload = payload || {};
+  const selected = {};
+  (Array.isArray(payload.days) ? payload.days : []).forEach(function(day) {
+    selected[Number(day)] = true;
+  });
+  const dayCodes = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  const rows = dayCodes.map(function(code, index) {
+    return {
+      day_of_week: index,
+      day_code: code,
+      label: code,
+      active: !!selected[index],
+      updated_by: admin.userId,
+      updated_at: _checklistNowIso_(),
+      created_by: admin.userId
+    };
+  });
+  supabaseUpsertMinimal('checklist_weekly_offs', rows, { onConflict: 'day_of_week' });
+  _checklistRegenerateFutureOpen_(_checklistToday_());
+  supabaseInsertMinimal('checklist_task_audit_log', {
+    action: 'SAVE_WEEKLY_OFFS',
+    new_value: JSON.stringify({ days: Object.keys(selected) }),
+    actor_user_id: admin.userId
+  });
+  return { ok: true };
+}
+
+function adminChecklistAddHoliday(payload, token) {
+  const admin = _checklistRequireAdminOrEdit_(token);
+  payload = payload || {};
+  const date = String(payload.holidayDate || '').slice(0, 10);
+  const title = String(payload.title || '').trim();
+  if (!date || !title) throw new Error('Holiday date and title are required');
+  supabaseUpsertMinimal('checklist_holidays', {
+    holiday_date: date,
+    title: title,
+    active: payload.active === false ? false : true,
+    created_by: admin.userId,
+    updated_by: admin.userId,
+    updated_at: _checklistNowIso_()
+  }, { onConflict: 'holiday_date' });
+  _checklistRegenerateFutureOpen_(date < _checklistToday_() ? _checklistToday_() : date);
+  supabaseInsertMinimal('checklist_task_audit_log', {
+    action: 'ADD_HOLIDAY',
+    new_value: JSON.stringify({ holidayDate: date, title: title }),
+    actor_user_id: admin.userId
+  });
+  return { ok: true };
+}
+
+function adminChecklistDeactivateHoliday(token, holidayId) {
+  const admin = _checklistRequireAdminOrEdit_(token);
+  const id = String(holidayId || '').trim();
+  if (!id) throw new Error('Holiday required');
+  const row = (supabaseSelect('checklist_holidays', {
+    select: 'id,holiday_date,title',
+    filters: { id: 'eq.' + id },
+    limit: 1
+  }) || [])[0];
+  if (!row) throw new Error('Holiday not found');
+  supabaseUpdateMinimal('checklist_holidays', { id: 'eq.' + id }, {
+    active: false,
+    updated_by: admin.userId,
+    updated_at: _checklistNowIso_()
+  });
+  const date = String(row.holiday_date || _checklistToday_()).slice(0, 10);
+  _checklistRegenerateFutureOpen_(date < _checklistToday_() ? _checklistToday_() : date);
+  supabaseInsertMinimal('checklist_task_audit_log', {
+    action: 'DEACTIVATE_HOLIDAY',
+    new_value: JSON.stringify({ holidayId: id, holidayDate: row.holiday_date, title: row.title }),
+    actor_user_id: admin.userId
+  });
+  return { ok: true };
 }
 
 /* =========================
@@ -10144,14 +11144,6 @@ function _supabaseBulkInsertMinimalInChunks_(table, rows, maxRows, maxPayloadCha
   return out;
 }
 
-function _salesOrderResolvedApprovalStatus_(preferred, fallback) {
-  const primary = String(preferred || '').trim().toUpperCase();
-  const secondary = String(fallback || '').trim().toUpperCase();
-  if (primary === 'REJECTED' || secondary === 'REJECTED') return 'REJECTED';
-  if (primary === 'HOLD' || secondary === 'HOLD') return 'HOLD';
-  return primary || secondary || 'PENDING';
-}
-
 function _salesOrderRollupApprovalStatus_(current, next) {
   const active = String(current || '').trim().toUpperCase() || 'APPROVED';
   const state = String(next || '').trim().toUpperCase() || 'PENDING';
@@ -10208,56 +11200,6 @@ function _salesOrderApplyFallbackUiFields_(rows) {
     row.hold_label = row.hold_target === 'OPEN' ? 'Reopen' : 'Hold';
     row.line_count = Number(row.line_count || 0);
     row.total_qty = Number(row.total_qty || 0);
-    return row;
-  });
-}
-
-function _salesOrderOverlayHeaderApprovalState_(rows) {
-  const list = Array.isArray(rows) ? rows : [];
-  const ids = [...new Set(list.map(function(row) {
-    return String(row && row.id || '').trim();
-  }).filter(Boolean))];
-
-  if (!ids.length) return list;
-
-  const headerRows = _supabaseSelectByKeyInBatches_(
-    'sales_orders',
-    'id,status,accounts_approved,business_approved,wo_status',
-    'id',
-    ids,
-    'id.asc',
-    40
-  ) || [];
-
-  const headerMap = {};
-  headerRows.forEach(function(row) {
-    headerMap[String(row.id || '').trim()] = row || {};
-  });
-
-  return list.map(function(src) {
-    const row = Object.assign({}, src || {});
-    const header = headerMap[String(row.id || '').trim()] || {};
-    const headerStatus = String(header.status || row.status || '').trim().toUpperCase() || 'OPEN';
-    const headerAccounts = String(header.accounts_approved || '').trim().toUpperCase();
-    const headerBusiness = String(header.business_approved || '').trim().toUpperCase();
-    const accountsStatus = _salesOrderResolvedApprovalStatus_(row.accounts_status, headerAccounts);
-    const businessStatus = _salesOrderResolvedApprovalStatus_(row.business_status, headerBusiness);
-    const isApprovalHold = accountsStatus === 'HOLD' || businessStatus === 'HOLD';
-
-    row.status = headerStatus;
-    row.accounts_status = accountsStatus;
-    row.business_status = businessStatus;
-    row.wo_status = String(header.wo_status || row.wo_status || '').trim().toUpperCase() || 'PENDING';
-    row.is_approval_hold = isApprovalHold;
-    row.can_edit =
-      headerStatus !== 'CANCELLED' &&
-      headerStatus !== 'CLOSED' &&
-      (headerStatus === 'HOLD' || isApprovalHold ||
-       (accountsStatus !== 'APPROVED' && businessStatus !== 'APPROVED'));
-    row.can_hold = headerStatus !== 'CANCELLED' && headerStatus !== 'CLOSED';
-    row.can_cancel = headerStatus !== 'CANCELLED' && headerStatus !== 'CLOSED';
-    row.hold_target = headerStatus === 'HOLD' ? 'OPEN' : 'HOLD';
-    row.hold_label = row.hold_target === 'OPEN' ? 'Reopen' : 'Hold';
     return row;
   });
 }
@@ -11184,6 +12126,7 @@ function _canAccessPage_(page, sessionUser, token) {
   if (!sessionUser) return false;
   if (String(sessionUser.role || '').toUpperCase() === 'ADMIN') return true;
   if (currentPage === 'menu') return true;
+  if (currentPage === 'checklist') return true;
   if (currentPage === 'masteradmin') return false;
   if (currentPage === 'reports') return true;
 
@@ -11266,6 +12209,7 @@ const ROUTES = {
   planning: 'Planning',
   reports: 'Reports',
   costing: 'Costing',
+  checklist: 'Checklist',
 
   masteradmin: 'MasterAdmin',
 
@@ -11282,6 +12226,11 @@ const ROUTES = {
 
   if (!sessionUser) {
     return renderLoginRedirectPage();
+  }
+
+  const checklistBlock = _checklistGetBlockingStatusInternal_(sessionUser, token);
+  if (checklistBlock.blocked && !_checklistCanOpenWhileBlocked_(page, sessionUser)) {
+    return renderChecklistBlockedPage(checklistBlock, token);
   }
 
   if (!_canAccessPage_(page, sessionUser, token)) {
@@ -13433,80 +14382,6 @@ function _getSalesOrderLineIds_(entries) {
 
 function _approvalAdvancePaymentCacheKey_(soNo) {
   return 'so_approval:advance_payment:' + String(soNo || '');
-}
-
-function _getSalesOrderAdvancePaymentStatusMap_(soNumbers) {
-  const out = {};
-  const misses = [];
-
-  (soNumbers || []).forEach(function(soNo) {
-    const key = String(soNo || '').trim();
-    if (!key || Object.prototype.hasOwnProperty.call(out, key)) return;
-
-    const cached = _getCachedJson_(_approvalAdvancePaymentCacheKey_(key));
-    if (
-      cached &&
-      typeof cached.advancePaymentRequired === 'boolean' &&
-      typeof cached.advancePaymentReceived === 'boolean'
-    ) {
-      out[key] = {
-        advancePaymentRequired: cached.advancePaymentRequired,
-        advancePaymentReceived: cached.advancePaymentReceived
-      };
-      return;
-    }
-
-    misses.push(key);
-  });
-
-  if (!misses.length) return out;
-
-  for (let i = 0; i < misses.length; i += 40) {
-    const chunk = misses.slice(i, i + 40);
-    try {
-      const rows = supabaseSelect('sales_orders', {
-        select: 'so_number,advance_payment_required,advance_payment_received',
-        filters: { so_number: _supabaseInFilter_(chunk) }
-      }) || [];
-
-      rows.forEach(function(row) {
-        const soNo = String(row.so_number || '').trim();
-        if (!soNo) return;
-        const value = {
-          advancePaymentRequired: row.advance_payment_required === true,
-          advancePaymentReceived: row.advance_payment_received === true
-        };
-        out[soNo] = value;
-        _putCachedJson_(_approvalAdvancePaymentCacheKey_(soNo), {
-          advancePaymentRequired: value.advancePaymentRequired,
-          advancePaymentReceived: value.advancePaymentReceived
-        }, 1800);
-      });
-    } catch (err) {
-      const msg = String((err && err.message) || err || '');
-      if (msg.indexOf('advance_payment_required') === -1 && msg.indexOf('advance_payment_received') === -1) throw err;
-    }
-  }
-
-  misses.forEach(function(soNo) {
-    if (!Object.prototype.hasOwnProperty.call(out, soNo)) {
-      out[soNo] = {
-        advancePaymentRequired: false,
-        advancePaymentReceived: false
-      };
-    }
-  });
-
-  return out;
-}
-
-function _getSalesOrderAdvancePaymentRequiredMap_(soNumbers) {
-  const statusMap = _getSalesOrderAdvancePaymentStatusMap_(soNumbers);
-  const out = {};
-  Object.keys(statusMap).forEach(function(soNo) {
-    out[soNo] = statusMap[soNo].advancePaymentRequired === true;
-  });
-  return out;
 }
 
 // Optimized overrides for Sales Order approval writes.
@@ -15882,109 +16757,6 @@ function invListItemsJSON(opts = {}) {
   };
 }
 
-function invFindPaperItemsJSON(opts = {}) {
-  const want = {
-    rmType: _normalizePaperText_(opts.rmType),
-    lengthMm: _normalizePaperNumber_(opts.lengthMm),
-    widthMm: _normalizePaperNumber_(opts.widthMm),
-    gsm: _normalizePaperNumber_(opts.gsm),
-    specsText: _normalizePaperText_(opts.specsText),
-    q: String(opts.q || '').trim().toLowerCase()
-  };
-
-  const rows = _getUnifiedInventoryItems_({
-    onlyActive: opts.onlyActive !== false,
-    q: want.q
-  }) || [];
-
-  const scored = rows.map(function(row) {
-    const rowRm = _normalizePaperText_(row.rmType);
-    const rowSpecs = _normalizePaperText_(row.specsText);
-    const rowGsm = _normalizePaperNumber_(row.gsm);
-    const rowLength = _normalizePaperNumber_(row.lengthMm);
-    const rowWidth = _normalizePaperNumber_(row.widthMm);
-    let score = 0;
-    const notes = [];
-
-    if (want.rmType) {
-      if (rowRm === want.rmType) {
-        score += 40;
-        notes.push('rm');
-      } else if (rowRm && rowRm.indexOf(want.rmType) !== -1) {
-        score += 18;
-        notes.push('rm-near');
-      }
-    }
-
-    if (want.gsm !== null) {
-      if (rowGsm === want.gsm) {
-        score += 30;
-        notes.push('gsm');
-      } else if (rowGsm !== null && Math.abs(rowGsm - want.gsm) <= 2) {
-        score += 12;
-        notes.push('gsm-near');
-      }
-    }
-
-    if (want.lengthMm !== null) {
-      if (rowLength === want.lengthMm) {
-        score += 18;
-        notes.push('length');
-      }
-    }
-
-    if (want.widthMm !== null) {
-      if (rowWidth === want.widthMm) {
-        score += 18;
-        notes.push('width');
-      }
-    }
-
-    if (want.specsText) {
-      if (rowSpecs === want.specsText) {
-        score += 12;
-        notes.push('specs');
-      } else if (rowSpecs && rowSpecs.indexOf(want.specsText) !== -1) {
-        score += 6;
-        notes.push('specs-near');
-      }
-    }
-
-    if (want.q) {
-      const hay = [
-        row.itemCode,
-        row.itemName,
-        row.category,
-        row.department,
-        row.uom,
-        row.rmType,
-        row.specsText,
-        row.additionalInfo,
-        row.grainDirection
-      ].join(' ').toLowerCase();
-      if (hay.indexOf(want.q) !== -1) {
-        score += 8;
-        notes.push('text');
-      }
-    }
-
-    return Object.assign({}, row, {
-      matchScore: score,
-      matchNotes: notes.join(', ')
-    });
-  }).filter(function(row) {
-    return row.matchScore > 0 || (!want.rmType && want.gsm === null && want.lengthMm === null && want.widthMm === null && !want.specsText && !want.q);
-  }).sort(function(a, b) {
-    return Number(b.matchScore || 0) - Number(a.matchScore || 0) ||
-      String(a.itemName || a.itemCode || '').localeCompare(String(b.itemName || b.itemCode || ''));
-  });
-
-  return {
-    ok: true,
-    rows: scored.slice(0, Number(opts.limit || 20) || 20)
-  };
-}
-
 function invListIssueJSON(opts = {}) {
   const filters = _invBuildTxnDateFilters_(opts, 'ISSUE');
   const requestLimit = _invResolveTxnRequestLimit_(opts, 1000, 50000);
@@ -17319,154 +18091,6 @@ function _artworkNormalizeProductType_(value) {
   return raw;
 }
 
-function _artworkDivisionBySoLineMap_(rows) {
-  const rowList = Array.isArray(rows) ? rows : [];
-  if (!rowList.length) return {};
-
-  const soNumbers = [...new Set(rowList.map(function(row) {
-    return String(row.so_number || '').trim();
-  }).filter(Boolean))];
-  if (!soNumbers.length) return {};
-
-  const salesOrders = _supabaseSelectByKeyInBatches_('sales_orders', 'id,so_number', 'so_number', soNumbers, null, 40) || [];
-  const soIdToNumber = {};
-  salesOrders.forEach(function(row) {
-    const soNumber = String(row.so_number || '').trim();
-    const soId = String(row.id || '').trim();
-    if (!soNumber || !soId) return;
-    soIdToNumber[soId] = soNumber;
-  });
-
-  const soIds = Object.keys(soIdToNumber);
-  if (!soIds.length) return {};
-
-  const lineRows = _supabaseSelectByKeyInBatches_('sales_order_lines', 'so_id,line_no,division', 'so_id', soIds, null, 40) || [];
-  const map = {};
-  lineRows.forEach(function(row) {
-    const soId = String(row.so_id || '').trim();
-    const soNumber = soIdToNumber[soId] || '';
-    const lineNo = String(row.line_no || '').trim();
-    if (!soNumber || !lineNo) return;
-    map[soNumber + '||' + lineNo] = String(row.division || '').trim();
-  });
-  return map;
-}
-
-function invListPurchaseRequestsJSON_legacy(opts = {}) {
-  const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
-  const forceRefresh = opts.forceRefresh === true;
-  const requestLimit = Math.max(1, Number(opts.limit || 300) || 300);
-  const cacheKey = _cacheKeyHash_('INV_PURCHASE_REQUESTS', JSON.stringify({
-    v: purchaseCacheVersion,
-    status: String(opts.status || ''),
-    fromDate: String(opts.fromDate || ''),
-    toDate: String(opts.toDate || ''),
-    limit: requestLimit
-  }));
-  const cache = CacheService.getScriptCache();
-  if (!forceRefresh) {
-    const cached = cache.get(cacheKey);
-    if (cached) {
-      try {
-        return JSON.parse(cached);
-      } catch (err) {
-        cache.remove(cacheKey);
-      }
-    }
-  }
-
-const filters = {};
-
-if (opts.status)
-  filters.status = 'eq.' + opts.status;
-
-if (opts.fromDate && opts.toDate) {
-
-  const from = opts.fromDate + 'T00:00:00';
-  const to   = opts.toDate   + 'T23:59:59';
-
-  filters.and =
-    `(created_at.gte.${from},created_at.lte.${to})`;
-}
-else if (opts.fromDate) {
-  filters.created_at = `gte.${opts.fromDate}T00:00:00`;
-}
-else if (opts.toDate) {
-  filters.created_at = `lte.${opts.toDate}T23:59:59`;
-}
-
-  const rows = supabaseSelect('inv_purchase_requests', {
-    select: `
-      pr_no,
-      created_at,
-      item_id,
-      item_code,
-      item_name,
-      requested_qty,
-      received_qty,
-      department,
-      job_ref,
-      remarks,
-      status
-    `,
-    filters,
-    order: 'created_at.desc',
-    limit: requestLimit
-  }) || [];
-
-  const purchaseRows = purchaseListInventoryRequestsJSON(Object.assign({}, opts, {
-    limit: requestLimit,
-    forceRefresh: forceRefresh
-  })).rows || [];
-  const purchaseMap = {};
-  purchaseRows.forEach(r => { purchaseMap[r.prNo] = r; });
-
-  const itemCodes = rows
-    .map(function(r) { return String(r.item_code || '').trim(); })
-    .filter(Boolean);
-  const itemUomMap = {};
-  _supabaseSelectByKeyInBatches_(
-    'inv_items',
-    'item_code,uom',
-    'item_code',
-    itemCodes,
-    null,
-    40
-  ).forEach(function(item) {
-    const code = String(item.item_code || '').trim().toUpperCase();
-    if (code) itemUomMap[code] = item.uom || '';
-  });
-
-  const result = {
-    ok: true,
-    rows: rows.map(r => ({
-      prNo: r.pr_no,
-      date: r.created_at,
-      itemId: r.item_id,
-      itemCode: r.item_code,
-      itemName: r.item_name,
-      uom: itemUomMap[String(r.item_code || '').trim().toUpperCase()] || '',
-      prQty: r.requested_qty,          // ✅ FIXED
-      receivedQty: r.received_qty || 0,
-      balanceQty: Math.max(0, Number(r.requested_qty || 0) - Number(r.received_qty || 0)),
-      pendingQty: Math.max(0, Number(r.requested_qty || 0) - Number(r.received_qty || 0)),
-      poQty: purchaseMap[r.pr_no]?.openPOQty || 0,
-      poRate: purchaseMap[r.pr_no]?.poRate || 0,
-      poRefs: purchaseMap[r.pr_no]?.poRefs || [],
-      prDept: r.department,
-      jobRef: r.job_ref,
-      remarks: r.remarks || '',
-      status: r.status,
-      canEdit: String(r.status || '').toUpperCase() === 'OPEN' &&
-        Number(r.received_qty || 0) <= 0 &&
-        !(purchaseMap[r.pr_no]?.poRefs || []).length
-    }))
-  };
-
-  _putCachedJson_(cacheKey, result, 120);
-  return result;
-}
-
 function invListPurchaseRequestsJSON(opts = {}) {
   const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
   const forceRefresh = opts.forceRefresh === true;
@@ -18324,18 +18948,6 @@ function invSetPurchaseRequestLifecycle(prNo, action, reason) {
   throw new Error('Unsupported lifecycle action');
 }
 
-function invClosePurchaseRequest(prNo, reason) {
-  return invSetPurchaseRequestLifecycle(prNo, 'CLOSED', reason);
-}
-
-function invShortClosePurchaseRequest(prNo, reason) {
-  return invSetPurchaseRequestLifecycle(prNo, 'SHORT_CLOSED', reason);
-}
-
-function invCancelPurchaseRequest(prNo, reason) {
-  return invSetPurchaseRequestLifecycle(prNo, 'CANCELLED', reason);
-}
-
 function generatePRNo_() {
 
   const seq = supabaseSelect('inv_pr_sequences', {
@@ -18506,23 +19118,6 @@ function _invNormalizeIssueUom_(value) {
   if (['KG', 'KGS', 'KILOGRAM', 'KILOGRAMS'].indexOf(upper) !== -1) return 'KG';
   if (['SHEET', 'SHEETS'].indexOf(upper) !== -1) return 'SHEET';
   return upper;
-}
-
-function _invFlexoKgToRm_(qtyKg, snapshotJson) {
-  const snap = snapshotJson || {};
-  let kg = Number(qtyKg || 0);
-  const flexoTotalRm = Number(
-    snap?.flexoDetails?.totalRunningMeter ||
-    snap?.flexoDetails?.baseRunningMeter ||
-    0
-  );
-  const flexoRequiredKg = Number(snap?.flexoDetails?.requiredKg || 0);
-  if (!(kg > 0) || !(flexoTotalRm > 0) || !(flexoRequiredKg > 0)) return 0;
-  if (kg > flexoRequiredKg * 20 && (kg / 1000) <= flexoRequiredKg * 2.5) {
-    kg = kg / 1000;
-  }
-  const rm = (kg * flexoTotalRm) / flexoRequiredKg;
-  return rm > flexoTotalRm * 5 ? flexoTotalRm : rm;
 }
 
 function _invIsPrimaryFlexoIssueMaterial_(label, snapshotJson, itemCodeOverride, itemNameOverride) {
@@ -18854,126 +19449,6 @@ function resolveWOIssueDepartment_(snapshotJson) {
   return 'Offset';
 }
 
-function invListWorkOrdersForIssue_legacyUnused_() {
-  return invListWorkOrdersForIssue();
-
-  const preparedRows = invListWorkOrdersForIssueFromView_();
-  if (preparedRows && preparedRows.length) {
-    return { ok: true, rows: preparedRows };
-  }
-
-  const workOrders = supabaseSelect('work_orders', {
-    select: 'id, wo_number, status, snapshot_json',
-    filters: { status: 'neq.CLOSED' },
-    order: 'wo_number.asc'
-  }) || [];
-
-  if (!workOrders.length) {
-    return { ok: true, rows: [] };
-  }
-
-  const woIds = workOrders.map(w => w.id);
-  const woIdToNo = {};
-  workOrders.forEach(w => woIdToNo[w.id] = w.wo_number);
-
-  // 1️⃣ Fetch required materials
-  const chunkSize = 20;
-  let materials = [];
-  for (let i = 0; i < woIds.length; i += chunkSize) {
-    const chunk = woIds.slice(i, i + chunkSize);
-    const batch = supabaseSelect('work_order_materials', {
-      select: `
-        wo_id,
-        material_key,
-        item_name,
-        gsm,
-        deckle,
-        cut_size,
-        uom,
-        required_qty
-      `,
-      filters: { wo_id: 'in.(' + chunk.join(',') + ')' }
-    }) || [];
-    materials = materials.concat(batch);
-  }
-
-  // 2️⃣ Fetch issued quantities
-  let issuedRows = [];
-  for (let i = 0; i < workOrders.length; i += chunkSize) {
-    const chunk = workOrders.slice(i, i + chunkSize);
-    const woNumbers = chunk.map(w => w.wo_number).filter(Boolean);
-    const batch = supabaseSelect('inv_ledger', {
-      select: 'id, ref_no, remarks, qty_out',
-      filters: {
-        ref_type: 'eq.ISSUE',
-        ref_no: _supabaseInFilter_(woNumbers)
-      }
-    }) || [];
-    issuedRows = issuedRows.concat(batch);
-  }
-
-  const issueReversalMap = invGetReversalSummaryMap_(issuedRows.map(function(row) {
-    return row.id;
-  }));
-  issuedRows = issuedRows.filter(function(row) {
-    return issueReversalMap[String(row.id || '')]?.reversed !== true;
-  });
-
-  const issuedMap = {};
-  issuedRows.forEach(r => {
-
-    const woNo = r.ref_no;
-    const key = normalizeStoredWOMaterialKey_(r.remarks);
-    const qty = Number(r.qty_out || 0);
-
-    if (!woNo || !key) return;
-
-    if (!issuedMap[woNo]) issuedMap[woNo] = {};
-    issuedMap[woNo][key] =
-      (issuedMap[woNo][key] || 0) + qty;
-  });
-
-  // 3️⃣ Final evaluation (WITH TOLERANCE)
-  const rows = [];
-
-  workOrders.forEach(w => {
-
-    const woId = w.id;
-    const woNo = w.wo_number;
-    const woMaterials = applyWOMaterialFallbacks_(
-      materials.filter(m => m.wo_id === woId),
-      w.snapshot_json || {}
-    );
-    const requirementRows = buildWOMaterialRequirementRows_(
-      woMaterials,
-      issuedRows.filter(r => r.ref_no === woNo)
-    );
-
-    const hasPending = requirementRows.some(function(row) {
-      return Number(row.remainingQty || 0) > 0.0001;
-    });
-
-    for (const key in req) {
-
-      const reqQty = Number(req[key] || 0);
-      const issQty = Number(issued[key] || 0);
-
-      // 🔥 TOLERANCE FIX
-      if ((reqQty - issQty) > 0.0001) {
-        hasPending = true;
-        break;
-      }
-    }
-
-    rows.push({
-      woNo: woNo,
-      materialStatus: hasPending ? 'PENDING' : 'ISSUED',
-      requirements: requirementRows
-    });
-  });
-
-  return { ok: true, rows };
-}
 function _invIsWorkOrderIssueCandidate_(wo) {
   const status = String(wo?.status || '').trim().toUpperCase();
   return ['CANCELLED', 'CANCELED', 'VOID', 'DELETED'].indexOf(status) === -1;
@@ -19580,12 +20055,6 @@ refreshStockMV_();
   return { ok: true };
 }
 
-function _sheetConvNormalizeRole_(role) {
-  const raw = String(role || 'MAIN').trim().toUpperCase();
-  if (raw === 'LEFTOVER' || raw === 'SCRAP' || raw === 'MAIN' || raw === 'OUTPUT' || raw === 'WASTE') return raw;
-  return 'MAIN';
-}
-
 function _sheetConvRound6_(value) {
   return Number(Number(value || 0).toFixed(6));
 }
@@ -19986,138 +20455,6 @@ function invPostSheetConversion(payload) {
   };
 }
 
-function invReverseSheetConversion(conversionNo, reason) {
-  const cnvNo = String(conversionNo || '').trim();
-  if (!cnvNo) throw new Error('Conversion number required');
-  const why = String(reason || '').trim();
-  if (!why) throw new Error('Reversal reason required');
-
-  const conv = (supabaseSelect('inv_sheet_conversions', {
-    filters: { conversion_no: 'eq.' + cnvNo },
-    limit: 1
-  }) || [])[0];
-  if (!conv) throw new Error('Sheet conversion not found');
-  if (conv.reversed_at) throw new Error('Sheet conversion already reversed');
-
-  const location = conv.location || DEFAULT_LOCATION;
-  const sourceQty = Number(conv.source_qty || 0);
-  const sourceRate = Number(conv.source_rate || 0);
-  const targetLines = supabaseSelect('inv_sheet_conversion_lines', {
-    filters: { conversion_id: 'eq.' + conv.id },
-    order: 'line_no.asc,created_at.asc',
-    limit: 500
-  }) || [];
-
-  targetLines.forEach(function(line) {
-    if (line.is_waste === true) return;
-    if (!(Number(line.output_qty || 0) > 0)) return;
-    if (!line.target_lot_id) throw new Error('Target lot missing for line ' + line.line_no + '; manual reversal required');
-    const targetLot = (supabaseSelect('inv_lots', {
-      select: 'id,qty_available,qty_received,batch_no',
-      filters: { id: 'eq.' + line.target_lot_id },
-      limit: 1
-    }) || [])[0];
-    if (!targetLot) throw new Error('Target lot missing for line ' + line.line_no + '; manual reversal required');
-    if (Number(targetLot.qty_available || 0) + 0.0001 < Number(line.output_qty || 0)) {
-      throw new Error('Target lot ' + (targetLot.batch_no || '') + ' already partly consumed; reversal blocked');
-    }
-
-    const revLedger = invAppendLedger_({
-      refType: 'REV-SHEET-CONVERT-IN',
-      refNo: cnvNo,
-      itemCode: line.item_code,
-      qtyOut: Number(line.output_qty || 0),
-      rate: Number(line.rate || 0),
-      batchNo: targetLot.batch_no || '',
-      location: location,
-      remarks: 'Reversal of ' + cnvNo + ': ' + why
-    });
-    supabaseUpdate('inv_lots', { id: 'eq.' + targetLot.id }, {
-      qty_available: Number((Number(targetLot.qty_available || 0) - Number(line.output_qty || 0)).toFixed(6))
-    });
-    supabaseInsert('inv_lot_allocations', {
-      id: Utilities.getUuid(),
-      ledger_id: revLedger?.id || null,
-      lot_id: targetLot.id,
-      batch_no: targetLot.batch_no || '',
-      item_id: line.item_id,
-      qty: Number(line.output_qty || 0),
-      rate: Number(line.rate || 0),
-      txn_type: 'REV-SHEET-CONVERT-IN',
-      created_at: new Date().toISOString()
-    });
-  });
-
-  const allocRows = supabaseSelect('inv_sheet_conversion_allocations', {
-    filters: { conversion_id: 'eq.' + conv.id },
-    order: 'created_at.asc',
-    limit: 5000
-  }) || [];
-  const sourceGroups = {};
-  allocRows.forEach(function(row) {
-    const key = String(row.source_lot_id || '');
-    if (!key) return;
-    if (!sourceGroups[key]) {
-      sourceGroups[key] = {
-        sourceLotId: row.source_lot_id,
-        sourceBatchNo: row.source_batch_no || '',
-        itemId: row.item_id || conv.source_item_id,
-        qty: 0,
-        value: 0
-      };
-    }
-    sourceGroups[key].qty += Number(row.qty || 0);
-    sourceGroups[key].value += Number(row.qty || 0) * Number(row.rate || 0);
-  });
-
-  const restoreLedger = invAppendLedger_({
-    refType: 'REV-SHEET-CONVERT-OUT',
-    refNo: cnvNo,
-    itemCode: conv.source_item_code,
-    qtyIn: sourceQty,
-    rate: sourceRate,
-    batchNo: conv.source_batch_no || '',
-    location: location,
-    remarks: 'Reversal of ' + cnvNo + ': ' + why
-  });
-
-  Object.keys(sourceGroups).forEach(function(key) {
-    const group = sourceGroups[key];
-    if (!(Number(group.qty || 0) > 0)) return;
-    const lotRow = (supabaseSelect('inv_lots', {
-      select: 'id,qty_available,batch_no',
-      filters: { id: 'eq.' + group.sourceLotId },
-      limit: 1
-    }) || [])[0];
-    if (!lotRow) return;
-    supabaseUpdate('inv_lots', { id: 'eq.' + lotRow.id }, {
-      qty_available: Number((Number(lotRow.qty_available || 0) + Number(group.qty || 0)).toFixed(6))
-    });
-    supabaseInsert('inv_lot_allocations', {
-      id: Utilities.getUuid(),
-      ledger_id: restoreLedger?.id || null,
-      lot_id: lotRow.id,
-      batch_no: lotRow.batch_no || group.sourceBatchNo || '',
-      item_id: conv.source_item_id,
-      qty: Number(group.qty || 0),
-      rate: Number(group.qty || 0) > 0 ? Number((Number(group.value || 0) / Number(group.qty || 0)).toFixed(6)) : sourceRate,
-      txn_type: 'REV-SHEET-CONVERT-OUT',
-      created_at: new Date().toISOString()
-    });
-  });
-
-  supabaseUpdate('inv_sheet_conversions', { id: 'eq.' + conv.id }, {
-    reversed_at: new Date().toISOString(),
-    reversed_by: String(Session.getActiveUser?.().getEmail?.() || ''),
-    updated_at: new Date().toISOString(),
-    remarks: (conv.remarks ? conv.remarks + ' | ' : '') + 'REVERSED: ' + why
-  });
-
-  refreshStockMV_();
-
-  return { ok: true, conversionNo: cnvNo, reversedAt: new Date().toISOString() };
-}
-
 function invListAdjustmentsJSON(opts = {}) {
   const filters = _invBuildTxnDateFilters_(opts, 'ADJ');
   const requestLimit = _invResolveTxnRequestLimit_(opts, 1000, 50000);
@@ -20460,77 +20797,6 @@ function _invStockSnapshotItemRows_(opts) {
     ].join(' ').toLowerCase();
     return hay.indexOf(q) !== -1;
   });
-}
-
-function _invOpenLotStockByItem_(opts, itemRows) {
-  const locationFilter = String(opts && opts.location || '').trim();
-  const itemList = Array.isArray(itemRows) ? itemRows : _invStockSnapshotItemRows_(opts || {});
-  const itemById = {};
-  const allowedIds = {};
-  itemList.forEach(function(item) {
-    const id = String(item.id || '').trim();
-    if (!id) return;
-    itemById[id] = item;
-    allowedIds[id] = true;
-  });
-  const hasAllowedIds = Object.keys(allowedIds).length > 0;
-
-  const filters = {
-    qty_available: 'gt.0'
-  };
-  if (locationFilter) {
-    filters.location = 'eq.' + locationFilter;
-  }
-
-  const lots = _supabaseSelectAll_('inv_lots', {
-    select: 'item_id,item_code,batch_no,location,receipt_date,qty_available,rate,department',
-    filters: filters,
-    order: 'receipt_date.asc,created_at.asc'
-  }, 1000, 1000000) || [];
-
-  const out = {};
-  lots.forEach(function(lot) {
-    const itemId = String(lot.item_id || '').trim();
-    if (hasAllowedIds && !allowedIds[itemId]) return;
-    const meta = itemById[itemId] || {};
-    const code = _invNormalizeStockItemCode_(meta.item_code || lot.item_code);
-    if (!code) return;
-    const loc = String(lot.location || locationFilter || DEFAULT_LOCATION || 'MAIN').trim().toUpperCase() || 'MAIN';
-    if (locationFilter && loc !== locationFilter.toUpperCase()) return;
-    const key = code + '|' + loc;
-    if (!out[key]) {
-      out[key] = {
-        itemCode: meta.item_code || lot.item_code || '',
-        itemName: meta.item_name || '',
-        category: meta.category || '',
-        department: meta.department || lot.department || '',
-        uom: meta.uom || '',
-        location: loc,
-        qty: 0,
-        value: 0,
-        oldestReceiptAt: '',
-        nextBatchNo: '',
-        batchCount: 0
-      };
-    }
-    const qty = Number(lot.qty_available || 0);
-    const rate = Number(lot.rate || 0);
-    out[key].qty += qty;
-    out[key].value += qty * rate;
-    out[key].batchCount += 1;
-    if (!out[key].oldestReceiptAt || (lot.receipt_date && String(lot.receipt_date) < String(out[key].oldestReceiptAt))) {
-      out[key].oldestReceiptAt = lot.receipt_date || '';
-      out[key].nextBatchNo = lot.batch_no || '';
-    }
-  });
-
-  Object.keys(out).forEach(function(key) {
-    const row = out[key];
-    row.qty = Number(row.qty.toFixed(6));
-    row.value = Number(row.value.toFixed(2));
-    row.avgRate = row.qty > 0 ? Number((row.value / row.qty).toFixed(6)) : 0;
-  });
-  return out;
 }
 
 function _invReconcileStockRows_(rows, opts) {
@@ -21153,177 +21419,6 @@ function _fgDaysOld_(value) {
   const dt = new Date(value);
   if (isNaN(dt.getTime())) return null;
   return Math.max(0, Math.ceil((Date.now() - dt.getTime()) / (24 * 60 * 60 * 1000)));
-}
-
-function _fgBuildAdjustmentMap_(rows, keyField) {
-  const map = {};
-  (rows || []).forEach(function(row) {
-    const key = String(row && row[keyField] || '').trim();
-    if (!key) return;
-    if (!map[key]) {
-      map[key] = {
-        adjustedQty: 0,
-        latestReason: '',
-        latestRemarks: '',
-        latestAdjustedAt: ''
-      };
-    }
-    map[key].adjustedQty += _fgQty_(row.adjustment_qty);
-    if (!map[key].latestAdjustedAt) {
-      map[key].latestAdjustedAt = row.adjustment_date || row.created_at || '';
-      map[key].latestReason = row.reason || '';
-      map[key].latestRemarks = row.remarks || '';
-    }
-  });
-  return map;
-}
-
-function _fgBuildPackedDetailRows_() {
-  const packRows = _fgSafeSelect_('packing_records', {
-    select: 'id,so_id,so_line_id,so_number,line_no,product_code,product_name,packed_qty,packed_at',
-    filters: { packed_qty: 'gt.0' },
-    order: 'packed_at.desc',
-    limit: 5000
-  });
-  if (!packRows.length) return [];
-
-  const soLineIds = [...new Set(packRows.map(function(row) { return row.so_line_id; }).filter(Boolean))];
-  const soIds = [...new Set(packRows.map(function(row) { return row.so_id; }).filter(Boolean))];
-  const packIds = [...new Set(packRows.map(function(row) { return row.id; }).filter(Boolean))];
-  const salesOrderLines = soIds.length ? enrichSalesOrderLines(_billingLoadSalesOrderLinesBySoIds_(soIds)) : [];
-  const lineMap = {};
-  salesOrderLines.forEach(function(row) { lineMap[String(row.id)] = row; });
-
-  const salesOrders = soIds.length ? _supabaseSelectByKeyInBatches_(
-    'sales_orders',
-    'id,so_number,client_code',
-    'id',
-    soIds
-  ) : [];
-  const soMap = {};
-  salesOrders.forEach(function(row) { soMap[String(row.id)] = row; });
-  const clientMap = _billingSelectClientsByCodes_(salesOrders.map(function(row) { return row.client_code; }));
-  const usageMap = _billingGetInvoiceUsageByLineIds_(soLineIds);
-  const adjustmentMap = _fgBuildAdjustmentMap_(
-    _fgSafeSelectByKeyInBatches_(
-      'fg_stock_adjustments',
-      'pack_id,adjustment_qty,reason,remarks,adjustment_date,created_at',
-      'pack_id',
-      packIds,
-      'adjustment_date.desc,created_at.desc'
-    ),
-    'pack_id'
-  );
-
-  return packRows.map(function(row) {
-    const so = soMap[String(row.so_id)] || {};
-    const line = lineMap[String(row.so_line_id)] || {};
-    const client = clientMap[String(so.client_code || '')] || {};
-    const usage = usageMap[String(row.so_line_id)] || {};
-    const adjustment = adjustmentMap[String(row.id || '')] || {};
-    const packedQty = _fgQty_(row.packed_qty);
-    const billedQty = _fgQty_(usage.billedQty);
-    const adjustedQty = _fgQty_(adjustment.adjustedQty);
-    const availableQty = Math.max(packedQty - billedQty - adjustedQty, 0);
-    return {
-      rowId: 'PACKED::' + String(row.id || row.so_line_id || ''),
-      sourceType: 'PACKED',
-      packId: row.id || '',
-      openingId: '',
-      soId: row.so_id || '',
-      soLineId: row.so_line_id || '',
-      soNumber: row.so_number || '',
-      lineNo: row.line_no || '',
-      clientCode: so.client_code || '',
-      clientName: client.client_name || so.client_code || '',
-      productCode: line.product_code || row.product_code || '',
-      productName: line.product_name || row.product_name || '',
-      uom: line.unit || 'Pcs',
-      openingQty: 0,
-      packedQty: packedQty,
-      adjustedQty: adjustedQty,
-      availableQty: availableQty,
-      billedQty: billedQty,
-      billableQty: availableQty,
-      stockDate: row.packed_at || '',
-      stockDateLabel: _fgDateOnly_(row.packed_at),
-      ageingDays: _fgDaysOld_(row.packed_at),
-      ageingBucket: _fgAgeBucket_(_fgDaysOld_(row.packed_at)),
-      dispatchNo: '',
-      dispatchDate: '',
-      transporter: '',
-      vehicleNo: '',
-      lrNo: '',
-      adjustmentReason: adjustment.latestReason || '',
-      adjustmentRemarks: adjustment.latestRemarks || '',
-      adjustmentDate: adjustment.latestAdjustedAt || '',
-      remarks: line.product_remarks || ''
-    };
-  });
-}
-
-function _fgBuildOpeningDetailRows_() {
-  const openingRows = _fgSafeSelect_('fg_opening_stock', {
-    select: 'id,client_code,client_name,product_code,product_name,uom,opening_qty,opening_date,remarks,created_at',
-    order: 'opening_date.desc,created_at.desc',
-    limit: 5000
-  });
-  if (!openingRows.length) return [];
-
-  const openingIds = openingRows.map(function(row) { return row.id; }).filter(Boolean);
-  const adjustmentMap = _fgBuildAdjustmentMap_(
-    _fgSafeSelectByKeyInBatches_(
-      'fg_stock_adjustments',
-      'opening_id,adjustment_qty,reason,remarks,adjustment_date,created_at',
-      'opening_id',
-      openingIds,
-      'adjustment_date.desc,created_at.desc'
-    ),
-    'opening_id'
-  );
-
-  return openingRows.map(function(row) {
-    const adjustment = adjustmentMap[String(row.id)] || {};
-    const openingQty = _fgQty_(row.opening_qty);
-    const adjustedQty = _fgQty_(adjustment.adjustedQty);
-    const availableQty = Math.max(openingQty - adjustedQty, 0);
-    const stockDate = row.opening_date || row.created_at || '';
-    const ageingDays = _fgDaysOld_(stockDate);
-    return {
-      rowId: 'OPENING::' + String(row.id || ''),
-      sourceType: 'OPENING',
-      packId: '',
-      openingId: row.id || '',
-      soId: '',
-      soLineId: '',
-      soNumber: '',
-      lineNo: '',
-      clientCode: row.client_code || '',
-      clientName: row.client_name || row.client_code || '',
-      productCode: row.product_code || '',
-      productName: row.product_name || '',
-      uom: row.uom || 'Pcs',
-      openingQty: openingQty,
-      packedQty: 0,
-      adjustedQty: adjustedQty,
-      availableQty: availableQty,
-      billedQty: 0,
-      billableQty: 0,
-      stockDate: stockDate,
-      stockDateLabel: _fgDateOnly_(stockDate),
-      ageingDays: ageingDays,
-      ageingBucket: _fgAgeBucket_(ageingDays),
-      dispatchNo: '',
-      dispatchDate: '',
-      transporter: '',
-      vehicleNo: '',
-      lrNo: '',
-      adjustmentReason: adjustment.latestReason || '',
-      adjustmentRemarks: adjustment.latestRemarks || '',
-      adjustmentDate: adjustment.latestAdjustedAt || '',
-      remarks: row.remarks || ''
-    };
-  });
 }
 
 function fgGetBootstrap(token) {
@@ -23477,14 +23572,6 @@ function _billingPreviewDocumentNo_(documentType, invoiceDate) {
   });
   const seqWidth = docType === 'CHALLAN' ? 5 : 4;
   return prefix + '/' + fyLabel + '/' + String(maxSeq + 1).padStart(seqWidth, '0');
-}
-
-function _billingGenerateInvoiceNo_(invoiceDate) {
-  return _billingGenerateDocumentNo_('INVOICE', invoiceDate);
-}
-
-function _billingGenerateDeliveryChallanNo_(invoiceDate) {
-  return _billingGenerateDocumentNo_('CHALLAN', invoiceDate);
 }
 
 function _billingGenerateManualSoNumber_(invoiceDate) {
@@ -25739,32 +25826,6 @@ function _prodDateInRange_(value, dateFrom, dateTo) {
   return true;
 }
 
-function _prodMapFastViewRows_(rows) {
-  return (rows || []).map(function(row) {
-    return {
-      routingId: row.routing_id,
-      woDate: row.wo_date || '',
-      workOrderNo: row.wo_number || '',
-      soNumberDisplay: row.so_numbers || '',
-      clientName: row.client_name || '',
-      productName: row.product_names || '',
-      artworkNo: row.artwork_nos || '',
-      processName: row.process_name || '',
-      department: row.department || '',
-      sequence: row.sequence_no,
-      plannedMachine: row.planned_machine || '',
-      categoryGroup: _prodFormatCategoryGroupLabel_(row.department_category || ''),
-      expectedDelivery: row.expected_delivery || '',
-      jobPriority: row.job_priority || '',
-      plannedQty: Number(row.planned_qty || 0),
-      producedQty: Number(row.produced_qty || 0),
-      balanceQty: Number(row.balance_qty || 0),
-      status: String(row.status || 'PENDING'),
-      woId: row.wo_id
-    };
-  });
-}
-
 function _prodMapStageRowsFastViewRows_(rows) {
   return (rows || []).map(function(row) {
     return {
@@ -25915,41 +25976,6 @@ function _invAssertReceiptHeaderMetadata_(payload) {
   if ((challanNo && !challanDate) || (!challanNo && challanDate)) {
     throw new Error('Challan No and Challan Date must both be entered');
   }
-}
-
-function _invFindDuplicateVendorInvoice_(vendorName, invoiceNo, excludeIdempotencyKey) {
-  const vendor = String(vendorName || '').trim().toUpperCase();
-  const invoice = String(invoiceNo || '').trim().toUpperCase();
-  const excludeKey = String(excludeIdempotencyKey || '').trim();
-  if (!vendor || !invoice) return null;
-
-  const rows = supabaseSelect('inv_ledger', {
-    select: 'id,ref_type,ref_no,remarks,created_at',
-    filters: {
-      ref_type: _supabaseInFilter_(['PR-RECEIPT', 'PO-RECEIPT']),
-      remarks: 'ilike.%INV:' + invoice + '%'
-    },
-    order: 'created_at.desc',
-    limit: 300
-  }) || [];
-  if (!rows.length) return null;
-
-  const reversalMap = invGetReversalSummaryMap_(rows.map(function(row) { return row.id; }));
-  for (var i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    if (reversalMap[String(row.id || '')]?.reversed === true) continue;
-    const note = invParseReceiptNote_(row.remarks);
-    if (String(note.INV || '').trim().toUpperCase() !== invoice) continue;
-    if (String(note.VENDOR || '').trim().toUpperCase() !== vendor) continue;
-    if (excludeKey && String(note.IDEM || '').trim() === excludeKey) continue;
-    return {
-      receiptNo: row.id || '',
-      refType: row.ref_type || '',
-      refNo: row.ref_no || '',
-      createdAt: row.created_at || ''
-    };
-  }
-  return null;
 }
 
 function _prodExtractBoardPlyCountFromText_(value) {
@@ -26691,21 +26717,6 @@ function prodGetStageQueue(params, token) {
    🔧 HELPER — GET STAGE PRODUCTION TOTAL
 ================================= */
 
-function _getStageProducedTotal(routingId) {
-
-  const entries = supabaseSelect('production_entries', {
-    select: 'produced_qty,rejected_qty,ok_qty',
-    filters: { routing_id: 'eq.' + routingId }
-  }) || [];
-
-  return entries.reduce((s, e) =>
-    s + _getProductionEntryGoodQty_(e), 0);
-}
-
-function _getStageProducedTotalFromMap_(producedTotals, routingId) {
-  return Number((producedTotals || {})[String(routingId)] || 0);
-}
-
 function _getProductionEntryGoodQty_(entry) {
   const okQty = Number(entry?.ok_qty);
   if (!isNaN(okQty) && okQty >= 0) return okQty;
@@ -26851,34 +26862,6 @@ function _getStage1PlannedQtyFromSnapshot_(snapshot, wo, targetUomOverride) {
   return totalCore + waste;
 }
 
-function _getProductionUpsFactorFromSnapshot_(snapshot) {
-  const papers = Array.isArray(snapshot?.papers) ? snapshot.papers : [];
-  const jobs = Array.isArray(snapshot?.jobs) ? snapshot.jobs : [];
-  const explicitUps = jobs.reduce(function(sum, job) {
-    const ups = Number(job?.ups || job?.groupUps || 0);
-    return sum + (ups > 0 ? ups : 0);
-  }, 0);
-  if (explicitUps > 0) return explicitUps;
-
-  const totalQty = jobs.reduce(function(sum, job) {
-    return sum + Number(job?.qty || 0);
-  }, 0);
-  const totalPaperCore = papers.reduce(function(sum, paper) {
-    const coreSheets = Number(
-      paper?.coreSheets ??
-      paper?.sheets ??
-      0
-    );
-    return sum + (coreSheets > 0 ? coreSheets : 0);
-  }, 0);
-  if (totalQty > 0 && totalPaperCore > 0) return totalQty / totalPaperCore;
-  const totalCore = jobs.reduce(function(sum, job) {
-    return sum + Number(job?.coreSheets || 0);
-  }, 0);
-  if (totalQty > 0 && totalCore > 0) return totalQty / totalCore;
-  return 1;
-}
-
 function _isSheetBasedProductionStage_(routingRow) {
   const name = String(routingRow?.process_name || routingRow?.department || '').trim().toUpperCase();
   if (!name) return false;
@@ -26945,19 +26928,6 @@ function _prodPlanUnitForProductionStage_(routingRow, categoryGroup) {
     return _prodNormalizeCategoryGroup_(categoryGroup) === 'FLEXO' ? 'RM' : 'SHEETS';
   }
   return 'UNITS';
-}
-
-function _prodFlexoPcsFromRunningMeter_(runningMeterQty, pcsQty, snapshot) {
-  const rm = Number(runningMeterQty || 0);
-  const pcs = Number(pcsQty || 0);
-  const totalRm = Number(
-    snapshot?.flexoDetails?.totalRunningMeter ||
-    snapshot?.flexoDetails?.baseRunningMeter ||
-    0
-  );
-  if (!(rm > 0) || !(pcs > 0)) return 0;
-  if (!(totalRm > 0)) return pcs;
-  return Math.round((rm * pcs) / totalRm);
 }
 
 function _prodLastFlexoRmCarryQty_(routingList, currentIndex, combinedTotals, categoryGroup) {
@@ -27385,40 +27355,6 @@ function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWo
    🔧 HELPER — GET STAGE PLANNED QTY
 ================================= */
 
-function _getStagePlannedQtyFromMaps_(routingRow, prevStageRow, workOrderMap, producedTotals) {
-  const wo = (workOrderMap || {})[String(routingRow.wo_id)];
-
-  if (!wo)
-    return 0;
-
-  const snapshot = wo.snapshot_json || {};
-  const categoryGroup = _prodExtractCategoryGroupFromSnapshot_(snapshot);
-  const stage1Plan = _getStage1PlannedQtyFromSnapshot_(
-    snapshot,
-    wo,
-    _isInspectionSlittingProductionStage_(routingRow) ? 'RM' : ''
-  );
-
-  if (routingRow.sequence_no === 1) {
-    return stage1Plan;
-  }
-
-  if (!prevStageRow)
-    return 0;
-
-  const prevGoodQty = _getStageProducedTotalFromMap_(producedTotals, prevStageRow.id);
-  if (_isFlexoOfflineDieCutProductionStage_(routingRow, categoryGroup)) return prevGoodQty;
-  if (_isSheetBasedProductionStage_(routingRow)) {
-    return prevGoodQty;
-  }
-  if (_isSheetBasedProductionStage_(prevStageRow)) {
-    const upsFactor = _getProductionUpsFactorFromSnapshot_(snapshot);
-    return Math.round(prevGoodQty * (upsFactor > 0 ? upsFactor : 1));
-  }
-
-  return prevGoodQty;
-}
-
 
 /* ==============================
    2️⃣ PRODUCTION BOARD — PROCESS MODE
@@ -27445,96 +27381,6 @@ function _selectInBatches_(table, select, key, values, order) {
     out.push.apply(out, rows);
   });
   return out;
-}
-
-function _getProducedTotalsMapForRoutingIds_(routingIds) {
-  const ids = Array.isArray(routingIds) ? routingIds.filter(Boolean) : [];
-  if (!ids.length) return { grossTotals: {}, okTotals: {} };
-
-  const rows = _selectInBatches_(
-    'production_entries',
-    'routing_id,produced_qty,rejected_qty,ok_qty',
-    'routing_id',
-    ids
-  );
-
-  const grossTotals = {};
-  const okTotals = {};
-  rows.forEach(function(row) {
-    const key = String(row.routing_id);
-    grossTotals[key] = (grossTotals[key] || 0) + _getProductionEntryGrossQty_(row);
-    okTotals[key] = (okTotals[key] || 0) + _getProductionEntryGoodQty_(row);
-  });
-  return {
-    grossTotals: grossTotals,
-    okTotals: okTotals
-  };
-}
-
-function _buildProductionBoardRows_(rows) {
-  const boardRows = Array.isArray(rows) ? rows : [];
-  if (!boardRows.length) return [];
-
-  const woIds = [...new Set(boardRows.map(function(row){ return row.wo_id; }).filter(Boolean))];
-  const workOrders = _selectInBatches_(
-    'work_orders',
-    'id,snapshot_json',
-    'id',
-    woIds
-  );
-  const workOrderMap = {};
-  workOrders.forEach(function(row) {
-    workOrderMap[String(row.id)] = row;
-  });
-
-  const allRoutingRows = _selectInBatches_(
-    'work_order_routing',
-    'id,wo_id,sequence_no,status',
-    'wo_id',
-    woIds
-  );
-  const prevStageMap = {};
-  const routingById = {};
-  allRoutingRows.forEach(function(row) {
-    prevStageMap[String(row.wo_id) + '||' + String(row.sequence_no)] = row;
-    routingById[String(row.id)] = row;
-  });
-
-  const producedTotals = _getProducedTotalsMapForRoutingIds_(allRoutingRows.map(function(row) {
-    return row.id;
-  }));
-  const producedGrossTotals = producedTotals.grossTotals || {};
-  const producedOkTotals = producedTotals.okTotals || {};
-
-  return boardRows.map(function(r) {
-    const prevStage = prevStageMap[String(r.wo_id) + '||' + String(Number(r.sequence_no || 0) - 1)] || null;
-    const planned = _getStagePlannedQtyFromMaps_(r, prevStage, workOrderMap, producedOkTotals);
-    const produced = _getStageProducedTotalFromMap_(producedGrossTotals, r.routing_id);
-    const balance = Math.max(planned - produced, 0);
-    const routingStatus = String(routingById[String(r.routing_id)]?.status || '').toUpperCase();
-    const status = routingStatus === 'SHORT_CLOSED'
-      ? 'SHORT_CLOSED'
-      : (routingStatus === 'HOLD'
-        ? 'HOLD'
-        : (planned <= 0 && produced <= 0
-          ? 'PENDING'
-          : (balance <= 0 ? 'COMPLETED' : (produced > 0 ? 'IN_PROGRESS' : 'PENDING'))));
-
-    return {
-      routingId: r.routing_id,
-      workOrderNo: r.wo_number,
-      artworkNo: r.artwork_no,
-      clientName: r.client_name,
-      processName: r.process_name,
-      department: r.department,
-      plannedMachine: r.planned_machine,
-      sequence: r.sequence_no,
-      plannedQty: planned,
-      producedQty: produced,
-      balanceQty: balance,
-      status: status
-    };
-  });
 }
 
 /* ==============================
@@ -28935,6 +28781,21 @@ this.adminUpdateUser = adminUpdateUser;
 this.adminResetUserPassword = adminResetUserPassword;
 this.adminListPermissions = adminListPermissions;
 this.adminSaveRolePermissions = adminSaveRolePermissions;
+this.checklistGetMyTasks = checklistGetMyTasks;
+this.checklistMarkDone = checklistMarkDone;
+this.checklistGetBlockingStatus = checklistGetBlockingStatus;
+this.checklistGenerateInstances = checklistGenerateInstances;
+this.adminChecklistListTemplates = adminChecklistListTemplates;
+this.adminChecklistCreateTemplate = adminChecklistCreateTemplate;
+this.adminChecklistUpdateFromDate = adminChecklistUpdateFromDate;
+this.adminChecklistAssignTasksToUser = adminChecklistAssignTasksToUser;
+this.adminChecklistListAssignments = adminChecklistListAssignments;
+this.adminChecklistDeactivateAssignment = adminChecklistDeactivateAssignment;
+this.adminChecklistDashboard = adminChecklistDashboard;
+this.adminChecklistGetCalendar = adminChecklistGetCalendar;
+this.adminChecklistSaveWeeklyOffs = adminChecklistSaveWeeklyOffs;
+this.adminChecklistAddHoliday = adminChecklistAddHoliday;
+this.adminChecklistDeactivateHoliday = adminChecklistDeactivateHoliday;
 this.getSessionUser = getSessionUser;
 this.changeOwnPassword = changeOwnPassword;
 this.logout = logout;
@@ -29216,39 +29077,6 @@ function _reportsApplyDateFilterToQuery_(filters, columnName) {
   return {};
 }
 
-function _reportsIsoFromFilterParts_(dateText, timeText, isEnd) {
-  const dateKey = String(dateText || '').trim();
-  if (!dateKey) return '';
-  const timeKey = String(timeText || '').trim() || (isEnd ? '23:59' : '00:00');
-  const normalizedTime = timeKey.length === 5 ? (timeKey + ':00') : timeKey;
-  return dateKey + 'T' + normalizedTime;
-}
-
-function _reportsApplyDateTimeFilterToQuery_(filters, columnName) {
-  const f = filters || {};
-  if (f.pendingOnly) return {};
-  const key = String(columnName || '').trim();
-  if (!key) return {};
-  const fromIso = _reportsIsoFromFilterParts_(f.fromDate, '', false);
-  const toIso = _reportsIsoFromFilterParts_(f.toDate, '', true);
-  if (fromIso && toIso) {
-    const out = {};
-    out.and = '(' + key + '.gte.' + fromIso + ',' + key + '.lte.' + toIso + ')';
-    return out;
-  }
-  if (fromIso) {
-    const out = {};
-    out[key] = 'gte.' + fromIso;
-    return out;
-  }
-  if (toIso) {
-    const out = {};
-    out[key] = 'lte.' + toIso;
-    return out;
-  }
-  return {};
-}
-
 function _reportsDatePasses_(value, filters) {
   if (!value) return !filters.fromDate && !filters.toDate;
   if (filters.pendingOnly) return true;
@@ -29256,24 +29084,6 @@ function _reportsDatePasses_(value, filters) {
   if (!key) return false;
   if (filters.fromDate && key < filters.fromDate) return false;
   if (filters.toDate && key > filters.toDate) return false;
-  return true;
-}
-
-function _reportsDateTimePasses_(value, filters) {
-  if (!value) return !filters.fromDate && !filters.toDate;
-  if (filters.pendingOnly) return true;
-  const valueTs = new Date(value).getTime();
-  if (isNaN(valueTs)) return false;
-  const fromIso = _reportsIsoFromFilterParts_(filters.fromDate, '', false);
-  const toIso = _reportsIsoFromFilterParts_(filters.toDate, '', true);
-  if (fromIso) {
-    const fromTs = new Date(fromIso).getTime();
-    if (!isNaN(fromTs) && valueTs < fromTs) return false;
-  }
-  if (toIso) {
-    const toTs = new Date(toIso).getTime();
-    if (!isNaN(toTs) && valueTs > toTs) return false;
-  }
   return true;
 }
 
@@ -31328,15 +31138,6 @@ function _reportsProductionNOPRows_(filters, fromDate, toDate) {
   });
 }
 
-function _reportsProductionNOPPeriodLabel_(fromDate, toDate) {
-  const from = String(fromDate || '').trim();
-  const to = String(toDate || '').trim();
-  if (from && to) return from + ' to ' + to;
-  if (from) return 'From ' + from;
-  if (to) return 'Till ' + to;
-  return 'All Dates';
-}
-
 function _reportsProductionNOPMachineStandards_() {
   return [
     { key:'SM74', machine:'Heidelberg SM74', target:4125 },
@@ -31387,129 +31188,6 @@ function _reportsProductionNOPWeekStartDateKey_(dateKey) {
   const startDay = day <= 7 ? 1 : (day <= 14 ? 8 : (day <= 21 ? 15 : 22));
   dt.setDate(startDay);
   return Utilities.formatDate(dt, Session.getScriptTimeZone(), 'yyyy-MM-dd');
-}
-
-function _reportsProductionNOPWeekBucket_(dateKey) {
-  const raw = String(dateKey || '').trim();
-  const dt = raw ? new Date(raw + 'T00:00:00') : null;
-  if (!dt || isNaN(dt.getTime())) {
-    return { key: 'unknown', label: 'Unknown', sort: '9999-99-99' };
-  }
-  const day = dt.getDate();
-  const startDay = day <= 7 ? 1 : (day <= 14 ? 8 : (day <= 21 ? 15 : 22));
-  const endLabel = startDay === 22 ? 'EOM' : String(startDay + 6).padStart(2, '0');
-  const monthKey = Utilities.formatDate(dt, Session.getScriptTimeZone(), 'yyyy-MM');
-  const startLabel = String(startDay).padStart(2, '0');
-  return {
-    key: monthKey + '-' + startLabel,
-    label: startLabel + ' to ' + endLabel,
-    sort: monthKey + '-' + startLabel
-  };
-}
-
-function _reportsProductionNOPRollup_(rows, groupFn) {
-  const groups = {};
-  (rows || []).forEach(function(row) {
-    const group = groupFn(row);
-    const key = group.key + '||' + row.machineKey;
-    if (!groups[key]) {
-      groups[key] = {
-        period: group.label,
-        periodSort: group.sort || group.label,
-        machineKey: row.machineKey || '',
-        machine: row.machine || '',
-        operatorNames: [],
-        downtimeReasons: [],
-        days: {},
-        workingHours: 0,
-        downtimeHours: 0,
-        makeReadyJobs: 0,
-        totalMakeReadyHours: 0,
-        actualRunningHours: 0,
-        targetHourlyOutput: row.targetHourlyOutput,
-        targetProduction: 0,
-        actualProduction: 0
-      };
-    }
-    const out = groups[key];
-    if (row.operatorNames) {
-      String(row.operatorNames).split(',').forEach(function(item) {
-        const value = String(item || '').trim();
-        if (value && out.operatorNames.indexOf(value) === -1) out.operatorNames.push(value);
-      });
-    }
-    if (row.downtimeReasons) {
-      String(row.downtimeReasons).split(',').forEach(function(item) {
-        const value = String(item || '').trim();
-        if (value && out.downtimeReasons.indexOf(value) === -1) out.downtimeReasons.push(value);
-      });
-    }
-    if (row.productionDate) out.days[row.productionDate] = true;
-    out.workingHours += _reportsSafeNumber_(row.workingHours);
-    out.downtimeHours += _reportsSafeNumber_(row.downtimeHours);
-    out.makeReadyJobs += _reportsSafeNumber_(row.makeReadyJobs);
-    out.totalMakeReadyHours += _reportsSafeNumber_(row.totalMakeReadyHours);
-    out.actualRunningHours += _reportsSafeNumber_(row.actualRunningHours);
-    out.targetProduction += _reportsSafeNumber_(row.targetProduction);
-    out.actualProduction += _reportsSafeNumber_(row.actualProduction);
-    if (!out.targetHourlyOutput && row.targetHourlyOutput) out.targetHourlyOutput = row.targetHourlyOutput;
-  });
-
-  return Object.keys(groups).map(function(key) {
-    const row = groups[key];
-    const actualNop = row.actualRunningHours > 0 ? row.actualProduction / row.actualRunningHours : 0;
-    const targetNop = row.actualRunningHours > 0 && row.targetProduction > 0
-      ? row.targetProduction / row.actualRunningHours
-      : row.targetHourlyOutput;
-    const achievement = row.targetProduction > 0 ? (row.actualProduction / row.targetProduction) * 100 : 0;
-    return {
-      period: row.period,
-      periodSort: row.periodSort,
-      machine: row.machine,
-      operatorNames: row.operatorNames.join(', '),
-      days: Object.keys(row.days).length,
-      workingHours: Math.round(row.workingHours * 100) / 100,
-      downtimeHours: Math.round(row.downtimeHours * 100) / 100,
-      makeReadyJobs: row.makeReadyJobs,
-      totalMakeReadyHours: Math.round(row.totalMakeReadyHours * 100) / 100,
-      actualRunningHours: Math.round(row.actualRunningHours * 100) / 100,
-      targetHourlyOutput: Math.round(targetNop * 100) / 100,
-      targetProduction: Math.round(row.targetProduction * 100) / 100,
-      actualProduction: Math.round(row.actualProduction * 100) / 100,
-      actualNop: Math.round(actualNop * 100) / 100,
-      nopDeviation: Math.round((actualNop - targetNop) * 100) / 100,
-      nopAchievementPct: Math.round(achievement * 100) / 100,
-      downtimeReasons: row.downtimeReasons.join(', '),
-      performanceStatus: targetNop <= 0 ? 'NO_TARGET' : (actualNop >= targetNop ? 'ON_TARGET' : 'BELOW_TARGET')
-    };
-  }).sort(function(a, b) {
-    return String(a.periodSort || '').localeCompare(String(b.periodSort || '')) ||
-      String(a.machine || '').localeCompare(String(b.machine || ''));
-  });
-}
-
-function _reportsProductionNOPColumns_(includePeriod) {
-  const cols = [];
-  if (includePeriod) cols.push({ key:'period', label:'Period' });
-  cols.push(
-    { key:'machine', label:'Machine' },
-    { key:'operatorNames', label:'Operator Name' },
-    { key:'days', label:'Days', type:'number' },
-    { key:'workingHours', label:'Working Hours', type:'number' },
-    { key:'downtimeHours', label:'Downtime Hours', type:'number' },
-    { key:'makeReadyJobs', label:'Make Ready Jobs', type:'number' },
-    { key:'totalMakeReadyHours', label:'Make Ready Hours', type:'number' },
-    { key:'actualRunningHours', label:'Actual Running Hours', type:'number' },
-    { key:'targetHourlyOutput', label:'Target NOP / Hr', type:'number' },
-    { key:'targetProduction', label:'Target Production', type:'number' },
-    { key:'actualProduction', label:'Actual Production', type:'number' },
-    { key:'actualNop', label:'Actual NOP / Hr', type:'number' },
-    { key:'nopDeviation', label:'Deviation', type:'number' },
-    { key:'nopAchievementPct', label:'Achievement %', type:'number' },
-    { key:'performanceStatus', label:'Status', type:'status' },
-    { key:'downtimeReasons', label:'Downtime Reasons' }
-  );
-  return cols;
 }
 
 function _reportsProductionNOPActualByMachine_(rows) {
@@ -32619,407 +32297,8 @@ this.reportsGetSectionData = reportsGetSectionData;
 this.reportsExportWorkbookXlsx = reportsExportWorkbookXlsx;
 
 // ===== DEDICATED PLANNING MODULE =====
-function _planningNormalizeFilters_(params) {
-  const p = params || {};
-  return {
-    fromDate: String(p.fromDate || '').trim(),
-    toDate: String(p.toDate || '').trim(),
-    pendingOnly: false,
-    q: String(p.q || '').trim().toLowerCase(),
-    status: String(p.status || '').trim().toLowerCase(),
-    includeClosed: p.includeClosed === true
-  };
-}
-
 function _planningCompositeKey_(soNumber, lineNo) {
   return String(soNumber || '').trim() + '||' + String(lineNo == null ? '' : lineNo).trim();
-}
-
-function _planningStageLabel_(stageKey) {
-  const key = String(stageKey || '').trim().toUpperCase();
-  if (key === 'SALES_APPROVAL') return 'Sales Approval';
-  if (key === 'ARTWORK') return 'Artwork';
-  if (key === 'WO_ROUTING') return 'WO / Routing';
-  if (key === 'PRODUCTION') return 'Production';
-  if (key === 'PACKING') return 'Packing';
-  if (key === 'DISPATCH') return 'Dispatch';
-  if (key === 'BILLING') return 'Billing';
-  if (key === 'HOLD') return 'Hold';
-  if (key === 'CLOSED') return 'Closed';
-  return key || 'Unknown';
-}
-
-function _planningIsHeaderClosed_(status) {
-  const value = String(status || '').trim().toUpperCase();
-  return value === 'CLOSED' || value === 'CANCELLED';
-}
-
-function _planningBlockingStageKey_(row) {
-  const headerStatus = String(row.headerStatus || '').trim().toUpperCase();
-  if (headerStatus === 'CLOSED' || headerStatus === 'CANCELLED') return 'CLOSED';
-  if (headerStatus === 'HOLD' || row.holdFlag === true) return 'HOLD';
-  if (String(row.salesApprovalStatus || '').toUpperCase() !== 'APPROVED') return 'SALES_APPROVAL';
-  if (String(row.artworkStatus || '').toUpperCase() !== 'APPROVED') return 'ARTWORK';
-  if (_reportsSafeNumber_(row.woCount) <= 0 || String(row.routingStatus || '').toUpperCase() !== 'MARKED') return 'WO_ROUTING';
-  if (_reportsSafeNumber_(row.productionPendingQty) > 0) return 'PRODUCTION';
-  if (_reportsSafeNumber_(row.packingPendingQty) > 0) return 'PACKING';
-  if (_reportsSafeNumber_(row.dispatchPendingQty) > 0) return 'DISPATCH';
-  if (String(row.billingStatus || '').toUpperCase() !== 'CLOSED') return 'BILLING';
-  return 'CLOSED';
-}
-
-function _planningBlockingStatus_(row) {
-  const stageKey = _planningBlockingStageKey_(row);
-  if (stageKey === 'SALES_APPROVAL') {
-    const parts = [];
-    if (String(row.accountsStatus || '').toUpperCase() !== 'APPROVED') parts.push('Accounts');
-    if (String(row.businessStatus || '').toUpperCase() !== 'APPROVED') parts.push('Business');
-    if (String(row.salesApprovalStatus || '').toUpperCase() !== 'APPROVED') parts.push(row.salesApprovalStatus || 'Pending');
-    return parts.join(' / ') || 'Pending';
-  }
-  if (stageKey === 'ARTWORK') {
-    const tooling = [];
-    if (String(row.plateStatus || '').toUpperCase() && String(row.plateStatus || '').toUpperCase() !== 'RECEIVED') tooling.push('Plate ' + (row.plateStatus || 'Pending'));
-    if (String(row.dieStatus || '').toUpperCase() && String(row.dieStatus || '').toUpperCase() !== 'RECEIVED') tooling.push('Die ' + (row.dieStatus || 'Pending'));
-    return tooling.length ? tooling.join(' / ') : (row.artworkStatus || 'Pending');
-  }
-  if (stageKey === 'WO_ROUTING') {
-    return _reportsSafeNumber_(row.woCount) <= 0 ? 'WO Pending' : (row.routingStatus || 'Routing Pending');
-  }
-  if (stageKey === 'PRODUCTION') return row.productionStatus || row.currentStageStatus || 'PENDING';
-  if (stageKey === 'PACKING') return row.packingStatus || 'PENDING';
-  if (stageKey === 'DISPATCH') return row.dispatchStatus || 'PENDING';
-  if (stageKey === 'BILLING') return row.billingStatus || 'PENDING';
-  if (stageKey === 'HOLD') return 'HOLD';
-  return row.headerStatus || 'CLOSED';
-}
-
-function _planningBlockingPendingQty_(row) {
-  const stageKey = _planningBlockingStageKey_(row);
-  if (stageKey === 'PRODUCTION') return _reportsSafeNumber_(row.productionPendingQty);
-  if (stageKey === 'PACKING') return _reportsSafeNumber_(row.packingPendingQty);
-  if (stageKey === 'DISPATCH') return _reportsSafeNumber_(row.dispatchPendingQty);
-  if (stageKey === 'BILLING') {
-    const explicitPending = _reportsSafeNumber_(row.billingPendingQty);
-    if (explicitPending > 0) return explicitPending;
-    return Math.max(_reportsSafeNumber_(row.orderQty) - _reportsSafeNumber_(row.billedQty), 0);
-  }
-  if (stageKey === 'CLOSED') return 0;
-  return _reportsSafeNumber_(row.orderQty);
-}
-
-function _planningBlockingUpdatedAt_(row) {
-  const stageKey = _planningBlockingStageKey_(row);
-  if (stageKey === 'SALES_APPROVAL') return row.salesApprovalAt || row.businessAt || row.accountsAt || row.soDateTime || row.soDate || '';
-  if (stageKey === 'ARTWORK') return row.artworkApprovedAt || row.artworkAt || row.soDateTime || row.soDate || '';
-  if (stageKey === 'WO_ROUTING') return row.routingMarkedAt || row.artworkApprovedAt || row.soDateTime || row.soDate || '';
-  if (stageKey === 'PRODUCTION' || stageKey === 'PACKING' || stageKey === 'DISPATCH') return row.stageLastUpdatedAt || row.routingMarkedAt || row.soDateTime || row.soDate || '';
-  if (stageKey === 'BILLING') return row.lastBilledAt || row.lastInvoiceDate || row.firstInvoiceDate || row.stageLastUpdatedAt || row.soDateTime || row.soDate || '';
-  return row.soDateTime || row.soDate || '';
-}
-
-function _planningHeaderStatusMap_(soNumbers) {
-  const list = Array.isArray(soNumbers) ? soNumbers.filter(Boolean) : [];
-  if (!list.length) return {};
-  const rows = _supabaseSelectByKeyInBatches_(
-    'sales_orders',
-    'so_number,status',
-    'so_number',
-    [...new Set(list)],
-    'so_number.asc',
-    80
-  ) || [];
-  const map = {};
-  rows.forEach(function(row) {
-    map[String(row.so_number || '').trim()] = String(row.status || '').trim().toUpperCase() || 'OPEN';
-  });
-  return map;
-}
-
-function _planningMergedRows_(params, token) {
-  _reportsRequireSession_(token);
-  const filters = _planningNormalizeFilters_(params);
-  const cacheKey = _reportsCacheKey_('PLANNING_MERGED', { filters: filters || {} });
-  const cached = _getCachedJson_(cacheKey);
-  if (cached) return cached;
-  const baseFilters = Object.assign({}, filters, { q: '', status: '', pendingOnly: false });
-  const planningRows = _reportsPlanningRows_(baseFilters);
-  if (!planningRows.length) return [];
-
-  const soNumbers = [...new Set(planningRows.map(function(row) { return row.soNumber; }).filter(Boolean))];
-  const headerStatusMap = _planningHeaderStatusMap_(soNumbers);
-  const opsRows = _opsEnrichChunkRows_(_opsLoadLifecycleRows_({ stageFocus: 'ALL', quickFilter: 'ALL', q: '' }));
-  const opsMap = {};
-  (opsRows || []).forEach(function(row) {
-    opsMap[_planningCompositeKey_(row.soNumber, row.lineNo)] = row;
-  });
-
-  const result = planningRows.map(function(src) {
-    const row = Object.assign({}, src || {});
-    const ops = opsMap[_planningCompositeKey_(row.soNumber, row.lineNo)] || {};
-    row.headerStatus = headerStatusMap[String(row.soNumber || '').trim()] || 'OPEN';
-    row.producedQty = _reportsSafeNumber_(ops.producedQty);
-    row.packedQty = _reportsSafeNumber_(ops.packedQty);
-    row.dispatchedQty = _reportsSafeNumber_(ops.dispatchedQty);
-    row.productionPendingQty = _reportsSafeNumber_(ops.productionPendingQty);
-    row.packingPendingQty = _reportsSafeNumber_(ops.packingPendingQty);
-    row.dispatchPendingQty = _reportsSafeNumber_(ops.dispatchPendingQty);
-    row.productionStatus = ops.productionStatus || '';
-    row.packingStatus = ops.packingStatus || '';
-    row.dispatchStatus = ops.dispatchStatus || '';
-    row.overallOpsStatus = ops.overallStatus || '';
-    row.holdFlag = ops.holdFlag === true || String(row.headerStatus || '').toUpperCase() === 'HOLD';
-    row.blockingStageKey = _planningBlockingStageKey_(row);
-    row.blockingStage = _planningStageLabel_(row.blockingStageKey);
-    row.blockingStatus = _planningBlockingStatus_(row);
-    row.blockingPendingQty = _planningBlockingPendingQty_(row);
-    row.blockingUpdatedAt = _planningBlockingUpdatedAt_(row);
-    row.ageingDays = _reportsDateDiffDays_(row.soDateTime || row.soDate || '');
-    row.overdueDays = _reportsDateDiffDays_(row.finalDelivery || row.expectedDelivery || '');
-    row.actionLabel = String(row.headerStatus || '').toUpperCase() === 'CLOSED' ? 'Reopen SO' : 'Close SO';
-    row.actionTargetStatus = String(row.headerStatus || '').toUpperCase() === 'CLOSED' ? 'OPEN' : 'CLOSED';
-    row.actionEnabled = String(row.headerStatus || '').toUpperCase() !== 'CANCELLED';
-    row.actionTone = String(row.headerStatus || '').toUpperCase() === 'CLOSED' ? 'secondary' : 'danger';
-    return row;
-  }).filter(function(row) {
-    if (String(row.headerStatus || '').toUpperCase() === 'CANCELLED') return false;
-    if (!filters.includeClosed && _planningIsHeaderClosed_(row.headerStatus)) return false;
-    return _reportsTextPasses_(row, filters, [
-      'soNumber',
-      'lineNo',
-      'clientName',
-      'productCode',
-      'productName',
-      'salesRep',
-      'artworkNo',
-      'woNumbers',
-      'routingSteps',
-      'stageSummary',
-      'invoiceNos',
-      'blockingStage',
-      'blockingStatus',
-      'headerStatus'
-    ]) && _reportsStatusPasses_(row, filters, [
-      'headerStatus',
-      'salesApprovalStatus',
-      'accountsStatus',
-      'businessStatus',
-      'artworkStatus',
-      'routingStatus',
-      'currentStageStatus',
-      'billingStatus',
-      'plateStatus',
-      'dieStatus',
-      'productionStatus',
-      'packingStatus',
-      'dispatchStatus',
-      'blockingStage',
-      'blockingStatus'
-    ]);
-  });
-
-  _putCachedJson_(cacheKey, result, 90);
-  return result;
-}
-
-function _planningSectionOpenOrders_(params, token) {
-  const rows = _planningMergedRows_(params, token);
-  const uniqueOrders = {};
-  let closedOrders = 0;
-  rows.forEach(function(row) {
-    const soNumber = String(row.soNumber || '').trim();
-    if (!soNumber) return;
-    if (!uniqueOrders[soNumber]) uniqueOrders[soNumber] = String(row.headerStatus || '').toUpperCase();
-  });
-  Object.keys(uniqueOrders).forEach(function(soNumber) {
-    if (String(uniqueOrders[soNumber] || '').toUpperCase() === 'CLOSED') closedOrders += 1;
-  });
-
-  return {
-    ok: true,
-    title: 'Open Sales Orders',
-    metrics: {
-      salesOrders: Object.keys(uniqueOrders).length,
-      totalLines: rows.length,
-      activeLines: rows.filter(function(row) { return !_planningIsHeaderClosed_(row.headerStatus); }).length,
-      holdLines: rows.filter(function(row) { return row.blockingStageKey === 'HOLD'; }).length,
-      billingPendingLines: rows.filter(function(row) { return row.blockingStageKey === 'BILLING'; }).length,
-      closedOrders: closedOrders
-    },
-    tables: [{
-      key: 'openOrders',
-      title: 'Planning Order Book',
-      subtitle: 'Same planning visibility as Reports & MIS with close / reopen control at the sales-order level.',
-      minWidth: 4300,
-      columns: [
-        { key:'actionLabel', label:'Action', type:'action', filterable:false },
-        { key:'headerStatus', label:'SO Status', type:'status' },
-        { key:'blockingStage', label:'Blocking Stage', type:'status' },
-        { key:'blockingStatus', label:'Blocking Detail', type:'status' },
-        { key:'blockingPendingQty', label:'Blocking Qty', type:'number' },
-        { key:'soNumber', label:'SO No' },
-        { key:'lineNo', label:'Line' },
-        { key:'soDate', label:'SO Date', type:'date' },
-        { key:'soTime', label:'SO Time' },
-        { key:'salesRep', label:'Sales Rep' },
-        { key:'clientName', label:'Client' },
-        { key:'productCode', label:'Product Code' },
-        { key:'productName', label:'Product' },
-        { key:'category', label:'Category' },
-        { key:'orderQty', label:'Order Qty', type:'number' },
-        { key:'unit', label:'Unit' },
-        { key:'rate', label:'Rate', type:'money' },
-        { key:'expectedDelivery', label:'Expected Delivery', type:'date' },
-        { key:'finalDelivery', label:'Final Delivery', type:'date' },
-        { key:'accountsStatus', label:'Accounts Approval', type:'status' },
-        { key:'accountsAt', label:'Accounts Time', type:'datetime' },
-        { key:'businessStatus', label:'Business Approval', type:'status' },
-        { key:'businessAt', label:'Business Time', type:'datetime' },
-        { key:'salesApprovalStatus', label:'SO Approval', type:'status' },
-        { key:'salesApprovalAt', label:'SO Approval Time', type:'datetime' },
-        { key:'artworkNo', label:'Artwork No' },
-        { key:'productType', label:'Artwork Type' },
-        { key:'plateStatus', label:'Plate', type:'status' },
-        { key:'dieStatus', label:'Die', type:'status' },
-        { key:'artworkStatus', label:'Artwork Approval', type:'status' },
-        { key:'artworkAt', label:'Artwork Created', type:'datetime' },
-        { key:'artworkApprovedAt', label:'Artwork Approval Time', type:'datetime' },
-        { key:'woCount', label:'WO Count', type:'number' },
-        { key:'woNumbers', label:'WO Nos' },
-        { key:'routingCount', label:'Routing Rows', type:'number' },
-        { key:'routingStatus', label:'Routing Marked', type:'status' },
-        { key:'routingMarkedAt', label:'Routing Marked Time', type:'datetime' },
-        { key:'routingSteps', label:'Routing Steps' },
-        { key:'productionPendingQty', label:'Production Pending', type:'number' },
-        { key:'packingPendingQty', label:'Packing Pending', type:'number' },
-        { key:'dispatchPendingQty', label:'Dispatch Pending', type:'number' },
-        { key:'currentStage', label:'Current Stage' },
-        { key:'currentStageStatus', label:'Stage Status', type:'status' },
-        { key:'stageLastUpdatedAt', label:'Stage Update Time', type:'datetime' },
-        { key:'stageSummary', label:'Stage Qty Update' },
-        { key:'billingStatus', label:'Billing Status', type:'status' },
-        { key:'billedQty', label:'Billed Qty', type:'number' },
-        { key:'billingPendingQty', label:'Billing Pending Qty', type:'number' },
-        { key:'invoiceCount', label:'Invoice Count', type:'number' },
-        { key:'invoiceNos', label:'Invoice Nos' },
-        { key:'invoiceDates', label:'Invoice Dates' },
-        { key:'firstInvoiceDate', label:'First Invoice Date', type:'date' },
-        { key:'lastInvoiceDate', label:'Last Invoice Date', type:'date' },
-        { key:'lastBilledAt', label:'Last Billing Time', type:'datetime' }
-      ],
-      rows: rows
-    }]
-  };
-}
-
-function _planningSectionStageWise_(params, token) {
-  const rows = _planningMergedRows_(params, token).filter(function(row) {
-    return !_planningIsHeaderClosed_(row.headerStatus) && row.blockingStageKey !== 'CLOSED';
-  });
-  const summaryOrder = ['SALES_APPROVAL', 'ARTWORK', 'WO_ROUTING', 'PRODUCTION', 'PACKING', 'DISPATCH', 'BILLING', 'HOLD'];
-  const summaryRows = summaryOrder.map(function(stageKey) {
-    const stageRows = rows.filter(function(row) { return row.blockingStageKey === stageKey; });
-    const orderSet = {};
-    stageRows.forEach(function(row) {
-      if (row.soNumber) orderSet[row.soNumber] = true;
-    });
-    return {
-      stage: _planningStageLabel_(stageKey),
-      lineCount: stageRows.length,
-      orderCount: Object.keys(orderSet).length,
-      pendingQty: stageRows.reduce(function(sum, row) { return sum + _reportsSafeNumber_(row.blockingPendingQty); }, 0),
-      overdueLines: stageRows.filter(function(row) { return _reportsSafeNumber_(row.overdueDays) > 0; }).length,
-      oldestAgeingDays: stageRows.reduce(function(maxAge, row) {
-        return Math.max(maxAge, _reportsSafeNumber_(row.ageingDays));
-      }, 0)
-    };
-  }).filter(function(row) {
-    return row.lineCount > 0;
-  });
-
-  const detailRows = rows.map(function(row) {
-    return {
-      stage: row.blockingStage,
-      stageStatus: row.blockingStatus,
-      soStatus: row.headerStatus,
-      soNumber: row.soNumber,
-      lineNo: row.lineNo,
-      clientName: row.clientName,
-      salesRep: row.salesRep,
-      productCode: row.productCode,
-      productName: row.productName,
-      orderQty: _reportsSafeNumber_(row.orderQty),
-      pendingQty: _reportsSafeNumber_(row.blockingPendingQty),
-      expectedDelivery: row.expectedDelivery,
-      finalDelivery: row.finalDelivery,
-      ageingDays: _reportsSafeNumber_(row.ageingDays),
-      overdueDays: _reportsSafeNumber_(row.overdueDays),
-      lastUpdatedAt: row.blockingUpdatedAt,
-      currentStage: row.currentStage || row.blockingStage,
-      billingStatus: row.billingStatus || ''
-    };
-  }).sort(function(a, b) {
-    if (String(a.stage || '') !== String(b.stage || '')) {
-      return String(a.stage || '').localeCompare(String(b.stage || ''));
-    }
-    return _reportsSafeNumber_(b.pendingQty) - _reportsSafeNumber_(a.pendingQty);
-  });
-
-  return {
-    ok: true,
-    title: 'Stage Wise Planning',
-    metrics: {
-      approvalLines: rows.filter(function(row) { return row.blockingStageKey === 'SALES_APPROVAL'; }).length,
-      artworkLines: rows.filter(function(row) { return row.blockingStageKey === 'ARTWORK'; }).length,
-      routingLines: rows.filter(function(row) { return row.blockingStageKey === 'WO_ROUTING'; }).length,
-      productionLines: rows.filter(function(row) { return row.blockingStageKey === 'PRODUCTION'; }).length,
-      packingLines: rows.filter(function(row) { return row.blockingStageKey === 'PACKING'; }).length,
-      dispatchLines: rows.filter(function(row) { return row.blockingStageKey === 'DISPATCH'; }).length,
-      billingLines: rows.filter(function(row) { return row.blockingStageKey === 'BILLING'; }).length,
-      holdLines: rows.filter(function(row) { return row.blockingStageKey === 'HOLD'; }).length
-    },
-    tables: [{
-      key: 'stageSummary',
-      title: 'Stage Summary',
-      subtitle: 'Current bottleneck stage grouped for planning review.',
-      minWidth: 1100,
-      columns: [
-        { key:'stage', label:'Stage', type:'status' },
-        { key:'orderCount', label:'Sales Orders', type:'number' },
-        { key:'lineCount', label:'Lines', type:'number' },
-        { key:'pendingQty', label:'Pending Qty', type:'number' },
-        { key:'overdueLines', label:'Overdue Lines', type:'number' },
-        { key:'oldestAgeingDays', label:'Oldest Ageing (Days)', type:'number' }
-      ],
-      rows: summaryRows
-    },{
-      key: 'stageDetails',
-      title: 'Stage Pendency Detail',
-      subtitle: 'Line-wise current pending stage so planning can be aligned to the next bottleneck.',
-      minWidth: 2200,
-      columns: [
-        { key:'stage', label:'Stage', type:'status' },
-        { key:'stageStatus', label:'Stage Detail', type:'status' },
-        { key:'soStatus', label:'SO Status', type:'status' },
-        { key:'soNumber', label:'SO No' },
-        { key:'lineNo', label:'Line' },
-        { key:'clientName', label:'Client' },
-        { key:'salesRep', label:'Sales Rep' },
-        { key:'productCode', label:'Product Code' },
-        { key:'productName', label:'Product' },
-        { key:'orderQty', label:'Order Qty', type:'number' },
-        { key:'pendingQty', label:'Pending Qty', type:'number' },
-        { key:'expectedDelivery', label:'Expected Delivery', type:'date' },
-        { key:'finalDelivery', label:'Final Delivery', type:'date' },
-        { key:'ageingDays', label:'Ageing Days', type:'number' },
-        { key:'overdueDays', label:'Overdue Days', type:'number' },
-        { key:'lastUpdatedAt', label:'Last Updated', type:'datetime' },
-        { key:'currentStage', label:'Current Stage' },
-        { key:'billingStatus', label:'Billing Status', type:'status' }
-      ],
-      rows: detailRows
-    }]
-  };
 }
 
 function _planningClosureFilters_(params) {
