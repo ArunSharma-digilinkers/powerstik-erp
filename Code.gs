@@ -1666,6 +1666,10 @@ function _purchaseNormalizeToolingWorkbenchRow_(row) {
     dieStatusRaw: row.die_status_raw || '',
     plateIsNew: row.plate_is_new === true,
     dieIsNew: row.die_is_new === true,
+    plateRequirementStatus: row.plate_requirement_status || '',
+    dieRequirementStatus: row.die_requirement_status || '',
+    plateActionRequired: row.plate_action_required === true,
+    dieActionRequired: row.die_action_required === true,
     plateVendor: row.plate_vendor || '',
     plateOrderedOn: row.plate_ordered_on || '',
     plateReceivedOn: row.plate_received_on || '',
@@ -1701,28 +1705,67 @@ function _purchaseNormalizeToolingWorkbenchRow_(row) {
 }
 
 function getPlateDieJobs(opts = {}) {
-  const cacheKey = _reportsCacheKey_('PLATE_DIE_JOBS', { opts: opts || {} });
+  const cacheKey = _reportsCacheKey_('PLATE_DIE_JOBS', { source: 'purchase-tooling-register-v1', opts: opts || {} });
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
-  const type = String(opts.type || 'PLATE').toUpperCase();
-  let groupedRows = null;
+  const type = String(opts.type || 'ALL').toUpperCase();
+  let groupedRows = [];
+  let workbenchViewAvailable = false;
   try {
-    groupedRows = supabaseSelect('v_purchase_tooling_workbench', {
+    const viewFilters = {};
+    const artworkKeys = Array.isArray(opts.artworkKeys) ? opts.artworkKeys.map(function(v) { return String(v || '').trim(); }).filter(Boolean) : [];
+    if (artworkKeys.length) viewFilters.artwork_key = _supabaseInFilter_(artworkKeys);
+    if (opts.pendingOnly === true) {
+      if (type === 'DIE') viewFilters.die_action_required = 'eq.true';
+      else if (type === 'PLATE') viewFilters.plate_action_required = 'eq.true';
+      else viewFilters.or = '(plate_action_required.eq.true,die_action_required.eq.true)';
+    } else {
+      if (opts.fromDate && opts.toDate) {
+        viewFilters.and = '(so_date.gte.' + opts.fromDate + ',so_date.lte.' + opts.toDate + ')';
+      } else if (opts.fromDate) {
+        viewFilters.so_date = 'gte.' + opts.fromDate;
+      } else if (opts.toDate) {
+        viewFilters.so_date = 'lte.' + opts.toDate;
+      }
+    }
+    groupedRows = _supabaseSelectAll_('v_purchase_tooling_workbench', {
+      select: '*',
+      filters: viewFilters,
       order: 'so_date.asc,artwork_no.asc'
-    }) || [];
+    }, 1000, 50000) || [];
+    workbenchViewAvailable = true;
   } catch (err) {
-    groupedRows = null;
+    const msg = String(err && err.message || err || '');
+    if (msg.indexOf('plate_action_required') !== -1 || msg.indexOf('die_action_required') !== -1) {
+      try {
+        groupedRows = _supabaseSelectAll_('v_purchase_tooling_workbench', {
+          select: '*',
+          order: 'so_date.asc,artwork_no.asc'
+        }, 1000, 50000) || [];
+        workbenchViewAvailable = true;
+      } catch (fallbackErr) {
+        Logger.log('Purchase tooling workbench view unavailable: ' + (fallbackErr && fallbackErr.message ? fallbackErr.message : fallbackErr));
+        groupedRows = [];
+      }
+    } else {
+      Logger.log('Purchase tooling workbench view unavailable: ' + msg);
+      groupedRows = [];
+    }
   }
-  if (Array.isArray(groupedRows) && groupedRows.length) {
+  if (workbenchViewAvailable) {
+    const wantedArtworkKeys = Array.isArray(opts.artworkKeys) ? opts.artworkKeys.map(function(v) { return String(v || '').trim(); }).filter(Boolean) : [];
+    const wantedArtworkMap = {};
+    wantedArtworkKeys.forEach(function(key) { wantedArtworkMap[key] = true; });
     const resultFromView = groupedRows
       .map(_purchaseNormalizeToolingWorkbenchRow_)
       .filter(function(row) {
+        if (wantedArtworkKeys.length && !wantedArtworkMap[String(row.artworkKey || row.id || '').trim()]) return false;
         if (!opts || !Object.keys(opts).length) return true;
         if (opts.pendingOnly) {
           const plateStatus = String(row.statusPlate || '').toUpperCase();
           const dieStatus = String(row.statusDie || '').toUpperCase();
-          const platePending = (row.plateIsNew === true || _purchaseIsArtworkToolingNew_(row.plateStatusRaw)) && plateStatus !== 'RECEIVED' && plateStatus !== 'NA';
-          const diePending = (row.dieIsNew === true || _purchaseIsArtworkToolingNew_(row.dieStatusRaw)) && dieStatus !== 'RECEIVED' && dieStatus !== 'NA';
+          const platePending = row.plateActionRequired === true || ((row.plateIsNew === true || _purchaseIsArtworkToolingNew_(row.plateStatusRaw)) && plateStatus !== 'RECEIVED' && plateStatus !== 'NA') || plateStatus === 'ORDERED' || plateStatus === 'PARTIAL';
+          const diePending = row.dieActionRequired === true || ((row.dieIsNew === true || _purchaseIsArtworkToolingNew_(row.dieStatusRaw)) && dieStatus !== 'RECEIVED' && dieStatus !== 'NA') || dieStatus === 'ORDERED' || dieStatus === 'PARTIAL';
           if (type === 'PLATE') return platePending;
           if (type === 'DIE') return diePending;
           return platePending || diePending;
@@ -1738,7 +1781,7 @@ function getPlateDieJobs(opts = {}) {
 
   let viewRows = [];
   try {
-    viewRows = supabaseSelect('v_artwork_jobs_active', {
+    viewRows = selectArtworkJobsView_({
       select: 'id,so_number,so_date,line_no,client_name,product_name,qty,unit,artwork_no,sheet_ups,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count',
       order: 'so_date.asc,so_number.asc,line_no.asc'
     }) || [];
@@ -1876,6 +1919,72 @@ function getPlateDieJobs(opts = {}) {
  */
 function getPlateDieJobsJson() {
   return JSON.stringify(getPlateDieJobs());
+}
+
+function purchaseSearchToolingRegister(payload) {
+  const p = payload || {};
+  const artworkText = String(p.artworkText || '').trim();
+  const q = String(p.q || '').trim();
+  const type = String(p.type || 'ALL').trim().toUpperCase();
+  const reqStatus = String(p.requirementStatus || '').trim().toUpperCase();
+  const poStatus = String(p.purchaseStatus || '').trim().toUpperCase();
+  const fromDate = String(p.fromDate || '').trim();
+  const toDate = String(p.toDate || '').trim();
+  const limit = Math.min(200, Math.max(1, Number(p.limit || 100) || 100));
+  if (!artworkText && !q && !reqStatus && !poStatus && !fromDate && !toDate) {
+    return { ok: true, rows: [], message: 'Enter search text or select a filter to load tooling register rows.' };
+  }
+
+  const filters = {};
+  const searchClauses = [];
+  if (artworkText) {
+    const artworkPattern = '*' + artworkText.replace(/[(),]/g, ' ').replace(/\s+/g, ' ').trim().replace(/\*/g, '') + '*';
+    searchClauses.push('artwork_no.ilike.' + artworkPattern);
+  }
+  if (q) {
+    const term = q.replace(/[(),]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (term) {
+      const pattern = '*' + term.replace(/\*/g, '') + '*';
+      searchClauses.push.apply(searchClauses, [
+        'so.ilike.' + pattern,
+        'line_no.ilike.' + pattern,
+        'client.ilike.' + pattern,
+        'product_name.ilike.' + pattern,
+        'plate_vendor.ilike.' + pattern,
+        'die_vendor.ilike.' + pattern,
+        'plate_po_refs.ilike.' + pattern,
+        'die_po_refs.ilike.' + pattern,
+        'plate_challan_no.ilike.' + pattern,
+        'die_challan_no.ilike.' + pattern
+      ]);
+    }
+  }
+  if (searchClauses.length) filters.or = '(' + searchClauses.join(',') + ')';
+  if (fromDate && toDate) filters.and = '(so_date.gte.' + fromDate + ',so_date.lte.' + toDate + ')';
+  else if (fromDate) filters.so_date = 'gte.' + fromDate;
+  else if (toDate) filters.so_date = 'lte.' + toDate;
+  if (reqStatus) {
+    if (type === 'DIE') filters.die_requirement_status = 'eq.' + reqStatus;
+    else if (type === 'PLATE') filters.plate_requirement_status = 'eq.' + reqStatus;
+  }
+  if (poStatus) {
+    if (type === 'DIE') filters.status_die = 'eq.' + poStatus;
+    else if (type === 'PLATE') filters.status_plate = 'eq.' + poStatus;
+  }
+
+  const rows = _supabaseSelectAll_('v_purchase_tooling_register_search', {
+    select: '*',
+    filters: filters,
+    order: 'so_date.desc,artwork_no.asc',
+    limit: limit
+  }, Math.min(200, limit), limit) || [];
+
+  return {
+    ok: true,
+    rows: rows.map(_purchaseNormalizeToolingWorkbenchRow_),
+    limit: limit,
+    truncated: rows.length >= limit
+  };
 }
 
 /**
@@ -2296,9 +2405,8 @@ function _purchaseListPOReceipts_(opts) {
     }
 
     const originalLedgerRows = [];
-    const chunkSize = 200;
-    for (let i = 0; i < originalIds.length; i += chunkSize) {
-      const chunk = originalIds.slice(i, i + chunkSize);
+    const chunks = _supabaseChunkValuesByFilterLength_(originalIds, 900, 20);
+    chunks.forEach(function(chunk) {
       const chunkRows = supabaseSelect('inv_ledger', {
         select: `
           id,
@@ -2322,7 +2430,7 @@ function _purchaseListPOReceipts_(opts) {
           originalLedgerRows.push(row);
         }
       });
-    }
+    });
     if (!originalLedgerRows.length) {
       return rows;
     }
@@ -2601,8 +2709,8 @@ function _purchaseLedgerPOReceiptEntriesByLine_(lineRows) {
   });
 
   const ledgerRows = [];
-  for (let i = 0; i < poNos.length; i += 30) {
-    const chunk = poNos.slice(i, i + 30);
+  const poNoChunks = _supabaseChunkValuesByFilterLength_(poNos, 900, 20);
+  poNoChunks.forEach(function(chunk) {
     const rows = supabaseSelect('inv_ledger', {
       select: `
         id,
@@ -2631,13 +2739,37 @@ function _purchaseLedgerPOReceiptEntriesByLine_(lineRows) {
     rows.forEach(function(row) {
       if (!reversedLedgerIds[String(row.id || '').trim()]) ledgerRows.push(row);
     });
-  }
+  });
+
+  const missingItemIds = [...new Set(ledgerRows.filter(function(row) {
+    return !!row.item_id && (!row.inv_items || !row.inv_items.item_code);
+  }).map(function(row) {
+    return String(row.item_id || '').trim();
+  }).filter(Boolean))];
+  const fallbackItemCodeById = {};
+  const missingItemChunks = _supabaseChunkValuesByFilterLength_(missingItemIds, 900, 20);
+  missingItemChunks.forEach(function(chunk) {
+    (supabaseSelect('inv_items', {
+      select: 'id,item_code',
+      filters: { id: _supabaseInFilter_(chunk) },
+      limit: 500
+    }) || []).forEach(function(item) {
+      fallbackItemCodeById[String(item.id || '').trim()] = String(item.item_code || '').trim();
+    });
+  });
 
   ledgerRows.forEach(function(ledger) {
     const poNo = String(ledger.ref_no || '').trim();
     const candidates = linesByPo[poNo] || [];
     if (!candidates.length) return;
-    const itemCode = String(ledger.inv_items?.item_code || '').trim().toUpperCase();
+    const note = invParseReceiptNote_(ledger.remarks);
+    const explicitLineId = String(note.POLINE || note.PO_LINE || note.POLINEID || '').trim();
+    const explicitMatch = explicitLineId
+      ? candidates.find(function(line) {
+          return String(line.id || '').trim() === explicitLineId;
+        })
+      : null;
+    const itemCode = String(ledger.inv_items?.item_code || fallbackItemCodeById[String(ledger.item_id || '').trim()] || '').trim().toUpperCase();
     const dept = String(ledger.department || '').trim().toUpperCase();
     const exact = candidates.filter(function(line) {
       if (itemCode && String(line.itemCode || '').trim().toUpperCase() !== itemCode) return false;
@@ -2647,7 +2779,24 @@ function _purchaseLedgerPOReceiptEntriesByLine_(lineRows) {
     const itemOnly = exact.length ? exact : candidates.filter(function(line) {
       return itemCode ? String(line.itemCode || '').trim().toUpperCase() === itemCode : true;
     });
-    const match = itemOnly[0] || candidates[0];
+    const rateMatches = itemOnly.filter(function(line) {
+      return Math.abs(Number(line.rate || 0) - Number(ledger.rate || 0)) <= 0.0001;
+    });
+    const qtyMatches = rateMatches.filter(function(line) {
+      return Number(line.qty || 0) + 0.0001 >= Number(ledger.qty_in || 0);
+    });
+    const uniqueFallback = exact.length === 1 ? exact[0]
+      : itemOnly.length === 1 ? itemOnly[0]
+      : rateMatches.length === 1 ? rateMatches[0]
+      : qtyMatches.length === 1 ? qtyMatches[0]
+      : candidates.length === 1 ? candidates[0]
+      : null;
+    if (!explicitMatch && !uniqueFallback) {
+      Logger.log('Ambiguous PO receipt ledger fallback skipped for ledger ' + ledger.id + ' / PO ' + poNo);
+      return;
+    }
+    const match = explicitMatch || uniqueFallback;
+    if (!match) return;
     const lineId = String(match.id || '').trim();
     if (!lineId) return;
     if (!result[lineId]) result[lineId] = [];
@@ -3163,7 +3312,7 @@ function purchaseListPOsJSON(opts = {}) {
   const forceRefresh = opts.forceRefresh === true;
   const includeOpenOutsideDate = opts.includeOpenOutsideDate === true || opts.pendingOnly === true;
   const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
-  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { v: purchaseCacheVersion, logic: 'receipt-row-first-v3', opts: opts || {}, includeOpenOutsideDate: includeOpenOutsideDate ? 1 : 0 });
+  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { v: purchaseCacheVersion, logic: 'receipt-row-first-v4-line-id', opts: opts || {}, includeOpenOutsideDate: includeOpenOutsideDate ? 1 : 0 });
   if (!forceRefresh) {
     const cached = _getCachedJson_(cacheKey);
     if (cached) return cached;
@@ -3819,9 +3968,14 @@ function purchaseCreateArtworkPO(payload) {
   if (!vendor) throw new Error('Vendor not found');
 
   const artworkRows = {};
-  getPlateDieJobs({ type: type }).forEach(row => {
-    artworkRows[row.artworkKey] = row;
-  });
+  const selectedArtworkKeys = selectedRows.map(function(line) {
+    return String(line && line.artworkKey || '').trim();
+  }).filter(Boolean);
+  if (selectedArtworkKeys.length) {
+    getPlateDieJobs({ type: type, artworkKeys: selectedArtworkKeys }).forEach(row => {
+      artworkRows[row.artworkKey] = row;
+    });
+  }
 
   const poNo = _purchaseNextPoNo_();
   const now = _purchaseNowIso_();
@@ -12296,6 +12450,94 @@ function getArtworkGroupJobs(artworkNo) {
   return rows.map(_artworkRowToWorkbenchJob_);
 }
 
+function _artworkSearchSafe_(value) {
+  return String(value || '').trim().replace(/[%*,()]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function getArtworkSearchOptionsJson() {
+  const version = PropertiesService.getScriptProperties().getProperty('ARTWORK_WORKBENCH_VERSION') || '0';
+  const cacheKey = _cacheKeyHash_('ARTWORK_SEARCH_OPTIONS', JSON.stringify({
+    v: version,
+    schema: 'ARTWORK_SEARCH_OPTIONS_V1'
+  }));
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  const salesOrderRows = _supabaseSelectAll_('sales_orders', {
+    select: 'sales_rep',
+    order: 'sales_rep.asc'
+  }, 1000, 50000) || [];
+  const salesReps = [...new Set(salesOrderRows.map(function(row) {
+    return String(row.sales_rep || '').trim();
+  }).filter(Boolean))].sort(function(a, b) {
+    return a.localeCompare(b);
+  });
+
+  const clientRows = _supabaseSelectAll_('clients', {
+    select: 'client_code,client_name,active',
+    order: 'client_name.asc'
+  }, 1000, 10000) || [];
+  const clients = clientRows.map(function(row) {
+    return {
+      code: String(row.client_code || '').trim(),
+      name: String(row.client_name || '').trim(),
+      active: row.active !== false
+    };
+  }).filter(function(row) {
+    return row.name;
+  });
+
+  const payload = JSON.stringify({
+    salesReps: salesReps,
+    clients: clients
+  });
+  try { cache.put(cacheKey, payload, 21600); } catch (e) {}
+  return payload;
+}
+
+function searchArtworkJobsJson(filters) {
+  const p = filters || {};
+  const limit = Math.max(1, Math.min(200, Number(p.limit || 100) || 100));
+  const artworkNo = _artworkSearchSafe_(p.artworkNo);
+  const soNo = _artworkSearchSafe_(p.soNo);
+  const salesRep = String(p.salesRep || '').trim();
+  const clientName = _artworkSearchSafe_(p.clientName);
+  const itemName = _artworkSearchSafe_(p.itemName);
+
+  const hasSearch =
+    artworkNo.length >= 2 ||
+    soNo.length >= 2 ||
+    salesRep.length > 0 ||
+    clientName.length >= 2 ||
+    itemName.length >= 2;
+  if (!hasSearch) {
+    return JSON.stringify({ rows: [], count: 0, limited: false, message: 'Enter at least 2 characters in any search field.' });
+  }
+
+  const queryFilters = {};
+  if (artworkNo.length >= 2) queryFilters.artwork_no = 'ilike.*' + artworkNo + '*';
+  if (soNo.length >= 2) queryFilters.so_number = 'ilike.*' + soNo + '*';
+  if (salesRep) queryFilters.sales_rep = 'eq.' + salesRep;
+  if (clientName.length >= 2) queryFilters.client_name = 'ilike.*' + clientName + '*';
+  if (itemName.length >= 2) queryFilters.product_name = 'ilike.*' + itemName + '*';
+
+  const baseSelect = 'id,so_number,so_date,so_created_at,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status';
+  const rows = _decorateArtworkRowsWithOrderStatus_(selectArtworkJobsView_({
+    select: baseSelect,
+    filters: queryFilters,
+    order: 'so_date.desc,so_number.desc,line_no.asc',
+    limit: limit
+  }) || []);
+  const jobs = rows.map(_artworkRowToWorkbenchJob_);
+  return JSON.stringify({
+    rows: jobs,
+    count: jobs.length,
+    limited: jobs.length >= limit,
+    message: jobs.length >= limit ? 'Showing first ' + limit + ' matches. Add more filters to narrow the result.' : ''
+  });
+}
+
 function getArtworkReference(artworkNo) {
   const no = String(artworkNo || '').trim();
   if (!no) throw new Error('Missing artwork no');
@@ -15019,7 +15261,7 @@ function buildWOMaterialRequirementRows_(materials, issuedRows) {
 function buildWOMaterialFallbackMap_(snapshotJson) {
   const map = {};
   const snap = snapshotJson || {};
-  const isFlexo = String(snap?.jobDetails?.type || '').trim().toUpperCase() === 'FLEXO';
+  const isFlexo = resolveWOIssueDepartment_(snap) === 'Flexo';
 
   const pushEntry = function(label, gsm, uom, deckle, cutSize, requiredQty) {
     const key = [
@@ -15076,11 +15318,14 @@ function buildWOMaterialFallbackMap_(snapshotJson) {
 
 function applyWOMaterialFallbacks_(materials, snapshotJson) {
   const fallbackMap = buildWOMaterialFallbackMap_(snapshotJson);
-  const isFlexo = String(snapshotJson?.jobDetails?.type || '').trim().toUpperCase() === 'FLEXO';
+  const isFlexo = resolveWOIssueDepartment_(snapshotJson || {}) === 'Flexo';
   const flexoItemCode = String(snapshotJson?.flexoDetails?.itemCode || '').trim().toUpperCase();
   const flexoItemName = String(snapshotJson?.flexoDetails?.itemName || '').trim().toUpperCase();
-  const flexoRunningMeter = Number(snapshotJson?.flexoDetails?.totalRunningMeter || 0);
-  const flexoRequiredKg = Number(snapshotJson?.flexoDetails?.requiredKg || 0);
+  const flexoRunningMeter = Number(
+    snapshotJson?.flexoDetails?.totalRunningMeter ||
+    snapshotJson?.flexoDetails?.baseRunningMeter ||
+    0
+  );
   return (materials || []).map(function(row) {
     const materialLabel = String(String(row.material_key || '').split('|')[0] || row.item_name || '').trim().toUpperCase();
     const materialKeyUom = String(parseStoredWOMaterialKey_(row.material_key || '').uom || '').trim().toUpperCase();
@@ -15113,19 +15358,16 @@ function applyWOMaterialFallbacks_(materials, snapshotJson) {
         ))
       );
 
-    if (isPrimaryFlexoMaterial && ['RM', 'R.M.', 'RUNNING METER', 'RUNNING METERS'].indexOf(currentUom) !== -1) {
+    if (fallback) {
+      if (isFlexo && Number(fallback.requiredQty || 0) > 0) next.required_qty = Number(fallback.requiredQty || 0);
+      if (isFlexo && String(fallback.uom || '').trim()) next.uom = String(fallback.uom || '').trim().toUpperCase();
+      if (!Number(next.deckle || 0) && Number(fallback.deckle || 0)) next.deckle = fallback.deckle;
+      if (!Number(next.cut_size || 0) && Number(fallback.cutSize || 0)) next.cut_size = fallback.cutSize;
+    }
+    if ((isPrimaryFlexoMaterial || (isFlexo && currentUom === 'KG')) && flexoRunningMeter > 0) {
       next.uom = 'RM';
       next.required_qty = flexoRunningMeter;
-    } else if (isPrimaryFlexoMaterial && ['KG', 'KGS', 'KILOGRAM', 'KILOGRAMS'].indexOf(currentUom) !== -1 && flexoRequiredKg > 0) {
-      next.uom = 'KG';
-      next.required_qty = flexoRequiredKg;
     }
-
-    if (!fallback) return next;
-    if (isFlexo && Number(fallback.requiredQty || 0) > 0) next.required_qty = Number(fallback.requiredQty || 0);
-    if (isFlexo && String(fallback.uom || '').trim()) next.uom = String(fallback.uom || '').trim().toUpperCase();
-    if (!Number(next.deckle || 0) && Number(fallback.deckle || 0)) next.deckle = fallback.deckle;
-    if (!Number(next.cut_size || 0) && Number(fallback.cutSize || 0)) next.cut_size = fallback.cutSize;
     return next;
   });
 }
@@ -16532,6 +16774,15 @@ function invFindMatchingPOReceiptRecord_(ledgerRow, itemCode, opts) {
   });
   if (!candidates.length) return null;
 
+  const note = invParseReceiptNote_(ledgerRow && ledgerRow.remarks);
+  const explicitLineId = String(note.POLINE || note.PO_LINE || note.POLINEID || '').trim();
+  if (explicitLineId && lineMap[explicitLineId]) {
+    const exactRow = candidates.find(function(row) {
+      return String(row.poLineId || '').trim() === explicitLineId;
+    });
+    if (exactRow) return { row: exactRow, line: lineMap[explicitLineId], score: 999999 };
+  }
+
   const ranked = candidates
     .map(function(row) {
       const line = lineMap[String(row.poLineId || '').trim()] || null;
@@ -17603,7 +17854,7 @@ function invPostPOReceiptLine_(payload) {
     throw new Error('Plate or die PO lines cannot be received from inventory GRN');
   }
 
-  const po = payload.poRow || (purchaseListPOsJSON().rows || []).find(function(r) {
+  const po = payload.poRow || (purchaseListPOsJSON({ poNo: payload.poNo, forceRefresh: true }).rows || []).find(function(r) {
     return String(r.poNo || '') === String(payload.poNo || '');
   });
   if (po && _purchaseIsCancelledStatus_(po.status)) {
@@ -17639,6 +17890,8 @@ function invPostPOReceiptLine_(payload) {
     'INV:' + String(payload.invoiceNo || '').trim(),
     'InvoiceDate:' + String(payload.invoiceDate || '').trim(),
     payload.poNo ? 'PO:' + String(payload.poNo).trim() : '',
+    line.id ? 'POLine:' + String(line.id).trim() : '',
+    line.sourceRef ? 'PR:' + String(line.sourceRef).trim() : '',
     payload.taxPct !== undefined && payload.taxPct !== null
       ? 'TaxPct:' + String(payload.taxPct).trim()
       : '',
@@ -17688,23 +17941,25 @@ function invPostPOReceiptLine_(payload) {
     refreshStockMV_();
   }
 
-  try {
-    supabaseInsert('purchase_po_receipts', {
-      id: Utilities.getUuid(),
-      po_id: line.poId || null,
-      po_no: payload.poNo,
-      po_line_id: line.id,
-      line_no: line.lineNo,
-      source_type: line.sourceType,
-      receipt_date: _purchaseIsoDate_(new Date()),
-      challan_no: String(payload.challanNo || '').trim(),
-      qty: qty,
-      rate: rate,
-      remarks: String(payload.remarks || '').trim(),
-      created_at: _purchaseNowIso_(),
-      updated_at: _purchaseNowIso_()
-    });
-  } catch (e) {}
+  _purchaseInsertPOReceipt_({
+    id: Utilities.getUuid(),
+    poId: line.poId || null,
+    poNo: payload.poNo,
+    poLineId: line.id,
+    lineNo: line.lineNo,
+    sourceType: line.sourceType,
+    sourceRef: line.sourceRef || '',
+    itemCode: line.itemCode || '',
+    jobRef: line.jobRef || '',
+    soRefs: line.jobRef || '',
+    receiptDate: _purchaseIsoDate_(new Date()),
+    challanNo: String(payload.challanNo || '').trim(),
+    qty: qty,
+    rate: rate,
+    remarks: String(payload.remarks || '').trim(),
+    createdAt: _purchaseNowIso_(),
+    updatedAt: _purchaseNowIso_()
+  });
 
   const linkedPrNo = String(line.sourceRef || '').trim();
   if (linkedPrNo) {
@@ -17897,8 +18152,7 @@ function invPostPurchaseReceiptBulk(payload) {
     const poRowMap = {};
     const poLineMap = {};
     if (receiptPoNo && receiptLines.some(function(line) { return String(line.poLineId || '').trim(); })) {
-      (purchaseListPOsJSON().rows || []).forEach(function(poRow) {
-        if (String(poRow.poNo || '') !== receiptPoNo) return;
+      (purchaseListPOsJSON({ poNo: receiptPoNo, forceRefresh: true }).rows || []).forEach(function(poRow) {
         poRowMap[receiptPoNo] = poRow;
         (poRow.lines || []).forEach(function(poLine) {
           const key = String(poLine.id || '').trim();
@@ -18324,7 +18578,7 @@ function _invBuildNormalizedWOIssuePreparedRow_(row, snapshotJson) {
     if (Number(fallback.requiredQty || 0) > 0) next.required_qty = Number(fallback.requiredQty || 0);
     if (String(fallback.uom || '').trim()) next.uom = _invNormalizeIssueUom_(fallback.uom);
   }
-  if (isPrimaryFlexoMaterial && flexoRunningMeter > 0) {
+  if ((isPrimaryFlexoMaterial || (isFlexo && currentUom === 'KG')) && flexoRunningMeter > 0) {
     next.uom = 'RM';
     next.required_qty = flexoRunningMeter;
   }
@@ -18483,6 +18737,99 @@ function invListWorkOrdersForIssueFromView_() {
         msg.indexOf('Could not find') === -1 &&
         msg.indexOf('does not exist') === -1) {
       Logger.log('WO issue prepared view failed, using fallback: ' + msg);
+    }
+    return null;
+  }
+}
+
+function _invNormalizeWorkOrderIssueListOpts_(opts) {
+  const raw = opts || {};
+  const status = String(raw.status || raw.materialStatus || '').trim().toUpperCase();
+  const search = String(raw.search || raw.q || raw.woNo || '').trim();
+  const hasSearch = !!search;
+  const normalizedStatus = status === 'ALL' ? '' : status;
+  const defaultLimit = hasSearch ? 50000 : (normalizedStatus === 'PENDING' ? 5000 : 1000);
+  const limit = Math.max(1, Number(raw.limit || defaultLimit) || defaultLimit);
+  const offset = Math.max(0, Number(raw.offset || 0) || 0);
+  return {
+    status: normalizedStatus,
+    search: search,
+    limit: limit,
+    offset: offset
+  };
+}
+
+function _invFilterWorkOrderIssueRows_(rows, opts) {
+  const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
+  const q = request.search.toUpperCase();
+  let out = (rows || []).filter(function(row) {
+    if (request.status && String(row.materialStatus || '').trim().toUpperCase() !== request.status) return false;
+    if (q && String(row.woNo || '').toUpperCase().indexOf(q) === -1) return false;
+    return true;
+  });
+  if (request.offset) out = out.slice(request.offset);
+  return out.slice(0, request.limit);
+}
+
+function invListWorkOrdersForIssueSummaryFast_(opts) {
+  const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
+  try {
+    const rows = supabaseRpc('inv_work_orders_for_issue_summary_ui', {
+      p_status: request.status || null,
+      p_search: request.search || null,
+      p_limit: request.limit,
+      p_offset: request.offset
+    }) || [];
+    return (Array.isArray(rows) ? rows : (rows.rows || [])).map(function(row) {
+      return {
+        woNo: String(row.wo_no || row.woNo || '').trim(),
+        issueDepartment: String(row.issue_department || row.issueDepartment || '').trim(),
+        materialStatus: String(row.material_status || row.materialStatus || 'PENDING').trim().toUpperCase() || 'PENDING',
+        requiredQty: Number(row.required_qty || row.requiredQty || 0),
+        issuedQty: Number(row.issued_qty || row.issuedQty || 0),
+        remainingQty: Number(row.remaining_qty || row.remainingQty || 0),
+        lineCount: Number(row.line_count || row.lineCount || 0),
+        detailLoaded: false,
+        requirements: []
+      };
+    }).filter(function(row) {
+      return !!row.woNo;
+    });
+  } catch (err) {
+    const msg = String(err && err.message || err || '');
+    if (msg.indexOf('inv_work_orders_for_issue_summary_ui') === -1 &&
+        msg.indexOf('schema cache') === -1 &&
+        msg.indexOf('Could not find') === -1 &&
+        msg.indexOf('does not exist') === -1) {
+      Logger.log('WO issue summary fast path failed: ' + msg);
+    }
+    return null;
+  }
+}
+
+function invGetWorkOrderForIssueFast_(woNo) {
+  const key = String(woNo || '').trim();
+  if (!key) return null;
+  try {
+    const rows = supabaseRpc('inv_work_order_issue_detail_ui', {
+      p_wo_no: key
+    }) || [];
+    const list = Array.isArray(rows) ? rows : (rows.rows || []);
+    if (!list.length) return null;
+    const preparedRows = _invNormalizePreparedWOIssueRows_(list);
+    const built = invBuildWorkOrdersForIssueFromPreparedRows_(preparedRows);
+    if (built[0]) {
+      built[0].detailLoaded = true;
+      return built[0];
+    }
+    return null;
+  } catch (err) {
+    const msg = String(err && err.message || err || '');
+    if (msg.indexOf('inv_work_order_issue_detail_ui') === -1 &&
+        msg.indexOf('schema cache') === -1 &&
+        msg.indexOf('Could not find') === -1 &&
+        msg.indexOf('does not exist') === -1) {
+      Logger.log('WO issue detail fast path failed: ' + msg);
     }
     return null;
   }
@@ -18809,18 +19156,63 @@ function _invMergeWorkOrderIssueRows_(fallbackRows, preparedRows) {
     .map(function(key) { return byWo[key]; });
 }
 
-function invListWorkOrdersForIssue() {
+function invListWorkOrdersForIssue(opts) {
+  const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
+  const fastRows = invListWorkOrdersForIssueSummaryFast_(request) || null;
+  if (fastRows) {
+    return {
+      ok: true,
+      rows: fastRows,
+      meta: {
+        status: request.status || 'ALL',
+        search: request.search,
+        limit: request.limit,
+        offset: request.offset,
+        limited: fastRows.length >= request.limit && !request.search
+      }
+    };
+  }
+
   const preparedRows = invListWorkOrdersForIssueFromView_() || [];
+  if (preparedRows && preparedRows.length) {
+    const rows = _invFilterWorkOrderIssueRows_(preparedRows, request);
+    return {
+      ok: true,
+      rows: rows,
+      meta: {
+        status: request.status || 'ALL',
+        search: request.search,
+        limit: request.limit,
+        offset: request.offset,
+        limited: rows.length >= request.limit && !request.search
+      }
+    };
+  }
+
   const fallbackRows = _invBuildWorkOrdersForIssueFallbackRows_();
+  const mergedRows = _invMergeWorkOrderIssueRows_(fallbackRows, preparedRows);
+  const rows = _invFilterWorkOrderIssueRows_(mergedRows, request);
   return {
     ok: true,
-    rows: _invMergeWorkOrderIssueRows_(fallbackRows, preparedRows)
+    rows: rows,
+    meta: {
+      status: request.status || 'ALL',
+      search: request.search,
+      limit: request.limit,
+      offset: request.offset,
+      limited: rows.length >= request.limit && !request.search
+    }
   };
 }
 
 function invGetWorkOrderForIssue(woNo) {
   const key = String(woNo || '').trim();
   if (!key) throw new Error('Work order no required');
+
+  const fastRow = invGetWorkOrderForIssueFast_(key);
+  if (fastRow) {
+    return { ok: true, row: fastRow };
+  }
 
   const rows = supabaseSelect('inv_wo_issue_requirement_v', {
     select: 'wo_number,issue_department,line_status,material_key,item_label,gsm,deckle_mm,cut_mm,uom,required_qty,issued_qty,remaining_qty',
@@ -21944,6 +22336,21 @@ function _billingListInvoicesFast_(params, token) {
     };
   };
   try {
+    const rows = supabaseRpc('billing_document_register_v4', {
+      p_date_from: p.dateFrom || null,
+      p_date_to: p.dateTo || null,
+      p_status: p.status || 'ALL',
+      p_q: p.q || null
+    }) || [];
+    return {
+      ok: true,
+      fastPath: 'billing_document_register_v4',
+      rows: rows.map(mapRegisterRow)
+    };
+  } catch (rpcV4Err) {
+    console.warn('billing_document_register_v4 unavailable; trying v3/legacy register fast paths', rpcV4Err && rpcV4Err.message ? rpcV4Err.message : rpcV4Err);
+  }
+  try {
     const rows = supabaseRpc('billing_document_register_v3', {
       p_date_from: p.dateFrom || null,
       p_date_to: p.dateTo || null,
@@ -22411,6 +22818,54 @@ function _billingTryFastDatasetRows_(params) {
   }
 }
 
+function _billingTryDatasetV4_(params, includeRows) {
+  const p = params || {};
+  if (!p.clientCode) return null;
+  try {
+    const res = supabaseRpc('billing_job_dataset_v4', {
+      p_client_code: p.clientCode,
+      p_so_number: p.soNumber || null,
+      p_mode: _billingNormalizeMode_(p.mode),
+      p_q: p.q || null,
+      p_only_open: p.onlyOpen === false ? false : true,
+      p_include_rows: includeRows === true
+    }) || {};
+    const clientRow = res.client && typeof res.client === 'object' ? _clientNormalizeRow_(res.client) : null;
+    const parties = Array.isArray(res.parties) ? res.parties : [];
+    const selectedParties = clientRow ? _billingBuildAddressChoices_(clientRow, parties) : null;
+    const rows = includeRows === true ? _billingEnrichFastDatasetRows_(res.rows || []) : [];
+    const soOptions = (Array.isArray(res.soOptions) ? res.soOptions : []).map(function(row) {
+      return {
+        soNumber: row.soNumber || row.so_number || '',
+        soDate: row.soDate || row.so_date || '',
+        poNumber: row.poNumber || row.po_number || ''
+      };
+    }).filter(function(row) { return !!row.soNumber; });
+    return {
+      ok: true,
+      fastPath: 'billing_job_dataset_v4',
+      mode: _billingNormalizeMode_(res.mode || p.mode),
+      rows: rows,
+      soOptions: soOptions,
+      client: _billingClientPayload_(clientRow, selectedParties),
+      rowsDeferred: includeRows !== true,
+      summary: includeRows === true
+        ? _billingBuildSummaryFromRows_(rows)
+        : {
+            totalLines: 0,
+            dispatchBillableQty: 0,
+            fgBillableQty: 0,
+            directBillableQty: 0,
+            billedQty: 0,
+            selectedCustomerOrders: soOptions.length
+          }
+    };
+  } catch (err) {
+    console.warn('billing_job_dataset_v4 unavailable; using legacy dataset path', err && err.message ? err.message : err);
+    return null;
+  }
+}
+
 function _billingBuildDatasetRows_(options) {
   const p = options || {};
   const mode = _billingNormalizeMode_(p.mode);
@@ -22446,6 +22901,15 @@ function _billingBuildDatasetRows_(options) {
       client: null,
       summary: emptySummary
     };
+  }
+  const v4ShouldLoadRows =
+    p.includeRows === true ||
+    !!String(p.soNumber || '').trim() ||
+    !!String(p.q || '').trim() ||
+    mode !== 'DISPATCH';
+  const v4Dataset = v4ShouldLoadRows ? _billingTryDatasetV4_(p, true) : null;
+  if (v4Dataset) {
+    return v4Dataset;
   }
   const salesOrders = _billingGetSalesOrders_(p.clientCode, p.soNumber);
   const clientMap = _billingSelectClientsByCodes_(p.clientCode ? [p.clientCode] : []);
@@ -22641,6 +23105,34 @@ function billingSearchClients(query, token) {
     ok: true,
     clients: _billingSearchClientRows_(query, 80).map(_billingClientPickerPayload_)
   };
+}
+
+function billingHealthCheck(token) {
+  const user = _billingRequireSession_(token);
+  const out = {
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    role: String(user && user.role || ''),
+    supabase: null,
+    gas: {
+      billingGetBootstrap: true,
+      billingGetDataset: true,
+      billingListInvoices: true,
+      billingGetInvoiceEditor: true,
+      createInvoice: true,
+      updateInvoiceDraft: true,
+      postInvoice: true
+    }
+  };
+  try {
+    out.supabase = supabaseRpc('billing_health_check_v4', {}) || null;
+  } catch (err) {
+    out.supabase = {
+      ok: false,
+      message: String(err && err.message || err || 'billing_health_check_v4 unavailable')
+    };
+  }
+  return out;
 }
 
 function billingGetDataset(params, token) {
@@ -22914,6 +23406,17 @@ function _billingBuildPrintUrl_(invoiceId, token, documentType, options) {
   return base + '?' + qs.join('&');
 }
 
+function _billingNormalizeGeneratedDocumentNo_(documentType, value) {
+  const docType = _billingNormalizeDocumentType_(documentType);
+  const prefix = docType === 'CHALLAN' ? 'DC-H' : 'DI-H';
+  const raw = String(value || '').trim().replace(new RegExp('^' + prefix + '\\/(\\d{2})_(\\d{2})\\/', 'i'), prefix + '/$1-$2/');
+  const m = raw.match(new RegExp('^' + prefix + '\\/?(\\d{2}-\\d{2})\\/?(\\d+)$', 'i')) ||
+    raw.match(new RegExp('^' + prefix + '[-\\/]?(\\d{2}-\\d{2})[-\\/]?(\\d+)$', 'i'));
+  if (!m) return '';
+  if (docType === 'CHALLAN') return prefix + '/' + m[1] + '/' + String(m[2] || '').trim();
+  return prefix + '/' + m[1] + '/' + String(Number(m[2] || 0) || 0).padStart(4, '0');
+}
+
 function _billingGenerateDocumentNo_(documentType, invoiceDate) {
   const dateText = String(invoiceDate || '').trim() || new Date().toISOString().slice(0, 10);
   const fyKey = getFinancialYear(new Date(dateText));
@@ -22929,8 +23432,8 @@ function _billingGenerateDocumentNo_(documentType, invoiceDate) {
       ? (rpcRes[0] && (rpcRes[0].get_next_invoice_no || rpcRes[0].invoice_no || rpcRes[0].next_invoice_no))
       : (rpcRes && (rpcRes.get_next_invoice_no || rpcRes.invoice_no || rpcRes.next_invoice_no));
     if (fromRpc) {
-      const candidate = String(fromRpc).trim().replace(new RegExp('^' + prefix + '\\/(\\d{2})_(\\d{2})\\/', 'i'), prefix + '/$1-$2/');
-      if (new RegExp('^' + prefix + '\\/\\d{2}-\\d{2}\\/\\d+$', 'i').test(candidate)) return candidate;
+      const candidate = _billingNormalizeGeneratedDocumentNo_(docType, fromRpc);
+      if (candidate) return candidate;
     }
   } catch (err) {}
 
@@ -22948,7 +23451,8 @@ function _billingGenerateDocumentNo_(documentType, invoiceDate) {
     if (m[1] !== fyLabel) return;
     maxSeq = Math.max(maxSeq, Number(m[2] || 0) || 0);
   });
-  return prefix + '/' + fyLabel + '/' + String(maxSeq + 1).padStart(5, '0');
+  const seqWidth = docType === 'CHALLAN' ? 5 : 4;
+  return prefix + '/' + fyLabel + '/' + String(maxSeq + 1).padStart(seqWidth, '0');
 }
 
 function _billingPreviewDocumentNo_(documentType, invoiceDate) {
@@ -22971,7 +23475,8 @@ function _billingPreviewDocumentNo_(documentType, invoiceDate) {
     if (m[1] !== fyLabel) return;
     maxSeq = Math.max(maxSeq, Number(m[2] || 0) || 0);
   });
-  return prefix + '/' + fyLabel + '/' + String(maxSeq + 1).padStart(5, '0');
+  const seqWidth = docType === 'CHALLAN' ? 5 : 4;
+  return prefix + '/' + fyLabel + '/' + String(maxSeq + 1).padStart(seqWidth, '0');
 }
 
 function _billingGenerateInvoiceNo_(invoiceDate) {
@@ -23121,7 +23626,10 @@ function invGetGRNPrintData(grnNo) {
   }
   const poLineRows = _purchaseListPOLines_();
   const poLineLookup = {};
+  const poLineById = {};
   poLineRows.forEach(function(line) {
+    const idKey = String(line.id || '').trim();
+    if (idKey) poLineById[idKey] = line;
     const poKey = String(line.poNo || '').trim().toUpperCase();
     const sourceKey = String(line.sourceRef || '').trim().toUpperCase();
     const itemKey = String(line.itemCode || '').trim().toUpperCase();
@@ -23139,9 +23647,11 @@ function invGetGRNPrintData(grnNo) {
     const value = Number(row.value || 0);
     const note = invParseReceiptNote_(row.remarks);
     const poNoForLine = String(note.PO || '').trim().toUpperCase();
+    const poLineForLine = String(note.POLINE || note.PO_LINE || note.POLINEID || '').trim();
     const refNoForLine = String(row.ref_no || '').trim().toUpperCase();
     const itemCodeForLine = String(item.item_code || '').trim().toUpperCase();
-    const resolvedPoLine = poLineLookup[poNoForLine + '|' + refNoForLine + '|' + itemCodeForLine] ||
+    const resolvedPoLine = poLineById[poLineForLine] ||
+      poLineLookup[poNoForLine + '|' + refNoForLine + '|' + itemCodeForLine] ||
       poLineLookup[poNoForLine + '||' + itemCodeForLine] ||
       null;
     let gstPct = Number(note.TAXPCT);
@@ -23411,6 +23921,20 @@ function _billingValidateCreatePayload_(payload, token, sessionUser) {
 }
 
 function _billingBuildDatasetRowMapForSelectedLines_(clientCode, headerMode, lines, existingLines) {
+  const selectedLines = Array.isArray(lines) ? lines : [];
+  const selectedIds = [...new Set(selectedLines.map(function(entry) {
+    return String(entry && entry.soLineId || '').trim();
+  }).filter(Boolean))];
+  const fastSelectedMap = _billingTrySelectedDatasetRowMapV4_(selectedLines, headerMode);
+  if (fastSelectedMap && selectedIds.every(function(id) { return !!fastSelectedMap[id]; })) {
+    (existingLines || []).forEach(function(row) {
+      const key = String(row.so_line_id || '').trim();
+      if (!key || fastSelectedMap[key]) return;
+      fastSelectedMap[key] = _billingInvoiceLineFallbackDatasetRow_(row);
+    });
+    return fastSelectedMap;
+  }
+
   const modes = [];
   function addMode(mode) {
     const normalized = _billingNormalizeMode_(mode || 'DISPATCH');
@@ -23457,6 +23981,56 @@ function _billingBuildDatasetRowMapForSelectedLines_(clientCode, headerMode, lin
   });
 
   return rowMap;
+}
+
+function _billingInvoiceLineFallbackDatasetRow_(row) {
+  const key = String(row.so_line_id || '').trim();
+  return {
+    soId: row.so_id,
+    soLineId: key,
+    soNumber: row.so_number || '',
+    lineNo: Number(row.line_no || 0),
+    productCode: row.product_code || '',
+    productName: row.product_name || '',
+    hsn: row.hsn || '',
+    unit: row.unit || 'Nos',
+    division: row.division || '',
+    rate: _billingRound2_(row.rate),
+    gstPct: _billingRound2_(row.gst_pct),
+    dispatchedQty: _billingRound2_(row.dispatch_qty_snapshot),
+    orderQty: _billingRound2_(row.ordered_qty_snapshot || row.qty),
+    billedQty: _billingRound2_(row.billed_qty_snapshot || row.qty)
+  };
+}
+
+function _billingTrySelectedDatasetRowMapV4_(lines, headerMode) {
+  const list = Array.isArray(lines) ? lines : [];
+  if (!list.length) return {};
+  const byMode = {};
+  list.forEach(function(entry) {
+    const id = String(entry && entry.soLineId || '').trim();
+    if (!id) return;
+    const mode = _billingNormalizeMode_(entry.sourceMode || headerMode || 'DISPATCH');
+    if (!byMode[mode]) byMode[mode] = [];
+    if (byMode[mode].indexOf(id) === -1) byMode[mode].push(id);
+  });
+  const rowMap = {};
+  try {
+    Object.keys(byMode).forEach(function(mode) {
+      const rows = supabaseRpc('billing_selected_job_rows_v4', {
+        p_so_line_ids: byMode[mode],
+        p_mode: mode
+      }) || [];
+      _billingEnrichFastDatasetRows_(rows).forEach(function(row) {
+        const key = String(row.soLineId || '').trim();
+        if (key) rowMap[key] = row;
+      });
+    });
+    return rowMap;
+  } catch (err) {
+    console.warn('billing_selected_job_rows_v4 unavailable; using full dataset validation path', err && err.message ? err.message : err);
+    return null;
+  }
 }
 
 function createInvoice(payload, token) {
@@ -24478,6 +25052,28 @@ function _invLoadInvoice_(invoiceId) {
   return { inv, lines };
 }
 
+function _billingTryPostInvoiceV4_(invoiceId, token, documentType) {
+  try {
+    const actor = String(Session.getActiveUser()?.getEmail?.() || 'system');
+    const res = supabaseRpc('billing_post_invoice_v4', {
+      p_invoice_id: invoiceId,
+      p_actor: actor
+    });
+    if (!res || res.ok === false) return null;
+    return {
+      ok: true,
+      invoiceId: invoiceId,
+      invoiceNo: res.invoiceNo || res.invoice_no || '',
+      documentType: _billingNormalizeDocumentType_(res.documentType || res.document_type || documentType),
+      pdfUrl: _billingBuildPrintUrl_(invoiceId, token, res.documentType || res.document_type || documentType),
+      status: 'POSTED'
+    };
+  } catch (err) {
+    console.warn('billing_post_invoice_v4 unavailable; using legacy post path', err && err.message ? err.message : err);
+    return null;
+  }
+}
+
 function postInvoice(invoiceId) {
   const token = arguments.length > 1 ? arguments[1] : '';
   _requireModuleAccess_(token, 'BILLING', 'can_edit');
@@ -24493,6 +25089,12 @@ function postInvoice(invoiceId) {
     throw new Error(label + ' has no lines. Add at least one line before posting.');
   }
   _billingAssertAdvancePaymentReadyForInvoiceLines_(lines, documentType);
+
+  const postedV4 = _billingTryPostInvoiceV4_(invoiceId, token, documentType);
+  if (postedV4) {
+    postedV4.invoiceNo = postedV4.invoiceNo || inv.invoice_no || '';
+    return postedV4;
+  }
 
   const calcSubtotal = _billingRound2_(lines.reduce(function(sum, row) {
     return sum + _billingToNumber_(row.line_amount || row.taxable_amount);
@@ -27856,6 +28458,7 @@ this.saveArtworkBulk = saveArtworkBulk;
 this.approveArtwork = approveArtwork;
 
 this.getPlateDieJobs = getPlateDieJobs;
+this.purchaseSearchToolingRegister = purchaseSearchToolingRegister;
 this.savePlateDieBulk = savePlateDieBulk;
 this.purchaseBootstrapJSON = purchaseBootstrapJSON;
 this.purchaseListVendorsJSON = purchaseListVendorsJSON;
@@ -27936,6 +28539,7 @@ this.fgPostPackedDispatch = fgPostPackedDispatch;
 // ===== INVOICING (Supabase) =====
 this.billingGetBootstrap = billingGetBootstrap;
 this.billingSearchClients = billingSearchClients;
+this.billingHealthCheck = billingHealthCheck;
 this.billingGetDataset = billingGetDataset;
 this.billingGetOpenJobsForInvoice = billingGetOpenJobsForInvoice;
 this.billingGetDraftDocumentNo = billingGetDraftDocumentNo;
@@ -28370,6 +28974,30 @@ function _reportsSelectAll_(table, opts) {
       limit: pageSize,
       offset: offset
     }));
+    if (!rows.length) break;
+
+    out.push.apply(out, rows);
+    if (rows.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return out;
+}
+
+function _reportsSelectAllRequired_(table, opts) {
+  const base = Object.assign({}, opts || {});
+  delete base.limit;
+  delete base.offset;
+
+  const pageSize = 1000;
+  const out = [];
+  let offset = 0;
+
+  while (true) {
+    const rows = supabaseSelect(table, Object.assign({}, base, {
+      limit: pageSize,
+      offset: offset
+    })) || [];
     if (!rows.length) break;
 
     out.push.apply(out, rows);
@@ -29303,6 +29931,251 @@ function _reportsSectionSalesOrders_(token, params) {
         { key:'invoiceDates', label:'Invoice Dates' }
       ],
       rows: rows
+    }]
+  };
+}
+
+function _reportsSectionSheetUtilization_(token, params) {
+  _reportsRequireSession_(token);
+  const filters = _reportsNormalizeFilters_(params);
+  filters.pendingOnly = false;
+  const summaryDateFilters = {};
+  if (filters.fromDate && filters.toDate) {
+    summaryDateFilters.and = '(first_so_date.lte.' + filters.toDate + ',last_so_date.gte.' + filters.fromDate + ')';
+  } else if (filters.fromDate) {
+    summaryDateFilters.last_so_date = 'gte.' + filters.fromDate;
+  } else if (filters.toDate) {
+    summaryDateFilters.first_so_date = 'lte.' + filters.toDate;
+  }
+  const summaryDatePasses = function(row) {
+    if (filters.fromDate && row.lastSoDate && row.lastSoDate < filters.fromDate) return false;
+    if (filters.toDate && row.firstSoDate && row.firstSoDate > filters.toDate) return false;
+    return true;
+  };
+
+  const rows = _reportsSelectAllRequired_('v_report_sheet_utilization', {
+    filters: summaryDateFilters,
+    order: 'first_so_date.desc,artwork_no.asc'
+  }).map(function(row) {
+    return {
+      artworkNo: row.artwork_no || '',
+      firstSoDate: row.first_so_date || '',
+      lastSoDate: row.last_so_date || '',
+      artworkCreatedAt: row.artwork_created_at || '',
+      artworkApprovedAt: row.artwork_approved_at || '',
+      productType: row.product_type || '',
+      artworkStatus: row.artwork_status || 'NO_ART',
+      soNumbers: row.so_numbers || '',
+      lineNos: row.line_nos || '',
+      clientNames: row.client_names || '',
+      divisions: row.divisions || '',
+      salesReps: row.sales_reps || '',
+      categories: row.categories || '',
+      productNames: row.product_names || '',
+      sheetLength: _reportsSafeNumber_(row.sheet_length),
+      sheetWidth: _reportsSafeNumber_(row.sheet_width),
+      acrossWidth: _reportsSafeNumber_(row.across_width),
+      teeth: _reportsSafeNumber_(row.teeth),
+      sheetBasisLengthMm: _reportsSafeNumber_(row.sheet_basis_length_mm),
+      sheetBasisWidthMm: _reportsSafeNumber_(row.sheet_basis_width_mm),
+      sheetAreaSqIn: _reportsSafeNumber_(row.sheet_area_sq_in),
+      acrossUps: _reportsSafeNumber_(row.across_ups),
+      alongUps: _reportsSafeNumber_(row.along_ups),
+      totalUps: _reportsSafeNumber_(row.total_ups),
+      jobCount: _reportsSafeNumber_(row.job_count),
+      jobsWithDimension: _reportsSafeNumber_(row.jobs_with_dimension),
+      missingDimensionJobs: _reportsSafeNumber_(row.missing_dimension_jobs),
+      missingUpsJobs: _reportsSafeNumber_(row.missing_ups_jobs),
+      totalLayoutUps: _reportsSafeNumber_(row.total_layout_ups),
+      totalOrderQty: _reportsSafeNumber_(row.total_order_qty),
+      jobsAreaSqIn: _reportsSafeNumber_(row.jobs_area_sq_in),
+      utilizationPct: _reportsSafeNumber_(row.utilization_pct),
+      wastagePct: _reportsSafeNumber_(row.wastage_pct),
+      utilizationStatus: row.utilization_status || '',
+      jobAreaDetail: row.job_area_detail || ''
+    };
+  }).filter(function(row) {
+    return summaryDatePasses(row) &&
+      _reportsTextPasses_(row, filters, [
+        'artworkNo',
+        'soNumbers',
+        'lineNos',
+        'clientNames',
+        'divisions',
+        'salesReps',
+        'categories',
+        'productNames',
+        'productType',
+        'artworkStatus',
+        'utilizationStatus',
+        'jobAreaDetail'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'productType',
+        'artworkStatus',
+        'utilizationStatus',
+        'divisions',
+        'categories'
+      ]);
+  });
+
+  const detailRows = _reportsSelectAllRequired_('v_report_sheet_utilization_lines', {
+    filters: _reportsApplyDateFilterToQuery_(filters, 'so_date'),
+    order: 'so_date.desc,artwork_no.asc,so_number.asc,line_no.asc'
+  }).map(function(row) {
+    return {
+      artworkNo: row.artwork_no || '',
+      soNumber: row.so_number || '',
+      lineNo: row.line_no == null ? '' : String(row.line_no),
+      soDate: row.so_date || '',
+      poNumber: row.po_number || '',
+      poDate: row.po_date || '',
+      salesRep: row.sales_rep || '',
+      clientName: row.client_name || '',
+      productCode: row.product_code || '',
+      productName: row.product_name || '',
+      category: row.category || '',
+      division: row.division || '',
+      orderQty: _reportsSafeNumber_(row.order_qty),
+      unit: row.unit || '',
+      soLineStatus: row.so_line_status || 'OPEN',
+      productType: row.product_type || '',
+      artworkStatus: row.artwork_status || 'NO_ART',
+      sheetLength: _reportsSafeNumber_(row.sheet_length),
+      sheetWidth: _reportsSafeNumber_(row.sheet_width),
+      acrossWidth: _reportsSafeNumber_(row.across_width),
+      teeth: _reportsSafeNumber_(row.teeth),
+      sheetBasisLengthMm: _reportsSafeNumber_(row.sheet_basis_length_mm),
+      sheetBasisWidthMm: _reportsSafeNumber_(row.sheet_basis_width_mm),
+      sheetAreaSqIn: _reportsSafeNumber_(row.sheet_area_sq_in),
+      itemLengthMm: _reportsSafeNumber_(row.item_length_mm),
+      itemWidthMm: _reportsSafeNumber_(row.item_width_mm),
+      itemAreaSqIn: _reportsSafeNumber_(row.item_area_sq_in),
+      layoutUps: _reportsSafeNumber_(row.layout_ups),
+      jobLayoutAreaSqIn: _reportsSafeNumber_(row.job_layout_area_sq_in),
+      sheetUps: _reportsSafeNumber_(row.sheet_ups),
+      acrossUps: _reportsSafeNumber_(row.across_ups),
+      alongUps: _reportsSafeNumber_(row.along_ups),
+      totalUps: _reportsSafeNumber_(row.total_ups),
+      lineCalcStatus: row.line_calc_status || ''
+    };
+  }).filter(function(row) {
+    return _reportsDatePasses_(row.soDate, filters) &&
+      _reportsTextPasses_(row, filters, [
+        'artworkNo',
+        'soNumber',
+        'lineNo',
+        'poNumber',
+        'salesRep',
+        'clientName',
+        'productCode',
+        'productName',
+        'category',
+        'division',
+        'productType',
+        'artworkStatus',
+        'lineCalcStatus'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'soLineStatus',
+        'productType',
+        'artworkStatus',
+        'division',
+        'category',
+        'lineCalcStatus'
+      ]);
+  });
+
+  return {
+    ok: true,
+    title: 'Sheet Utilization',
+    metrics: {
+      artworkCount: rows.length,
+      averageUtilizationPct: rows.length
+        ? Math.round((rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.utilizationPct); }, 0) / rows.length) * 100) / 100
+        : 0,
+      lowUtilization: rows.filter(function(row){ return row.utilizationStatus === 'LOW_UTILIZATION'; }).length,
+      overUtilized: rows.filter(function(row){ return row.utilizationStatus === 'OVER_UTILIZED'; }).length,
+      missingSetup: rows.filter(function(row){ return String(row.utilizationStatus || '').indexOf('MISSING_') === 0; }).length
+    },
+    tables: [{
+      key: 'sheet-utilization-summary',
+      title: 'Artwork Sheet Utilization Summary',
+      subtitle: 'Utilization = sum of item area x artwork UPS divided by sheet / repeat area. Artwork sheet size is treated as inches unless legacy values look like mm; flexo repeat size is treated as mm.',
+      minWidth: 3900,
+      columns: [
+        { key:'artworkNo', label:'Artwork No' },
+        { key:'firstSoDate', label:'First SO Date', type:'date' },
+        { key:'lastSoDate', label:'Last SO Date', type:'date' },
+        { key:'artworkStatus', label:'Artwork Status', type:'status' },
+        { key:'utilizationStatus', label:'Utilization Status', type:'status' },
+        { key:'productType', label:'Product Type' },
+        { key:'soNumbers', label:'SO Nos' },
+        { key:'lineNos', label:'Lines' },
+        { key:'clientNames', label:'Clients' },
+        { key:'divisions', label:'Divisions' },
+        { key:'salesReps', label:'Sales Reps' },
+        { key:'categories', label:'Categories' },
+        { key:'productNames', label:'Products' },
+        { key:'sheetLength', label:'Sheet Length (in / legacy mm)', type:'number' },
+        { key:'sheetWidth', label:'Sheet Width (in / legacy mm)', type:'number' },
+        { key:'acrossWidth', label:'Flexo Across Width mm', type:'number' },
+        { key:'teeth', label:'Flexo Teeth / Repeat mm', type:'number' },
+        { key:'sheetBasisLengthMm', label:'Basis Length', type:'number' },
+        { key:'sheetBasisWidthMm', label:'Basis Width', type:'number' },
+        { key:'sheetAreaSqIn', label:'Sheet Area sq.in', type:'number' },
+        { key:'jobCount', label:'Jobs', type:'number' },
+        { key:'jobsWithDimension', label:'Jobs With Size', type:'number' },
+        { key:'missingDimensionJobs', label:'Missing Size Jobs', type:'number' },
+        { key:'missingUpsJobs', label:'Missing UPS Jobs', type:'number' },
+        { key:'totalLayoutUps', label:'Total UPS', type:'number' },
+        { key:'totalOrderQty', label:'Order Qty', type:'number' },
+        { key:'jobsAreaSqIn', label:'Jobs Area sq.in', type:'number' },
+        { key:'utilizationPct', label:'Utilization %', type:'number' },
+        { key:'wastagePct', label:'Wastage %', type:'number' },
+        { key:'jobAreaDetail', label:'Job Area Detail' },
+        { key:'artworkCreatedAt', label:'Artwork Created', type:'datetime' },
+        { key:'artworkApprovedAt', label:'Artwork Approved', type:'datetime' }
+      ],
+      rows: rows
+    }, {
+      key: 'sheet-utilization-detail',
+      title: 'Artwork Sheet Utilization Job Detail',
+      subtitle: 'Line-level area contribution used by the summary report.',
+      minWidth: 3600,
+      columns: [
+        { key:'artworkNo', label:'Artwork No' },
+        { key:'soNumber', label:'SO No' },
+        { key:'lineNo', label:'Line' },
+        { key:'soDate', label:'SO Date', type:'date' },
+        { key:'poNumber', label:'PO No' },
+        { key:'poDate', label:'PO Date', type:'date' },
+        { key:'soLineStatus', label:'SO Line Status', type:'status' },
+        { key:'artworkStatus', label:'Artwork Status', type:'status' },
+        { key:'lineCalcStatus', label:'Calc Status', type:'status' },
+        { key:'salesRep', label:'Sales Rep' },
+        { key:'clientName', label:'Client' },
+        { key:'division', label:'Division' },
+        { key:'category', label:'Category' },
+        { key:'productCode', label:'Product Code' },
+        { key:'productName', label:'Product' },
+        { key:'productType', label:'Product Type' },
+        { key:'orderQty', label:'Order Qty', type:'number' },
+        { key:'unit', label:'Unit' },
+        { key:'itemLengthMm', label:'Item Length mm', type:'number' },
+        { key:'itemWidthMm', label:'Item Width mm', type:'number' },
+        { key:'itemAreaSqIn', label:'Item Area sq.in', type:'number' },
+        { key:'layoutUps', label:'Layout UPS', type:'number' },
+        { key:'jobLayoutAreaSqIn', label:'Job Layout Area sq.in', type:'number' },
+        { key:'sheetBasisLengthMm', label:'Basis Length', type:'number' },
+        { key:'sheetBasisWidthMm', label:'Basis Width', type:'number' },
+        { key:'sheetAreaSqIn', label:'Sheet Area sq.in', type:'number' },
+        { key:'sheetUps', label:'Sheet UPS', type:'number' },
+        { key:'acrossUps', label:'Across UPS', type:'number' },
+        { key:'alongUps', label:'Along UPS', type:'number' },
+        { key:'totalUps', label:'Total UPS', type:'number' }
+      ],
+      rows: detailRows
     }]
   };
 }
@@ -31532,6 +32405,7 @@ function reportsGetSectionData(section, params, token) {
   if (key === 'planning') result = _reportsSectionPlanning_(token, params);
   else if (key === 'jobprofitability') result = _reportsSectionJobProfitability_(token, params);
   else if (key === 'salesorders') result = _reportsSectionSalesOrders_(token, params);
+  else if (key === 'sheetutilization') result = _reportsSectionSheetUtilization_(token, params);
   else if (key === 'polines') result = _reportsSectionPOLines_(token, params);
   else if (key === 'prlifecycle') result = _reportsSectionPRLifecycle_(token, params);
   else if (key === 'departmentpurchases') result = _reportsSectionDepartmentPurchases_(token, params);
@@ -32219,14 +33093,14 @@ function _planningDisplayClosureStatus_(row) {
   if (rawStatus === 'SHORT_CLOSED') return 'SHORT_CLOSED';
   if (closedBy.indexOf('SHORT CLOSE') !== -1 || closedBy.indexOf('SHORT_CLOSE') !== -1) return 'SHORT_CLOSED';
   if (rawStatus === 'PARTIAL_DISPATCHED') return 'PARTIAL_DISPATCHED';
-  if (rawStatus === 'CLOSED' && closedBy.indexOf('MANUAL') !== -1) return 'CLOSED';
+  if (rawStatus === 'CLOSED' || rawStatus === 'CANCELLED') return 'CLOSED';
   return 'OPEN';
 }
 
 function _planningClosureReason_(row) {
   if (row.autoClosedByDispatch) return 'Fully billed';
   if (String(row.closureStatus || '').toUpperCase() === 'SHORT_CLOSED') return row.closedBy || 'Manual short close';
-  if (String(row.closureStatus || '').toUpperCase() === 'CLOSED') return row.closedBy || 'Manual close';
+  if (String(row.closureStatus || '').toUpperCase() === 'CLOSED') return row.closedBy || 'Closed';
   if (String(row.closureStatus || '').toUpperCase() === 'PARTIAL_DISPATCHED') {
     return 'Marked for partial dispatch';
   }
