@@ -8885,7 +8885,7 @@ CREATE VIEW public.v_checklist_task_instances_ui AS
             WHEN ((i.status = ANY (ARRAY['PENDING'::text, 'OVERDUE'::text])) AND (i.due_at < now())) THEN 'OVERDUE'::text
             ELSE i.status
         END AS effective_status,
-    ((i.status = ANY (ARRAY['PENDING'::text, 'OVERDUE'::text])) AND i.is_mandatory AND (i.due_at <= now())) AS is_blocking,
+    ((i.status = ANY (ARRAY['PENDING'::text, 'OVERDUE'::text])) AND i.is_mandatory AND (i.due_at <= (now() - '3 days'::interval))) AS is_blocking,
     i.completed_at,
     i.completed_by,
     i.completion_note,
@@ -11483,6 +11483,266 @@ UNION ALL
     tooling_receipts.freight_terms,
     tooling_receipts.remarks
    FROM tooling_receipts;
+
+
+--
+-- Name: v_report_dispatch_discrepancy_lines; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_dispatch_discrepancy_lines WITH (security_invoker='on') AS
+ WITH billing_base AS (
+         SELECT il.so_line_id,
+            min(inv.invoice_date) AS first_invoice_date,
+            max(inv.invoice_date) AS last_invoice_date,
+            max(inv.created_at) AS last_billed_at,
+            (count(DISTINCT il.invoice_id))::integer AS invoice_count,
+            string_agg(DISTINCT NULLIF(inv.invoice_no, ''::text), ', '::text ORDER BY NULLIF(inv.invoice_no, ''::text)) AS invoice_nos,
+            sum(COALESCE(il.qty, (0)::numeric)) AS billed_qty
+           FROM (public.invoice_lines il
+             JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+          WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          GROUP BY il.so_line_id
+        ), packing_base AS (
+         SELECT pr.so_line_id,
+            (count(*))::integer AS packing_entry_count,
+            sum(COALESCE(pr.packed_qty, (0)::numeric)) AS packed_qty,
+            max(COALESCE(pr.produced_qty, (0)::numeric)) AS packing_produced_qty,
+            max(pr.packed_at) AS last_packed_at
+           FROM public.packing_records pr
+          WHERE (pr.so_line_id IS NOT NULL)
+          GROUP BY pr.so_line_id
+        ), packing_queue_base AS (
+         SELECT pq.so_line_id,
+            max(NULLIF(pq.department_category, ''::text)) AS department_category,
+            max(NULLIF(pq.artwork_no, ''::text)) AS artwork_no,
+            string_agg(DISTINCT NULLIF(pq.wo_number, ''::text), ', '::text ORDER BY NULLIF(pq.wo_number, ''::text)) AS packing_queue_wo_numbers,
+            max(pq.wo_date) AS latest_packing_queue_wo_date,
+            max(COALESCE(pq.produced_qty, (0)::numeric)) AS queue_produced_qty,
+            max(COALESCE(pq.packed_qty, (0)::numeric)) AS queue_packed_qty
+           FROM public.v_packing_queue_fast pq
+          WHERE (pq.so_line_id IS NOT NULL)
+          GROUP BY pq.so_line_id
+        ), wo_base AS (
+         SELECT sol.id AS so_line_id,
+            (count(DISTINCT woj.wo_id))::integer AS wo_count,
+            string_agg(DISTINCT NULLIF(wo.wo_number, ''::text), ', '::text ORDER BY NULLIF(wo.wo_number, ''::text)) AS wo_numbers,
+            min(wo.wo_date) AS first_wo_date,
+            max(wo.wo_date) AS latest_wo_date
+           FROM (((public.sales_order_lines sol
+             JOIN public.sales_orders so ON ((so.id = sol.so_id)))
+             JOIN public.work_order_jobs woj ON (((woj.so_number = so.so_number) AND ((woj.line_no)::text = (sol.line_no)::text))))
+             LEFT JOIN public.work_orders wo ON ((wo.id = woj.wo_id)))
+          GROUP BY sol.id
+        ), production_direct AS (
+         SELECT pe.so_number,
+            pe.line_no,
+            (count(*))::integer AS production_entry_count,
+            max(pe.entry_datetime) AS last_production_at,
+            sum(COALESCE(pe.ok_qty, GREATEST((COALESCE(pe.produced_qty, (0)::numeric) - COALESCE(pe.rejected_qty, (0)::numeric)), (0)::numeric))) AS direct_ok_qty,
+            sum(COALESCE(pe.produced_qty, (0)::numeric)) AS direct_produced_qty
+           FROM public.production_entries pe
+          WHERE ((COALESCE(pe.so_number, ''::text) <> ''::text) AND (COALESCE(pe.line_no, ''::text) <> ''::text))
+          GROUP BY pe.so_number, pe.line_no
+        ), artwork_ranked AS (
+         SELECT a.so_id,
+            a.line_no,
+            a.artwork_no,
+            a.product_type,
+            a.status AS artwork_status,
+            a.artwork_at,
+            a.approved_at AS artwork_approved_at,
+            COALESCE(a.stock_qty_to_bill, (0)::numeric) AS stock_qty_to_bill,
+            row_number() OVER (PARTITION BY a.so_id, a.line_no ORDER BY a.approved_at DESC NULLS LAST, a.artwork_at DESC NULLS LAST, a.id DESC) AS rn
+           FROM public.artworks a
+        ), base AS (
+         SELECT so.id AS so_id,
+            sol.id AS so_line_id,
+            so.so_number,
+            so.so_date,
+            so.po_number,
+            so.po_date,
+            so.sales_rep,
+            COALESCE(c_1.client_name, so.client_code, ''::text) AS client_name,
+            sol.line_no,
+            sol.product_code,
+            sol.product_name,
+            sol.category,
+            sol.division,
+            COALESCE(pq.department_category, ar.product_type, sol.division, sol.category, 'Unassigned'::text) AS department,
+            COALESCE(sol.qty, (0)::numeric) AS order_qty,
+            sol.unit,
+            COALESCE(sol.rate, (0)::numeric) AS rate,
+            COALESCE(sol.net_amount, sol.amount, sol.total_amount, sol.line_total, (COALESCE(sol.qty, (0)::numeric) * COALESCE(sol.rate, (0)::numeric)), (0)::numeric) AS order_value,
+            COALESCE(sol.status, 'OPEN'::text) AS so_line_status,
+            COALESCE(so.status, 'OPEN'::text) AS so_status,
+            ar.artwork_no,
+            ar.product_type,
+            COALESCE(ar.artwork_status, 'NO_ART'::text) AS artwork_status,
+            ar.artwork_at,
+            ar.artwork_approved_at,
+            COALESCE(ar.stock_qty_to_bill, (0)::numeric) AS stock_qty_to_bill,
+            COALESCE(wb.wo_count, 0) AS wo_count,
+            COALESCE(NULLIF(wb.wo_numbers, ''::text), pq.packing_queue_wo_numbers, ''::text) AS wo_numbers,
+            wb.first_wo_date,
+            COALESCE(wb.latest_wo_date, pq.latest_packing_queue_wo_date) AS latest_wo_date,
+            COALESCE(pb.packing_entry_count, 0) AS packing_entry_count,
+            COALESCE(pb.packed_qty, pq.queue_packed_qty, (0)::numeric) AS packed_qty,
+            GREATEST(COALESCE(pb.packing_produced_qty, (0)::numeric), COALESCE(pq.queue_produced_qty, (0)::numeric), COALESCE(pd.direct_ok_qty, (0)::numeric)) AS production_completed_qty,
+            pb.last_packed_at,
+            COALESCE(pd.production_entry_count, 0) AS production_entry_count,
+            COALESCE(pd.direct_ok_qty, (0)::numeric) AS production_entry_ok_qty,
+            COALESCE(pd.direct_produced_qty, (0)::numeric) AS production_entry_produced_qty,
+            pd.last_production_at,
+            COALESCE(bb.invoice_count, 0) AS invoice_count,
+            COALESCE(bb.invoice_nos, ''::text) AS invoice_nos,
+            COALESCE(bb.billed_qty, (0)::numeric) AS billed_qty,
+            bb.first_invoice_date,
+            bb.last_invoice_date,
+            bb.last_billed_at
+           FROM ((((((((billing_base bb
+             JOIN public.sales_order_lines sol ON ((sol.id = bb.so_line_id)))
+             JOIN public.sales_orders so ON ((so.id = sol.so_id)))
+             LEFT JOIN public.clients c_1 ON ((c_1.client_code = so.client_code)))
+             LEFT JOIN artwork_ranked ar ON (((ar.so_id = so.id) AND (ar.line_no = sol.line_no) AND (ar.rn = 1))))
+             LEFT JOIN wo_base wb ON ((wb.so_line_id = sol.id)))
+             LEFT JOIN packing_base pb ON ((pb.so_line_id = sol.id)))
+             LEFT JOIN packing_queue_base pq ON ((pq.so_line_id = sol.id)))
+             LEFT JOIN production_direct pd ON (((pd.so_number = so.so_number) AND (pd.line_no = (sol.line_no)::text))))
+          WHERE ((upper(COALESCE(so.order_prefix, ''::text)) <> 'MB'::text) AND (upper(COALESCE(so.sales_type, ''::text)) <> 'MANUAL_BILLING'::text) AND (COALESCE(so.so_number, ''::text) !~* '^MB[/-]'::text) AND (upper(COALESCE(so.remarks, ''::text)) !~~ '%SYSTEM GENERATED FOR MANUAL BILLING%'::text) AND (upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text))
+        ), calc AS (
+         SELECT b.so_id,
+            b.so_line_id,
+            b.so_number,
+            b.so_date,
+            b.po_number,
+            b.po_date,
+            b.sales_rep,
+            b.client_name,
+            b.line_no,
+            b.product_code,
+            b.product_name,
+            b.category,
+            b.division,
+            b.department,
+            b.order_qty,
+            b.unit,
+            b.rate,
+            b.order_value,
+            b.so_line_status,
+            b.so_status,
+            b.artwork_no,
+            b.product_type,
+            b.artwork_status,
+            b.artwork_at,
+            b.artwork_approved_at,
+            b.stock_qty_to_bill,
+            b.wo_count,
+            b.wo_numbers,
+            b.first_wo_date,
+            b.latest_wo_date,
+            b.packing_entry_count,
+            b.packed_qty,
+            b.production_completed_qty,
+            b.last_packed_at,
+            b.production_entry_count,
+            b.production_entry_ok_qty,
+            b.production_entry_produced_qty,
+            b.last_production_at,
+            b.invoice_count,
+            b.invoice_nos,
+            b.billed_qty,
+            b.first_invoice_date,
+            b.last_invoice_date,
+            b.last_billed_at,
+            b.last_invoice_date AS review_date,
+            COALESCE(b.billed_qty, (0)::numeric) AS review_qty,
+            GREATEST((COALESCE(b.billed_qty, (0)::numeric) - COALESCE(b.stock_qty_to_bill, (0)::numeric)), (0)::numeric) AS required_current_process_qty,
+            GREATEST(((COALESCE(b.billed_qty, (0)::numeric) - COALESCE(b.stock_qty_to_bill, (0)::numeric)) - COALESCE(b.production_completed_qty, (0)::numeric)), (0)::numeric) AS production_short_qty,
+            GREATEST(((COALESCE(b.billed_qty, (0)::numeric) - COALESCE(b.stock_qty_to_bill, (0)::numeric)) - COALESCE(b.packed_qty, (0)::numeric)), (0)::numeric) AS packing_short_qty,
+            (0)::numeric AS billed_without_dispatch_qty,
+            GREATEST((COALESCE(b.billed_qty, (0)::numeric) - COALESCE(b.order_qty, (0)::numeric)), (0)::numeric) AS over_dispatch_qty
+           FROM base b
+        )
+ SELECT so_id,
+    so_line_id,
+    so_number,
+    so_date,
+    po_number,
+    po_date,
+    sales_rep,
+    client_name,
+    line_no,
+    product_code,
+    product_name,
+    category,
+    division,
+    department,
+    order_qty,
+    unit,
+    rate,
+    round(order_value, 2) AS order_value,
+    so_status,
+    so_line_status,
+    artwork_no,
+    product_type,
+    artwork_status,
+    artwork_at,
+    artwork_approved_at,
+    wo_count,
+    wo_numbers,
+    first_wo_date,
+    latest_wo_date,
+    NULL::date AS first_dispatch_date,
+    NULL::date AS last_dispatch_date,
+    review_date,
+    NULL::timestamp without time zone AS last_dispatch_at,
+    0 AS dispatch_entry_count,
+    ''::text AS dispatch_nos,
+    ''::text AS dispatch_dates,
+    (0)::numeric AS dispatched_qty,
+    invoice_count,
+    invoice_nos,
+    round(billed_qty, 3) AS billed_qty,
+    first_invoice_date,
+    last_invoice_date,
+    last_billed_at,
+    production_entry_count,
+    round(production_entry_ok_qty, 3) AS production_entry_ok_qty,
+    round(production_entry_produced_qty, 3) AS production_entry_produced_qty,
+    round(production_completed_qty, 3) AS production_completed_qty,
+    last_production_at,
+    packing_entry_count,
+    round(packed_qty, 3) AS packed_qty,
+    last_packed_at,
+    round(stock_qty_to_bill, 3) AS stock_qty_to_bill,
+    round(review_qty, 3) AS review_qty,
+    round(required_current_process_qty, 3) AS required_current_process_qty,
+    round(production_short_qty, 3) AS production_short_qty,
+    round(packing_short_qty, 3) AS packing_short_qty,
+    round(billed_without_dispatch_qty, 3) AS billed_without_dispatch_qty,
+    round(over_dispatch_qty, 3) AS over_dispatch_qty,
+        CASE
+            WHEN ((production_short_qty > (0)::numeric) AND (packing_short_qty > (0)::numeric)) THEN 'PRODUCTION_AND_PACKING_SHORT'::text
+            WHEN (production_short_qty > (0)::numeric) THEN 'PRODUCTION_SHORT'::text
+            WHEN (packing_short_qty > (0)::numeric) THEN 'PACKING_SHORT'::text
+            WHEN (over_dispatch_qty > (0)::numeric) THEN 'BILLED_MORE_THAN_ORDER'::text
+            ELSE 'OK'::text
+        END AS discrepancy_status,
+    concat_ws(' | '::text,
+        CASE
+            WHEN (production_short_qty > (0)::numeric) THEN ('Production short '::text || (round(production_short_qty, 3))::text)
+            ELSE NULL::text
+        END,
+        CASE
+            WHEN (packing_short_qty > (0)::numeric) THEN ('Packing short '::text || (round(packing_short_qty, 3))::text)
+            ELSE NULL::text
+        END,
+        CASE
+            WHEN (over_dispatch_qty > (0)::numeric) THEN ('Billed > order by '::text || (round(over_dispatch_qty, 3))::text)
+            ELSE NULL::text
+        END) AS discrepancy_reason
+   FROM calc c
+  WHERE ((production_short_qty > (0)::numeric) OR (packing_short_qty > (0)::numeric) OR (over_dispatch_qty > (0)::numeric));
 
 
 --

@@ -9210,6 +9210,7 @@ function adminSaveRolePermissions(payload, token){
 
 const CHECKLIST_TIMEZONE = 'Asia/Kolkata';
 const CHECKLIST_DEFAULT_HORIZON_DAYS = 45;
+const CHECKLIST_LOCK_GRACE_DAYS = 3;
 
 function _checklistDateString_(value) {
   const dt = value ? new Date(value) : new Date();
@@ -9222,6 +9223,10 @@ function _checklistToday_() {
 
 function _checklistNowIso_() {
   return new Date().toISOString();
+}
+
+function _checklistLockCutoffIso_() {
+  return new Date(Date.now() - (CHECKLIST_LOCK_GRACE_DAYS * 24 * 60 * 60 * 1000)).toISOString();
 }
 
 function _checklistParseLocalDate_(dateStr) {
@@ -9593,13 +9598,14 @@ function _checklistUpdateOverdueAll_() {
 
 function _checklistBlockingRowsForUser_(userId) {
   if (!userId) return [];
+  const lockCutoff = _checklistLockCutoffIso_();
   return supabaseSelect('checklist_task_instances', {
     select: 'id,title,due_at,scheduled_date,priority,status',
     filters: {
       assigned_user_id: 'eq.' + userId,
       is_mandatory: 'eq.true',
       status: 'in.("PENDING","OVERDUE")',
-      due_at: 'lte.' + _checklistNowIso_()
+      due_at: 'lte.' + lockCutoff
     },
     order: 'due_at.asc',
     limit: 20
@@ -9807,7 +9813,7 @@ function _checklistGetBlockingStatusInternal_(sessionUser, token) {
       blocked: rows.length > 0,
       pendingCount: rows.length,
       tasks: rows,
-      message: rows.length ? (rows.length + ' mandatory checklist task(s) are overdue.') : ''
+      message: rows.length ? (rows.length + ' mandatory checklist task(s) are more than ' + CHECKLIST_LOCK_GRACE_DAYS + ' days overdue.') : ''
     };
     cache.put(cacheKey, JSON.stringify(result), 30);
     return result;
@@ -9833,7 +9839,7 @@ function renderChecklistBlockedPage(block, token) {
   const webUrl = ScriptApp.getService().getUrl();
   const checklistUrl = webUrl + '?p=checklist&token=' + encodeURIComponent(token || '');
   const rows = (block.tasks || []).map(function(t) {
-    return '<li><strong>' + _htmlEsc_(t.title || 'Checklist task') + '</strong> <span>Due: ' + _htmlEsc_(String(t.due_at || '').replace('T', ' ').slice(0, 16)) + '</span></li>';
+    return '<li><strong>' + _htmlEsc_(t.title || 'Checklist task') + '</strong> <span>Due: ' + _htmlEsc_(_checklistFormatIstDateTime_(t.due_at)) + '</span></li>';
   }).join('');
   return HtmlService.createHtmlOutput(
     '<!doctype html><html><head><base target="_top"><style>' +
@@ -9842,7 +9848,7 @@ function renderChecklistBlockedPage(block, token) {
     'h1{font-size:20px;margin:0 0 8px}p{color:#64748b;font-size:13px;line-height:1.5}ul{padding-left:20px;color:#334155;font-size:13px}.btn{display:inline-flex;margin-top:12px;height:36px;align-items:center;padding:0 14px;border-radius:999px;background:#2563eb;color:white;text-decoration:none;font-weight:700;font-size:13px}' +
     '</style></head><body><div class="box"><h1>Checklist tasks pending</h1>' +
     '<p>Your mandatory checklist needs attention before continuing with other ERP modules.</p>' +
-    '<ul>' + rows + '</ul><a class="btn" href="' + _htmlEsc_(checklistUrl) + '">Open Checklist</a></div></body></html>'
+    '<ul>' + rows + '</ul><p>Lock starts after ' + CHECKLIST_LOCK_GRACE_DAYS + ' full overdue days for mandatory tasks.</p><a class="btn" href="' + _htmlEsc_(checklistUrl) + '">Open Checklist</a></div></body></html>'
   ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
@@ -9850,6 +9856,15 @@ function _htmlEsc_(value) {
   return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
     return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
   });
+}
+
+function _checklistFormatIstDateTime_(value) {
+  if (!value) return '';
+  try {
+    return Utilities.formatDate(new Date(value), CHECKLIST_TIMEZONE, 'dd MMM yyyy, hh:mm a');
+  } catch (err) {
+    return String(value || '');
+  }
 }
 
 function _checklistRequireAdminOrEdit_(token) {
@@ -30538,6 +30553,223 @@ function _reportsSectionDepartmentPurchases_(token, params) {
   };
 }
 
+function _reportsSectionDispatchDiscrepancy_(token, params) {
+  _reportsRequireSession_(token);
+  const filters = _reportsNormalizeFilters_(params);
+  filters.pendingOnly = false;
+
+  const rows = _reportsSelectAllRequired_('v_report_dispatch_discrepancy_lines', {
+    filters: _reportsApplyDateFilterToQuery_(filters, 'review_date'),
+    order: 'review_date.desc,so_number.desc,line_no.asc'
+  }).map(function(row) {
+    return {
+      soNumber: row.so_number || '',
+      lineNo: row.line_no == null ? '' : String(row.line_no),
+      soDate: row.so_date || '',
+      poNumber: row.po_number || '',
+      poDate: row.po_date || '',
+      salesRep: row.sales_rep || '',
+      clientName: row.client_name || '',
+      productCode: row.product_code || '',
+      productName: row.product_name || '',
+      category: row.category || '',
+      division: row.division || '',
+      department: row.department || '',
+      orderQty: _reportsSafeNumber_(row.order_qty),
+      unit: row.unit || '',
+      rate: _reportsSafeNumber_(row.rate),
+      orderValue: _reportsSafeNumber_(row.order_value),
+      soStatus: row.so_status || '',
+      soLineStatus: row.so_line_status || '',
+      artworkNo: row.artwork_no || '',
+      productType: row.product_type || '',
+      artworkStatus: row.artwork_status || '',
+      artworkAt: row.artwork_at || '',
+      artworkApprovedAt: row.artwork_approved_at || '',
+      woCount: _reportsSafeNumber_(row.wo_count),
+      woNumbers: row.wo_numbers || '',
+      firstWoDate: row.first_wo_date || '',
+      latestWoDate: row.latest_wo_date || '',
+      reviewDate: row.review_date || row.last_invoice_date || '',
+      invoiceCount: _reportsSafeNumber_(row.invoice_count),
+      invoiceNos: row.invoice_nos || '',
+      billedQty: _reportsSafeNumber_(row.billed_qty),
+      firstInvoiceDate: row.first_invoice_date || '',
+      lastInvoiceDate: row.last_invoice_date || '',
+      productionEntryCount: _reportsSafeNumber_(row.production_entry_count),
+      productionEntryOkQty: _reportsSafeNumber_(row.production_entry_ok_qty),
+      productionEntryProducedQty: _reportsSafeNumber_(row.production_entry_produced_qty),
+      productionCompletedQty: _reportsSafeNumber_(row.production_completed_qty),
+      lastProductionAt: row.last_production_at || '',
+      packingEntryCount: _reportsSafeNumber_(row.packing_entry_count),
+      packedQty: _reportsSafeNumber_(row.packed_qty),
+      lastPackedAt: row.last_packed_at || '',
+      stockQtyToBill: _reportsSafeNumber_(row.stock_qty_to_bill),
+      reviewQty: _reportsSafeNumber_(row.review_qty),
+      requiredCurrentProcessQty: _reportsSafeNumber_(row.required_current_process_qty),
+      productionShortQty: _reportsSafeNumber_(row.production_short_qty),
+      packingShortQty: _reportsSafeNumber_(row.packing_short_qty),
+      billedMoreThanOrderQty: _reportsSafeNumber_(row.over_dispatch_qty),
+      discrepancyStatus: row.discrepancy_status || '',
+      discrepancyReason: row.discrepancy_reason || ''
+    };
+  }).filter(function(row) {
+    return _reportsDatePasses_(row.reviewDate, filters) &&
+      _reportsTextPasses_(row, filters, [
+        'soNumber',
+        'lineNo',
+        'poNumber',
+        'salesRep',
+        'clientName',
+        'productCode',
+        'productName',
+        'category',
+        'division',
+        'department',
+        'artworkNo',
+        'productType',
+        'woNumbers',
+        'invoiceNos',
+        'discrepancyStatus',
+        'discrepancyReason'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'department',
+        'division',
+        'category',
+        'soStatus',
+        'soLineStatus',
+        'artworkStatus',
+        'productType',
+        'discrepancyStatus',
+        'discrepancyReason'
+      ]);
+  });
+
+  const summaryMap = {};
+  rows.forEach(function(row) {
+    const key = String(row.department || 'Unassigned').trim() || 'Unassigned';
+    if (!summaryMap[key]) {
+      summaryMap[key] = {
+        department: key,
+        lineCount: 0,
+        productionShortLines: 0,
+        packingShortLines: 0,
+        billedMoreThanOrderLines: 0,
+        billedQty: 0,
+        productionShortQty: 0,
+        packingShortQty: 0
+      };
+    }
+    const bucket = summaryMap[key];
+    bucket.lineCount += 1;
+    bucket.billedQty += _reportsSafeNumber_(row.billedQty);
+    bucket.productionShortQty += _reportsSafeNumber_(row.productionShortQty);
+    bucket.packingShortQty += _reportsSafeNumber_(row.packingShortQty);
+    if (_reportsSafeNumber_(row.productionShortQty) > 0) bucket.productionShortLines += 1;
+    if (_reportsSafeNumber_(row.packingShortQty) > 0) bucket.packingShortLines += 1;
+    if (_reportsSafeNumber_(row.billedMoreThanOrderQty) > 0) bucket.billedMoreThanOrderLines += 1;
+  });
+
+  const summaryRows = Object.keys(summaryMap).map(function(key) {
+    const row = summaryMap[key];
+    return {
+      department: row.department,
+      lineCount: row.lineCount,
+      productionShortLines: row.productionShortLines,
+      packingShortLines: row.packingShortLines,
+      billedMoreThanOrderLines: row.billedMoreThanOrderLines,
+      billedQty: _reportsRoundNumber_(row.billedQty, 3),
+      productionShortQty: _reportsRoundNumber_(row.productionShortQty, 3),
+      packingShortQty: _reportsRoundNumber_(row.packingShortQty, 3)
+    };
+  }).sort(function(a, b) {
+    return _reportsSafeNumber_(b.lineCount) - _reportsSafeNumber_(a.lineCount) ||
+      String(a.department || '').localeCompare(String(b.department || ''));
+  });
+
+  return {
+    ok: true,
+    title: 'Billing Entry Discrepancy',
+    metrics: {
+      totalRows: rows.length,
+      productionShortRows: rows.filter(function(row){ return _reportsSafeNumber_(row.productionShortQty) > 0; }).length,
+      packingShortRows: rows.filter(function(row){ return _reportsSafeNumber_(row.packingShortQty) > 0; }).length,
+      billedMoreThanOrderRows: rows.filter(function(row){ return _reportsSafeNumber_(row.billedMoreThanOrderQty) > 0; }).length
+    },
+    tables: [{
+      key: 'dispatch-discrepancy-summary',
+      title: 'Department-wise Discrepancy Summary',
+      subtitle: 'Billing exception count by department. Quantities compare billed qty against production and packing evidence.',
+      minWidth: 1320,
+      columns: [
+        { key:'department', label:'Department' },
+        { key:'lineCount', label:'Exception Lines', type:'number' },
+        { key:'productionShortLines', label:'Production Short Lines', type:'number' },
+        { key:'packingShortLines', label:'Packing Short Lines', type:'number' },
+        { key:'billedMoreThanOrderLines', label:'Billed > Order Lines', type:'number' },
+        { key:'billedQty', label:'Billed Qty', type:'number' },
+        { key:'productionShortQty', label:'Production Short Qty', type:'number' },
+        { key:'packingShortQty', label:'Packing Short Qty', type:'number' }
+      ],
+      rows: summaryRows
+    }, {
+      key: 'dispatch-discrepancy-lines',
+      title: 'Billing Entry Discrepancy Line Details',
+      subtitle: 'One row per billed SO line where production or packing quantities do not support billing.',
+      minWidth: 3900,
+      columns: [
+        { key:'discrepancyStatus', label:'Discrepancy Status', type:'status' },
+        { key:'discrepancyReason', label:'Reason' },
+        { key:'reviewDate', label:'Review Date', type:'date' },
+        { key:'department', label:'Department' },
+        { key:'soNumber', label:'SO No' },
+        { key:'lineNo', label:'Line' },
+        { key:'soDate', label:'SO Date', type:'date' },
+        { key:'poNumber', label:'PO No' },
+        { key:'poDate', label:'PO Date', type:'date' },
+        { key:'clientName', label:'Client' },
+        { key:'salesRep', label:'Sales Rep' },
+        { key:'division', label:'Division' },
+        { key:'category', label:'Category' },
+        { key:'productCode', label:'Product Code' },
+        { key:'productName', label:'Product' },
+        { key:'orderQty', label:'Order Qty', type:'number' },
+        { key:'unit', label:'Unit' },
+        { key:'soLineStatus', label:'SO Line Status', type:'status' },
+        { key:'artworkNo', label:'Artwork No' },
+        { key:'productType', label:'Artwork Type' },
+        { key:'artworkStatus', label:'Artwork Status', type:'status' },
+        { key:'artworkAt', label:'Artwork Created', type:'datetime' },
+        { key:'artworkApprovedAt', label:'Artwork Approved', type:'datetime' },
+        { key:'woCount', label:'WO Count', type:'number' },
+        { key:'woNumbers', label:'WO Nos' },
+        { key:'firstWoDate', label:'First WO Date', type:'date' },
+        { key:'latestWoDate', label:'Latest WO Date', type:'date' },
+        { key:'invoiceNos', label:'Invoice Nos' },
+        { key:'firstInvoiceDate', label:'First Invoice Date', type:'date' },
+        { key:'lastInvoiceDate', label:'Last Invoice Date', type:'date' },
+        { key:'invoiceCount', label:'Invoice Count', type:'number' },
+        { key:'billedQty', label:'Billed Qty', type:'number' },
+        { key:'productionEntryCount', label:'Production Entries', type:'number' },
+        { key:'productionEntryOkQty', label:'Production Entry OK Qty', type:'number' },
+        { key:'productionCompletedQty', label:'Production Completed Qty', type:'number' },
+        { key:'lastProductionAt', label:'Last Production', type:'datetime' },
+        { key:'packingEntryCount', label:'Packing Entries', type:'number' },
+        { key:'packedQty', label:'Packed Qty', type:'number' },
+        { key:'lastPackedAt', label:'Last Packed', type:'datetime' },
+        { key:'stockQtyToBill', label:'Stock Qty Allowed', type:'number' },
+        { key:'reviewQty', label:'Review Qty', type:'number' },
+        { key:'requiredCurrentProcessQty', label:'Required Current Qty', type:'number' },
+        { key:'productionShortQty', label:'Production Short Qty', type:'number' },
+        { key:'packingShortQty', label:'Packing Short Qty', type:'number' },
+        { key:'billedMoreThanOrderQty', label:'Billed > Order Qty', type:'number' }
+      ],
+      rows: rows
+    }]
+  };
+}
+
 function _reportsSectionTraceability_(token, params) {
   _reportsRequireSession_(token);
   const filters = _reportsNormalizeFilters_(params);
@@ -32084,6 +32316,7 @@ function reportsGetSectionData(section, params, token) {
   else if (key === 'jobprofitability') result = _reportsSectionJobProfitability_(token, params);
   else if (key === 'salesorders') result = _reportsSectionSalesOrders_(token, params);
   else if (key === 'sheetutilization') result = _reportsSectionSheetUtilization_(token, params);
+  else if (key === 'dispatchdiscrepancy') result = _reportsSectionDispatchDiscrepancy_(token, params);
   else if (key === 'polines') result = _reportsSectionPOLines_(token, params);
   else if (key === 'prlifecycle') result = _reportsSectionPRLifecycle_(token, params);
   else if (key === 'departmentpurchases') result = _reportsSectionDepartmentPurchases_(token, params);
