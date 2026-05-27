@@ -681,11 +681,13 @@ const DEFAULT_MASTERS = {
     { teeth:64, teethInch:8, teethMm:203.2, noOfCylinder:8 },
     { teeth:69, teethInch:8.625, teethMm:219.075, noOfCylinder:8 },
     { teeth:74, teethInch:9.25, teethMm:234.95, noOfCylinder:8 },
+    { teeth:76, teethInch:9.5, teethMm:241.3, noOfCylinder:8 },
     { teeth:80, teethInch:10, teethMm:254, noOfCylinder:8 },
     { teeth:85, teethInch:10.625, teethMm:269.875, noOfCylinder:8 },
     { teeth:89, teethInch:11.125, teethMm:282.575, noOfCylinder:8 },
     { teeth:96, teethInch:12, teethMm:304.8, noOfCylinder:8 },
     { teeth:102, teethInch:12.75, teethMm:323.85, noOfCylinder:8 },
+    { teeth:105, teethInch:13.125, teethMm:333.375, noOfCylinder:8 },
     { teeth:109, teethInch:13.625, teethMm:346.075, noOfCylinder:8 },
     { teeth:114, teethInch:14.25, teethMm:361.95, noOfCylinder:8 },
     { teeth:118, teethInch:14.75, teethMm:374.65, noOfCylinder:6 },
@@ -6425,10 +6427,19 @@ function listFlexoWOStatus(requestOrLimit, offset) {
       if (type && type !== 'FLEXO') return;
       woNoMap[w.id] = w.wo_number || '';
       const fx = (w && w.snapshot_json && w.snapshot_json.flexoDetails) || {};
+      const extraMaterials = Array.isArray(w?.snapshot_json?.extraMaterials) ? w.snapshot_json.extraMaterials : [];
+      const itemSummary = extraMaterials
+        .map(function(row) {
+          const code = String(row?.materialItemCode || row?.material_item_code || '').trim();
+          const name = String(row?.materialName || row?.material_name || '').trim();
+          return [code, name].filter(Boolean).join(' - ') || code || name;
+        })
+        .filter(Boolean)
+        .join(' | ');
       woMetaMap[w.id] = {
         teeth: fx.cylinderTeeth == null ? '' : String(fx.cylinderTeeth),
         ups: fx.totalUps == null ? '' : String(fx.totalUps),
-        itemDetails: [String(fx.itemCode || '').trim(), String(fx.itemName || '').trim()].filter(Boolean).join(' - '),
+        itemDetails: itemSummary || [String(fx.itemCode || '').trim(), String(fx.itemName || '').trim()].filter(Boolean).join(' - '),
         woDate: w.wo_date || ''
       };
     });
@@ -15429,6 +15440,7 @@ function _opsStageDatasetSummary_(rows, stage) {
       return sum + Number(focus === 'DISPATCH' ? row.dispatchPendingQty : row.packingPendingQty || 0);
     }, 0),
     readyRows: rows.filter(function(row) { return row.readyToDispatch === true; }).length,
+    fgRows: rows.filter(function(row) { return Number(row.packedQty || 0) > 0; }).length,
     completedRows: rows.filter(function(row) { return focus === 'DISPATCH' ? row.dispatchStatus === 'COMPLETED' : row.packingStatus === 'COMPLETED'; }).length
   };
 }
@@ -15497,7 +15509,7 @@ function _opsMapPackingFastRows_(rows) {
       productCode: row.product_code || '',
       category: row.category || '',
       departmentCategory: row.department_category || '',
-      categoryGroup: _prodFormatCategoryGroupLabel_(row.department_category || row.category || ''),
+      categoryGroup: row.category_group || _prodFormatCategoryGroupLabel_(row.department_category || row.category || ''),
       orderQty: Number(row.order_qty || 0),
       producedQty: Number(row.produced_qty || 0),
       productionProducedQty: Number(row.produced_qty || 0),
@@ -15527,6 +15539,21 @@ function _opsMapPackingFastRows_(rows) {
       remarksPreview: row.product_remarks || row.so_remarks || '',
       transportMode: row.transport_mode || ''
     };
+    if (
+      Object.prototype.hasOwnProperty.call(row, 'packing_status') ||
+      Object.prototype.hasOwnProperty.call(row, 'packing_pending_qty')
+    ) {
+      return Object.assign(base, {
+        currentStage: row.current_stage || (Number(row.packing_pending_qty || 0) > 0 ? 'Packing' : 'Completed'),
+        overallStatus: row.overall_status || 'PENDING',
+        productionStatus: row.production_status || (Number(base.producedQty || 0) > 0 ? 'COMPLETED' : 'PENDING'),
+        packingStatus: row.packing_status || 'PENDING',
+        dispatchStatus: row.dispatch_status || 'PENDING',
+        productionPendingQty: Number(row.production_pending_qty || 0),
+        packingPendingQty: Number(row.packing_pending_qty || 0),
+        dispatchPendingQty: Number(row.dispatch_pending_qty || 0)
+      });
+    }
     return Object.assign(base, _opsComputeLineStatuses_(base));
   });
 }
@@ -15599,6 +15626,22 @@ function packGetDataset(params, token) {
   const cacheKey = _opsFastDatasetCacheKey_('PACKING', p);
   const cached = cache.get(cacheKey);
   if (cached) return JSON.parse(cached);
+  try {
+    const rpcRows = supabaseRpc('packing_queue_dataset', {
+      p_show_pending_all: p.showPendingAll === true,
+      p_include_completed: p.includeCompleted === true,
+      p_date_from: _prodToDateKey_(p.dateFrom) || null,
+      p_date_to: _prodToDateKey_(p.dateTo) || null,
+      p_limit: 5000,
+      p_offset: 0
+    }) || [];
+    const rows = _opsMapPackingFastRows_(rpcRows);
+    const result = { ok: true, rows: rows, summary: _opsStageDatasetSummary_(rows, 'PACKING') };
+    _prodCachePutJsonSafe_(cache, cacheKey, result, 60);
+    return result;
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'packing_queue_dataset')) throw err;
+  }
   const fastRows = _opsFilterStageRows_(_opsMapPackingFastRows_(_excludeCancelledSalesOrdersByNumber_(supabaseSelect('v_packing_queue_fast', {
     select: 'pack_id,so_id,so_line_id,so_number,line_no,product_code,product_name,client_name,category,department_category,order_qty,produced_qty,packed_qty,packed_weight_kg,ready_to_dispatch,expected_delivery,final_delivery,division,quote_no,pm_code,product_remarks,prepress_remarks,so_remarks,artwork_no,wo_number,wo_date,transport_mode',
     order: 'wo_date.desc,so_number.asc,line_no.asc'
@@ -27984,16 +28027,38 @@ function _prodGetEntryMutationBlockReason_(entryRow, routingRow) {
   try {
     const packingRows = _selectInBatches_(
       'packing_records',
-      'so_number,line_no,packed_qty',
+      'id,so_number,line_no,packed_qty',
       'so_number',
       uniqueSoNumbers
     ) || [];
-    const packingHit = packingRows.find(function(row) {
+    const relevantPackingRows = packingRows.filter(function(row) {
       const key = String(row.so_number || '').trim() + '||' + String(row.line_no || '').trim();
-      return lineKeys[key] && Number(row.packed_qty || 0) > 0;
+      return lineKeys[key];
     });
-    if (packingHit) {
-      return 'Packing has already been posted for this work order.';
+    const candidatePackIds = relevantPackingRows.map(function(row) {
+      return String(row.id || '').trim();
+    }).filter(Boolean);
+    const packingLogRows = candidatePackIds.length ? _packSelectEntryLogRowsByPackIds_(candidatePackIds, false) : null;
+    if (Array.isArray(packingLogRows)) {
+      const packedTotalsByLine = {};
+      packingLogRows.forEach(function(row) {
+        const key = String(row.so_number || '').trim() + '||' + String(row.line_no || '').trim();
+        if (!lineKeys[key]) return;
+        packedTotalsByLine[key] = (packedTotalsByLine[key] || 0) + Number(row.packed_qty || 0);
+      });
+      const packingHit = Object.keys(packedTotalsByLine).find(function(key) {
+        return Number(packedTotalsByLine[key] || 0) > 0;
+      });
+      if (packingHit) {
+        return 'Packing has already been posted for this work order.';
+      }
+    } else {
+      const packingHit = relevantPackingRows.find(function(row) {
+        return Number(row.packed_qty || 0) > 0;
+      });
+      if (packingHit) {
+        return 'Packing has already been posted for this work order.';
+      }
     }
   } catch (err) {
     if (!_supabaseRelationMissing_(err, 'packing_records')) throw err;
@@ -29367,6 +29432,347 @@ function _reportsSectionPlanning_(token, params) {
         { key:'lastBilledAt', label:'Last Billing Time', type:'datetime' }
       ],
       rows: rows
+    }]
+  };
+}
+
+function _reportsWipAgeingMapRow_(row) {
+  return {
+    wipScope: row.wip_scope || '',
+    wipStageCode: row.wip_stage_code || '',
+    wipStageName: row.wip_stage_name || '',
+    wipStageSort: _reportsSafeNumber_(row.wip_stage_sort),
+    stageDetail: row.stage_detail || '',
+    stageEntryAt: row.stage_entry_at || '',
+    stageEntryBasis: row.stage_entry_basis || '',
+    orderAgeDays: _reportsSafeNumber_(row.order_age_days),
+    stageAgeDays: _reportsSafeNumber_(row.stage_age_days),
+    soNumber: row.so_number || '',
+    soDate: row.so_date || '',
+    clientName: row.client_name || row.client_code || '',
+    salesRep: row.sales_rep || '',
+    lineNo: row.line_no == null ? '' : String(row.line_no),
+    division: row.division || '',
+    productCode: row.product_code || '',
+    productName: row.product_name || '',
+    category: row.category || '',
+    orderQty: _reportsSafeNumber_(row.order_qty),
+    openQty: _reportsSafeNumber_(row.open_qty),
+    unit: row.unit || '',
+    rate: _reportsSafeNumber_(row.rate),
+    orderValue: _reportsSafeNumber_(row.order_value),
+    wipQty: _reportsSafeNumber_(row.wip_qty),
+    wipValue: _reportsSafeNumber_(row.wip_value),
+    unitValue: _reportsSafeNumber_(row.unit_value),
+    soLineStatus: row.so_line_status || '',
+    expectedDelivery: row.expected_delivery || '',
+    finalDelivery: row.final_delivery || '',
+    accountsStatus: row.accounts_status || '',
+    accountsAt: row.accounts_at || '',
+    businessStatus: row.business_status || '',
+    businessAt: row.business_at || '',
+    salesApprovalStatus: row.sales_approval_status || '',
+    salesApprovalAt: row.sales_approval_at || '',
+    artworkNo: row.artwork_no || '',
+    productType: row.product_type || '',
+    artworkStatus: row.artwork_status || '',
+    artworkAt: row.artwork_at || '',
+    artworkApprovedAt: row.artwork_approved_at || '',
+    plateProcurementStatus: row.plate_procurement_status || '',
+    platePoNos: row.plate_po_nos || '',
+    plateOrderedOn: row.plate_ordered_on || '',
+    plateReceivedOn: row.plate_received_on || '',
+    dieProcurementStatus: row.die_procurement_status || '',
+    diePoNos: row.die_po_nos || '',
+    dieOrderedOn: row.die_ordered_on || '',
+    dieReceivedOn: row.die_received_on || '',
+    woCount: _reportsSafeNumber_(row.wo_count),
+    woNumbers: row.wo_numbers || '',
+    firstWoDate: row.first_wo_date || '',
+    latestWoDate: row.latest_wo_date || '',
+    rmAvailabilityStatus: row.rm_availability_status || '',
+    rmRequiredQty: _reportsSafeNumber_(row.rm_required_qty),
+    rmIssuedQty: _reportsSafeNumber_(row.rm_issued_qty),
+    rmPendingQty: _reportsSafeNumber_(row.rm_pending_qty),
+    rmInStockQty: _reportsSafeNumber_(row.rm_in_stock_qty),
+    rmShortageQty: _reportsSafeNumber_(row.rm_shortage_qty),
+    rmPendingReceiptQty: _reportsSafeNumber_(row.rm_pending_receipt_qty),
+    rmPoNos: row.rm_po_nos || '',
+    rmFirstPoDate: row.rm_first_po_date || '',
+    rmLatestGrnDate: row.rm_latest_grn_date || '',
+    rmReceiptRefs: row.rm_receipt_refs || '',
+    rmPrNos: row.rm_pr_nos || '',
+    rmDetail: row.rm_detail || '',
+    firstMaterialIssueAt: row.first_material_issue_at || '',
+    latestMaterialIssueAt: row.latest_material_issue_at || '',
+    issuedQtyByLedger: _reportsSafeNumber_(row.issued_qty_by_ledger),
+    productionEntryQty: _reportsSafeNumber_(row.production_entry_qty),
+    productionCompletedQty: _reportsSafeNumber_(row.production_completed_qty),
+    firstProductionAt: row.first_production_at || '',
+    latestProductionAt: row.latest_production_at || '',
+    openRouteCount: _reportsSafeNumber_(row.open_route_count),
+    openRouteBalanceQty: _reportsSafeNumber_(row.open_route_balance_qty),
+    routeDisplay: row.route_display || '',
+    currentWoNumber: row.current_wo_number || '',
+    currentRouteProcess: row.current_route_process || '',
+    currentRouteDepartment: row.current_route_department || '',
+    currentRouteMachine: row.current_route_machine || '',
+    currentRouteSequence: _reportsSafeNumber_(row.current_route_sequence),
+    currentRouteDepartmentCategory: row.current_route_department_category || '',
+    currentRouteStatus: row.current_route_status || '',
+    currentRoutePlannedQty: _reportsSafeNumber_(row.current_route_planned_qty),
+    currentRouteProducedQty: _reportsSafeNumber_(row.current_route_produced_qty),
+    currentRouteBalanceQty: _reportsSafeNumber_(row.current_route_balance_qty),
+    packedQty: _reportsSafeNumber_(row.packed_qty),
+    firstPackedAt: row.first_packed_at || '',
+    latestPackedAt: row.latest_packed_at || '',
+    billedQty: _reportsSafeNumber_(row.billed_qty),
+    lastInvoiceDate: row.last_invoice_date || '',
+    invoiceNos: row.invoice_nos || ''
+  };
+}
+
+function _reportsWipAgeingRows_(filters) {
+  return _reportsSelectAllRequired_('v_report_wip_ageing_all_lines', {
+    order: 'wip_stage_sort.asc,stage_age_days.desc,so_date.asc,so_number.asc,line_no.asc'
+  }).map(_reportsWipAgeingMapRow_).filter(function(row) {
+    return _reportsTextPasses_(row, filters, [
+        'wipScope',
+        'wipStageCode',
+        'wipStageName',
+        'stageDetail',
+        'stageEntryBasis',
+        'soNumber',
+        'lineNo',
+        'clientName',
+        'salesRep',
+        'division',
+        'productCode',
+        'productName',
+        'category',
+        'artworkNo',
+        'woNumbers',
+        'rmAvailabilityStatus',
+        'rmPoNos',
+        'rmPrNos',
+        'rmDetail',
+        'routeDisplay',
+        'currentWoNumber',
+        'currentRouteProcess',
+        'currentRouteMachine',
+        'invoiceNos'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'wipScope',
+        'wipStageCode',
+        'wipStageName',
+        'stageDetail',
+        'soLineStatus',
+        'accountsStatus',
+        'businessStatus',
+        'salesApprovalStatus',
+        'artworkStatus',
+        'plateProcurementStatus',
+        'dieProcurementStatus',
+        'rmAvailabilityStatus',
+        'currentRouteStatus',
+        'currentRouteDepartment',
+        'currentRouteDepartmentCategory'
+      ]);
+  });
+}
+
+function _reportsWipAgeingSummaryRows_(rows) {
+  const map = {};
+  (rows || []).forEach(function(row) {
+    const key = [row.wipScope, row.wipStageSort, row.wipStageCode, row.wipStageName].join('||');
+    if (!map[key]) {
+      map[key] = {
+        wipScope: row.wipScope,
+        wipStageSort: row.wipStageSort,
+        wipStageCode: row.wipStageCode,
+        wipStageName: row.wipStageName,
+        soLineCount: 0,
+        soSet: {},
+        wipQty: 0,
+        wipValue: 0,
+        stageAgeTotal: 0,
+        maxStageAgeDays: 0,
+        oldestStageEntryAt: row.stageEntryAt || ''
+      };
+    }
+    const bucket = map[key];
+    bucket.soLineCount += 1;
+    if (row.soNumber) bucket.soSet[row.soNumber] = true;
+    bucket.wipQty += _reportsSafeNumber_(row.wipQty);
+    bucket.wipValue += _reportsSafeNumber_(row.wipValue);
+    bucket.stageAgeTotal += _reportsSafeNumber_(row.stageAgeDays);
+    bucket.maxStageAgeDays = Math.max(bucket.maxStageAgeDays, _reportsSafeNumber_(row.stageAgeDays));
+    if (row.stageEntryAt && (!bucket.oldestStageEntryAt || String(row.stageEntryAt) < String(bucket.oldestStageEntryAt))) {
+      bucket.oldestStageEntryAt = row.stageEntryAt;
+    }
+  });
+  return Object.keys(map).map(function(key) {
+    const row = map[key];
+    return {
+      wipScope: row.wipScope,
+      wipStageSort: row.wipStageSort,
+      wipStageName: row.wipStageName,
+      wipStageCode: row.wipStageCode,
+      soLineCount: row.soLineCount,
+      soCount: Object.keys(row.soSet).length,
+      wipQty: _reportsRoundNumber_(row.wipQty, 3),
+      wipValue: _reportsRoundNumber_(row.wipValue, 2),
+      avgStageAgeDays: row.soLineCount ? _reportsRoundNumber_(row.stageAgeTotal / row.soLineCount, 2) : 0,
+      maxStageAgeDays: row.maxStageAgeDays,
+      oldestStageEntryAt: row.oldestStageEntryAt
+    };
+  }).sort(function(a, b) {
+    const scopeOrder = String(a.wipScope || '').localeCompare(String(b.wipScope || ''));
+    if (scopeOrder) return scopeOrder;
+    return _reportsSafeNumber_(a.wipStageSort) - _reportsSafeNumber_(b.wipStageSort) ||
+      String(a.wipStageName || '').localeCompare(String(b.wipStageName || ''));
+  });
+}
+
+function _reportsWipAgeingDetailColumns_(includeProductionColumns) {
+  const columns = [
+    { key:'wipScope', label:'Scope', type:'status' },
+    { key:'wipStageName', label:'Stage', type:'status' },
+    { key:'stageDetail', label:'Stage Detail' },
+    { key:'stageAgeDays', label:'Stage Age Days', type:'number' },
+    { key:'orderAgeDays', label:'Order Age Days', type:'number' },
+    { key:'stageEntryAt', label:'Stage Entry', type:'datetime' },
+    { key:'stageEntryBasis', label:'Stage Entry Basis' },
+    { key:'soNumber', label:'SO No' },
+    { key:'lineNo', label:'Line' },
+    { key:'soDate', label:'SO Date', type:'date' },
+    { key:'clientName', label:'Client' },
+    { key:'salesRep', label:'Sales Rep' },
+    { key:'division', label:'Division' },
+    { key:'productCode', label:'Product Code' },
+    { key:'productName', label:'Product' },
+    { key:'category', label:'Category' },
+    { key:'orderQty', label:'Order Qty', type:'number' },
+    { key:'openQty', label:'Open Qty', type:'number' },
+    { key:'wipQty', label:'Stage Qty', type:'number' },
+    { key:'wipValue', label:'Stage Value', type:'money' },
+    { key:'orderValue', label:'Order Value', type:'money' },
+    { key:'unit', label:'Unit' },
+    { key:'rate', label:'Rate', type:'money' },
+    { key:'soLineStatus', label:'SO Line Status', type:'status' },
+    { key:'expectedDelivery', label:'Expected Delivery', type:'date' },
+    { key:'finalDelivery', label:'Final Delivery', type:'date' },
+    { key:'accountsStatus', label:'Accounts', type:'status' },
+    { key:'businessStatus', label:'Sales Approval', type:'status' },
+    { key:'salesApprovalStatus', label:'SO Approval', type:'status' },
+    { key:'artworkNo', label:'Artwork No' },
+    { key:'productType', label:'Artwork Type' },
+    { key:'artworkStatus', label:'Artwork Status', type:'status' },
+    { key:'artworkAt', label:'Artwork Created', type:'datetime' },
+    { key:'artworkApprovedAt', label:'Artwork Approved', type:'datetime' },
+    { key:'plateProcurementStatus', label:'Plate Status', type:'status' },
+    { key:'platePoNos', label:'Plate PO Nos' },
+    { key:'plateOrderedOn', label:'Plate Ordered', type:'date' },
+    { key:'plateReceivedOn', label:'Plate Received', type:'date' },
+    { key:'dieProcurementStatus', label:'Die Status', type:'status' },
+    { key:'diePoNos', label:'Die PO Nos' },
+    { key:'dieOrderedOn', label:'Die Ordered', type:'date' },
+    { key:'dieReceivedOn', label:'Die Received', type:'date' },
+    { key:'woCount', label:'WO Count', type:'number' },
+    { key:'woNumbers', label:'WO Nos' },
+    { key:'firstWoDate', label:'First WO Date', type:'date' },
+    { key:'latestWoDate', label:'Latest WO Date', type:'date' }
+  ];
+  if (includeProductionColumns) {
+    columns.push(
+      { key:'rmAvailabilityStatus', label:'RM Status', type:'status' },
+      { key:'rmRequiredQty', label:'RM Required', type:'number' },
+      { key:'rmIssuedQty', label:'RM Issued', type:'number' },
+      { key:'rmPendingQty', label:'RM Pending', type:'number' },
+      { key:'rmInStockQty', label:'RM In Stock', type:'number' },
+      { key:'rmShortageQty', label:'RM Shortage', type:'number' },
+      { key:'rmPendingReceiptQty', label:'RM Pending Receipt', type:'number' },
+      { key:'rmPoNos', label:'RM PO Nos' },
+      { key:'rmFirstPoDate', label:'RM PO Date', type:'date' },
+      { key:'rmLatestGrnDate', label:'RM Latest GRN', type:'date' },
+      { key:'rmPrNos', label:'RM PR Nos' },
+      { key:'rmDetail', label:'RM Detail' },
+      { key:'firstMaterialIssueAt', label:'First Material Issue', type:'datetime' },
+      { key:'latestMaterialIssueAt', label:'Latest Material Issue', type:'datetime' },
+      { key:'issuedQtyByLedger', label:'Ledger Issue Qty', type:'number' },
+      { key:'currentRouteProcess', label:'Route Display Stage' },
+      { key:'currentRouteStatus', label:'Route Status', type:'status' },
+      { key:'currentRouteMachine', label:'Machine' },
+      { key:'currentRouteBalanceQty', label:'Route Balance', type:'number' },
+      { key:'routeDisplay', label:'Routing Display' },
+      { key:'productionEntryQty', label:'Production Entry Qty', type:'number' },
+      { key:'productionCompletedQty', label:'Production Completed Qty', type:'number' },
+      { key:'latestProductionAt', label:'Latest Production', type:'datetime' },
+      { key:'packedQty', label:'Packed Qty', type:'number' },
+      { key:'firstPackedAt', label:'First Packed', type:'datetime' },
+      { key:'latestPackedAt', label:'Latest Packed', type:'datetime' },
+      { key:'billedQty', label:'Billed Qty', type:'number' },
+      { key:'lastInvoiceDate', label:'Last Invoice Date', type:'date' },
+      { key:'invoiceNos', label:'Invoice Nos' }
+    );
+  }
+  return columns;
+}
+
+function _reportsSectionWipAgeing_(token, params) {
+  _reportsRequireSession_(token);
+  const filters = _reportsNormalizeFilters_(params);
+  filters.fromDate = '';
+  filters.toDate = '';
+  filters.pendingOnly = false;
+
+  const rows = _reportsWipAgeingRows_(filters);
+  const preRows = rows.filter(function(row) { return row.wipScope === 'PRE_WIP'; });
+  const wipRows = rows.filter(function(row) { return row.wipScope === 'WIP'; });
+  const summaryRows = _reportsWipAgeingSummaryRows_(rows);
+
+  return {
+    ok: true,
+    title: 'Pre-WIP / WIP Ageing',
+    metrics: {
+      totalRows: rows.length,
+      preWipRows: preRows.length,
+      wipRows: wipRows.length,
+      wipValue: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.wipValue); }, 0), 2)
+    },
+    tables: [{
+      key: 'wip-ageing-summary',
+      title: 'Stage-wise WIP Ageing Summary',
+      subtitle: 'Open order quantity and value by Pre-WIP / WIP stage. Billing is treated as closure; dispatch is ignored.',
+      minWidth: 1320,
+      columns: [
+        { key:'wipScope', label:'Scope', type:'status' },
+        { key:'wipStageName', label:'Stage', type:'status' },
+        { key:'wipStageCode', label:'Stage Code' },
+        { key:'soLineCount', label:'SO Lines', type:'number' },
+        { key:'soCount', label:'SO Count', type:'number' },
+        { key:'wipQty', label:'WIP Qty', type:'number' },
+        { key:'wipValue', label:'WIP Value', type:'money' },
+        { key:'avgStageAgeDays', label:'Avg Stage Age', type:'number' },
+        { key:'maxStageAgeDays', label:'Max Stage Age', type:'number' },
+        { key:'oldestStageEntryAt', label:'Oldest Stage Entry', type:'datetime' }
+      ],
+      rows: summaryRows
+    }, {
+      key: 'pre-wip-ageing-lines',
+      title: 'Pre-WIP Ageing Details',
+      subtitle: 'Open SO lines before work order creation. Approval/artwork details are shown separately while unapproved lines remain in Order Stage.',
+      minWidth: 4300,
+      columns: _reportsWipAgeingDetailColumns_(false),
+      rows: preRows
+    }, {
+      key: 'wip-ageing-lines',
+      title: 'WIP Ageing Details',
+      subtitle: 'Open SO line quantities after work order creation, including material purchase/issue, production, packing, and FG pending billing.',
+      minWidth: 6200,
+      columns: _reportsWipAgeingDetailColumns_(true),
+      rows: wipRows
     }]
   };
 }
@@ -31516,6 +31922,43 @@ function _reportsProductionNOPSummaryRows_(onDateRows, weekRows, mtdRows, filter
   });
 }
 
+function _reportsProductionNOPDetailRows_(rows, selectedDate, weekStartDate) {
+  return (rows || []).map(function(row) {
+    const productionDate = String(row.productionDate || '');
+    const machineKey = String(row.machineKey || '').toUpperCase();
+    const inWeek = productionDate >= String(weekStartDate || '') && productionDate <= String(selectedDate || '');
+    const periodScope = productionDate === String(selectedDate || '')
+      ? 'On Date / WTD / MTD'
+      : (inWeek ? 'WTD / MTD' : 'MTD');
+    return {
+      periodScope: periodScope,
+      productionDate: row.productionDate,
+      machine: row.machine,
+      machineKey: row.machineKey,
+      targetUnit: _reportsProductionNOPIsFlexoMeterPerMinute_(machineKey) ? 'meter/min' : 'qty/hour',
+      operatorNames: row.operatorNames,
+      workingHours: _reportsRoundNumber_(row.workingHours, 2),
+      downtimeHours: _reportsRoundNumber_(row.downtimeHours, 2),
+      downtimeReasons: row.downtimeReasons,
+      makeReadyJobs: _reportsRoundNumber_(row.makeReadyJobs, 0),
+      standardMakeReadyMinutes: _reportsRoundNumber_(row.standardMakeReadyMinutes, 2),
+      totalMakeReadyHours: _reportsRoundNumber_(row.totalMakeReadyHours, 2),
+      actualRunningHours: _reportsRoundNumber_(row.actualRunningHours, 2),
+      targetHourlyOutput: _reportsRoundNumber_(row.targetHourlyOutput, 2),
+      targetProduction: _reportsRoundNumber_(row.targetProduction, 2),
+      actualProduction: _reportsRoundNumber_(row.actualProduction, 2),
+      actualNop: _reportsRoundNumber_(row.actualNop, 2),
+      nopDeviation: _reportsRoundNumber_(row.nopDeviation, 2),
+      nopAchievementPct: _reportsRoundNumber_(row.nopAchievementPct, 2),
+      performanceStatus: row.performanceStatus,
+      lastCompletionAt: row.lastCompletionAt
+    };
+  }).sort(function(a, b) {
+    return String(b.productionDate || '').localeCompare(String(a.productionDate || '')) ||
+      String(a.machine || '').localeCompare(String(b.machine || ''));
+  });
+}
+
 function _reportsSectionProductionNOP_(token, params) {
   _reportsRequireSession_(token);
   const filters = _reportsNormalizeFilters_(params);
@@ -31526,6 +31969,7 @@ function _reportsSectionProductionNOP_(token, params) {
   const weekSourceRows = _reportsProductionNOPRows_(filters, weekStart, selectedToDate);
   const mtdSourceRows = _reportsProductionNOPRows_(filters, monthStart, selectedToDate);
   const summaryRows = _reportsProductionNOPSummaryRows_(onDateRows, weekSourceRows, mtdSourceRows, filters);
+  const detailRows = _reportsProductionNOPDetailRows_(mtdSourceRows, selectedToDate, weekStart);
   const belowTargetRows = summaryRows.filter(function(row) {
     return row.onDateDeviationPct < 0 || row.weekDeviationPct < 0 || row.mtdDeviationPct < 0;
   }).length;
@@ -31568,6 +32012,35 @@ function _reportsSectionProductionNOP_(token, params) {
           { key:'mtdDeviationPct', label:'Deviation%', type:'deviationPct' }
         ],
         rows: summaryRows
+      },
+      {
+        key: 'nop-daily-calculation-details',
+        title: 'Daily NOP Calculation Details',
+        subtitle: 'MTD daily machine rows used for the summary. Actual running hours = working hours - downtime hours - make-ready hours.',
+        minWidth: 2950,
+        columns: [
+          { key:'periodScope', label:'Scope' },
+          { key:'productionDate', label:'Production Date', type:'date' },
+          { key:'machine', label:'Machine' },
+          { key:'targetUnit', label:'Target Unit' },
+          { key:'operatorNames', label:'Operators' },
+          { key:'workingHours', label:'Working Hrs', type:'number' },
+          { key:'downtimeHours', label:'Downtime Hrs', type:'number' },
+          { key:'downtimeReasons', label:'Downtime Reasons' },
+          { key:'makeReadyJobs', label:'Make Ready Jobs', type:'number' },
+          { key:'standardMakeReadyMinutes', label:'Std MR Min', type:'number' },
+          { key:'totalMakeReadyHours', label:'Total MR Hrs', type:'number' },
+          { key:'actualRunningHours', label:'Actual Running Hrs', type:'number' },
+          { key:'targetHourlyOutput', label:'Target NOP', type:'number' },
+          { key:'targetProduction', label:'Target Production', type:'number' },
+          { key:'actualProduction', label:'Actual Production', type:'number' },
+          { key:'actualNop', label:'Actual NOP', type:'number' },
+          { key:'nopDeviation', label:'NOP Deviation', type:'number' },
+          { key:'nopAchievementPct', label:'Achievement %', type:'number' },
+          { key:'performanceStatus', label:'Status', type:'status' },
+          { key:'lastCompletionAt', label:'Last Completion', type:'datetime' }
+        ],
+        rows: detailRows
       }
     ]
   };
@@ -32313,6 +32786,7 @@ function reportsGetSectionData(section, params, token) {
   if (cached) return cached;
   let result;
   if (key === 'planning') result = _reportsSectionPlanning_(token, params);
+  else if (key === 'wipageing') result = _reportsSectionWipAgeing_(token, params);
   else if (key === 'jobprofitability') result = _reportsSectionJobProfitability_(token, params);
   else if (key === 'salesorders') result = _reportsSectionSalesOrders_(token, params);
   else if (key === 'sheetutilization') result = _reportsSectionSheetUtilization_(token, params);
