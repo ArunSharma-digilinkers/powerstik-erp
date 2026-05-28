@@ -25837,6 +25837,24 @@ function _prodIsoTimeInput_(isoValue) {
   return Utilities.formatDate(dt, 'Asia/Kolkata', 'HH:mm');
 }
 
+function _prodResolveShiftDateTimes_(entryDate, startTime, endTime) {
+  const dateValue = String(entryDate || '').trim();
+  const startValue = String(startTime || '').trim();
+  const endValue = String(endTime || '').trim();
+  const startDateTime = new Date(dateValue + 'T' + startValue + ':00');
+  const endDateTime = new Date(dateValue + 'T' + endValue + ':00');
+  if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
+    throw new Error('Enter valid date and time values');
+  }
+  if (endDateTime.getTime() < startDateTime.getTime()) {
+    endDateTime.setDate(endDateTime.getDate() + 1);
+  }
+  return {
+    startDateTime: startDateTime,
+    endDateTime: endDateTime
+  };
+}
+
 function _prodEntryMatchesRowIdentity_(entry, rowIdentity) {
   const rowKind = String(rowIdentity?.rowKind || 'COMBINED').trim().toUpperCase();
   if (rowKind !== 'JOB') return true;
@@ -27838,7 +27856,7 @@ function _prodBuildAdminEntryView_(entry, detailRows) {
     soNumber: parsed.soNumber || '',
     lineNo: parsed.lineNo || '',
     jobReference: parsed.jobReference || '',
-    entryDate: _prodIsoDateInput_(endValue || startValue),
+    entryDate: _prodIsoDateInput_(startValue || endValue),
     startTime: _prodIsoTimeInput_(startValue),
     endTime: _prodIsoTimeInput_(endValue),
     machine: row.machine || '',
@@ -28147,14 +28165,9 @@ function prodAdminUpdateEntry(payload, token) {
     throw new Error('Produced quantity cannot exceed the remaining stage balance for this correction');
   }
 
-  const startDateTime = new Date(entryDate + 'T' + startTime + ':00');
-  const endDateTime = new Date(entryDate + 'T' + endTime + ':00');
-  if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
-    throw new Error('Enter valid date and time values');
-  }
-  if (endDateTime.getTime() < startDateTime.getTime()) {
-    throw new Error('Job end time cannot be earlier than start time');
-  }
+  const shiftDateTimes = _prodResolveShiftDateTimes_(entryDate, startTime, endTime);
+  const startDateTime = shiftDateTimes.startDateTime;
+  const endDateTime = shiftDateTimes.endDateTime;
 
   const parsed = _prodParseEntryNotes_(existing);
   const updatedPayload = {
