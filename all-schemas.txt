@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict BpEweV1U4zwPO2UiwuDmMgDRmg2MQCXFC4VIx37jbRl48cfuK5xOPKQQyXqTW53
+\restrict Mf26qVebwhNtIQ8DNIKQY412PaxpwWufESGy6zHGZVABex8u8hjW4aAJkeFZseN
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.3
@@ -2428,126 +2428,255 @@ $$;
 
 CREATE FUNCTION public.packing_queue_dataset(p_show_pending_all boolean DEFAULT true, p_include_completed boolean DEFAULT false, p_date_from date DEFAULT NULL::date, p_date_to date DEFAULT NULL::date, p_limit integer DEFAULT 5000, p_offset integer DEFAULT 0) RETURNS TABLE(pack_id uuid, so_id uuid, so_line_id uuid, so_number text, line_no text, product_code text, product_name text, client_name text, category text, department_category text, category_group text, order_qty numeric, produced_qty numeric, packed_qty numeric, packed_weight_kg numeric, ready_to_dispatch boolean, expected_delivery date, final_delivery date, division text, quote_no text, pm_code text, product_remarks text, prepress_remarks text, so_remarks text, artwork_no text, wo_number text, wo_date date, transport_mode text, production_status text, packing_status text, dispatch_status text, production_pending_qty numeric, packing_pending_qty numeric, dispatch_pending_qty numeric, current_stage text, overall_status text)
     LANGUAGE sql STABLE
-    AS $$
-with base as (
+    AS $_$
+with artwork_category as (
   select
-    q.pack_id,
-    q.so_id,
-    q.so_line_id,
-    q.so_number::text as so_number,
-    q.line_no::text as line_no,
-    q.product_code::text as product_code,
-    q.product_name::text as product_name,
-    q.client_name::text as client_name,
-    q.category::text as category,
-    q.department_category::text as department_category,
+    a.artwork_no,
+    max(case
+      when upper(coalesce(a.product_type, '')) like '%FLEXO%' then 'FLEXO'
+      when upper(coalesce(a.product_type, '')) like '%CORR%' then 'CORRUGATION'
+      when upper(coalesce(a.product_type, '')) like '%OFFSET%' then 'OFFSET'
+      when upper(coalesce(a.product_type, '')) like '%DIGITAL%' then 'DIGITAL'
+      else null
+    end) as department_category
+  from public.artworks a
+  where coalesce(a.artwork_no, '') <> ''
+  group by a.artwork_no
+),
+work_order_flexo_meta as (
+  select
+    wo.id as wo_id,
+    coalesce(
+      case
+        when (wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}')::numeric
+      end,
+      case
+        when (wo.snapshot_json #>> '{flexoDetails,baseRunningMeter}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{flexoDetails,baseRunningMeter}')::numeric
+      end,
+      0::numeric
+    ) as flexo_total_rm,
+    coalesce(sum(greatest(coalesce(woj.qty, 0), 0)), 0)::numeric as flexo_total_job_qty
+  from public.work_orders wo
+  left join public.work_order_jobs woj on woj.wo_id = wo.id
+  group by wo.id, wo.snapshot_json
+),
+job_base as (
+  select
+    woj.wo_id,
+    wo.wo_number,
+    wo.wo_date,
+    woj.so_number,
+    woj.line_no,
+    max(nullif(woj.artwork_no, '')) as artwork_no,
+    max(nullif(woj.client_name, '')) as client_name,
+    max(nullif(woj.job_reference, '')) as job_reference,
+    coalesce(nullif(max(coalesce(woj.ups, 0)), 0), nullif(max(coalesce(woj.group_ups, 0)), 0), 1::numeric) as job_ups,
+    coalesce(sum(greatest(coalesce(woj.qty, 0), 0)), 0)::numeric as job_qty,
+    string_agg(distinct woj.product_name, ' / ' order by woj.product_name) as product_name,
+    coalesce(
+      max(ac.department_category),
+      case
+        when upper(coalesce(max(woj.category), '')) like '%FLEXO%' then 'FLEXO'
+        when upper(coalesce(max(woj.category), '')) like '%CORR%' then 'CORRUGATION'
+        when upper(coalesce(max(woj.category), '')) like '%OFFSET%' then 'OFFSET'
+        when upper(coalesce(max(woj.category), '')) like '%DIGITAL%' then 'DIGITAL'
+        else max(woj.category)
+      end
+    ) as department_category
+  from public.work_order_jobs woj
+  join public.work_orders wo on wo.id = woj.wo_id
+  left join artwork_category ac on ac.artwork_no = woj.artwork_no
+  group by woj.wo_id, wo.wo_number, wo.wo_date, woj.so_number, woj.line_no
+),
+final_production_routing as (
+  select
+    r.wo_id,
+    r.id as routing_id,
+    coalesce(r.process_name, r.department, '') as process_name,
+    row_number() over (partition by r.wo_id order by r.sequence_no desc, r.id desc) as rn
+  from public.work_order_routing r
+  where upper(trim(coalesce(r.process_name, r.department, ''))) not in
+    ('PACKING', 'DISPATCH', 'CUTTING PRE', 'CUTTING POST', 'QC')
+),
+production_line_totals as (
+  select
+    pe.routing_id,
+    pe.so_number,
+    pe.line_no,
+    sum(coalesce(pe.ok_qty, greatest(coalesce(pe.produced_qty, 0) - coalesce(pe.rejected_qty, 0), 0))) as produced_qty
+  from public.production_entries pe
+  where coalesce(pe.so_number, '') <> '' and coalesce(pe.line_no, '') <> ''
+  group by pe.routing_id, pe.so_number, pe.line_no
+),
+production_routing_totals as (
+  select
+    pe.routing_id,
+    sum(coalesce(pe.ok_qty, greatest(coalesce(pe.produced_qty, 0) - coalesce(pe.rejected_qty, 0), 0))) as produced_qty
+  from public.production_entries pe
+  group by pe.routing_id
+),
+packing_totals as (
+  select
+    pr.so_line_id,
+    pr.so_number,
+    pr.line_no,
+    (array_agg(pr.id order by pr.packed_at desc nulls last, pr.id))[1] as pack_id,
+    sum(coalesce(pr.packed_qty, 0)) as packed_qty,
+    sum(coalesce(pr.packed_weight_kg, 0)) as packed_weight_kg,
+    bool_or(coalesce(pr.ready_to_dispatch, true) = true) as ready_to_dispatch
+  from public.packing_records pr
+  group by pr.so_line_id, pr.so_number, pr.line_no
+),
+queue_base as (
+  select
+    pt.pack_id,
+    so.id as so_id,
+    sol.id as so_line_id,
+    jb.so_number::text as so_number,
+    jb.line_no::text as line_no,
+    sol.product_code::text as product_code,
+    coalesce(sol.product_name, jb.product_name)::text as product_name,
+    jb.client_name::text as client_name,
+    coalesce(sol.category, jb.department_category)::text as category,
+    jb.department_category::text as department_category,
     case
-      when upper(coalesce(q.department_category, q.category, '')) like '%FLEXO%' then 'Flexo'
-      when upper(coalesce(q.department_category, q.category, '')) like '%CORR%' then 'Corrugation'
-      when upper(coalesce(q.department_category, q.category, '')) like '%OFFSET%' then 'Offset'
-      when upper(coalesce(q.department_category, q.category, '')) like '%DIGITAL%' then 'Digital'
-      else coalesce(q.department_category, q.category, 'Other')::text
+      when upper(coalesce(jb.department_category, sol.category, '')) like '%FLEXO%' then 'Flexo'
+      when upper(coalesce(jb.department_category, sol.category, '')) like '%CORR%' then 'Corrugation'
+      when upper(coalesce(jb.department_category, sol.category, '')) like '%OFFSET%' then 'Offset'
+      when upper(coalesce(jb.department_category, sol.category, '')) like '%DIGITAL%' then 'Digital'
+      else coalesce(jb.department_category, sol.category, 'Other')::text
     end as category_group,
-    coalesce(q.order_qty, 0)::numeric as order_qty,
-    coalesce(q.produced_qty, 0)::numeric as produced_qty,
-    coalesce(q.packed_qty, 0)::numeric as packed_qty,
-    coalesce(q.packed_weight_kg, 0)::numeric as packed_weight_kg,
-    coalesce(q.ready_to_dispatch, true)::boolean as ready_to_dispatch,
-    q.expected_delivery,
-    q.final_delivery,
-    q.division::text as division,
-    q.quote_no::text as quote_no,
-    q.pm_code::text as pm_code,
-    q.product_remarks::text as product_remarks,
-    q.prepress_remarks::text as prepress_remarks,
-    q.so_remarks::text as so_remarks,
-    q.artwork_no::text as artwork_no,
-    q.wo_number::text as wo_number,
-    q.wo_date,
-    q.transport_mode::text as transport_mode,
+    coalesce(sol.qty, jb.job_qty, 0)::numeric as order_qty,
     case
-      when coalesce(q.produced_qty, 0) >= coalesce(q.order_qty, 0) and coalesce(q.order_qty, 0) > 0 then 'COMPLETED'
-      when coalesce(q.produced_qty, 0) > 0 then 'IN_PROGRESS'
-      else 'PENDING'
-    end as production_status,
-    case
-      when coalesce(q.produced_qty, 0) <= 0 then 'PENDING'
-      when coalesce(q.packed_qty, 0) >= coalesce(q.produced_qty, 0) then 'COMPLETED'
-      when coalesce(q.packed_qty, 0) > 0 then 'IN_PROGRESS'
-      else 'PENDING'
-    end as packing_status,
-    'PENDING'::text as dispatch_status,
-    greatest(coalesce(q.order_qty, 0) - coalesce(q.produced_qty, 0), 0)::numeric as production_pending_qty,
-    greatest(coalesce(q.produced_qty, 0) - coalesce(q.packed_qty, 0), 0)::numeric as packing_pending_qty,
-    coalesce(q.packed_qty, 0)::numeric as dispatch_pending_qty
-  from public.v_packing_queue_fast q
-  left join public.sales_orders so on so.so_number = q.so_number
+      when upper(coalesce(jb.department_category, sol.category, '')) like '%FLEXO%'
+        and coalesce(wfm.flexo_total_rm, 0) > 0
+        and coalesce(jb.job_qty, 0) > 0
+        then round((coalesce(prt.produced_qty, plt.produced_qty, 0) * jb.job_qty / nullif(wfm.flexo_total_rm, 0))::numeric, 3)
+      when upper(coalesce(fr.process_name, '')) like '%DIE CUT%'
+        or upper(coalesce(fr.process_name, '')) like '%DIECUT%'
+        then coalesce(plt.produced_qty, prt.produced_qty, 0) * coalesce(nullif(jb.job_ups, 0), 1::numeric)
+      else coalesce(plt.produced_qty, prt.produced_qty, 0)
+    end::numeric as produced_qty,
+    coalesce(pt.packed_qty, 0)::numeric as packed_qty,
+    coalesce(pt.packed_weight_kg, 0)::numeric as packed_weight_kg,
+    coalesce(pt.ready_to_dispatch, true)::boolean as ready_to_dispatch,
+    sol.expected_delivery,
+    sol.final_delivery,
+    sol.division::text as division,
+    sol.quote_no::text as quote_no,
+    sol.pm_code::text as pm_code,
+    sol.product_remarks::text as product_remarks,
+    sol.prepress_remarks::text as prepress_remarks,
+    so.remarks::text as so_remarks,
+    jb.artwork_no::text as artwork_no,
+    jb.wo_number::text as wo_number,
+    jb.wo_date,
+    coalesce(wo.snapshot_json ->> 'modeOfTransport', '')::text as transport_mode
+  from job_base jb
+  join public.work_orders wo on wo.id = jb.wo_id
+  left join work_order_flexo_meta wfm on wfm.wo_id = jb.wo_id
+  left join final_production_routing fr on fr.wo_id = jb.wo_id and fr.rn = 1
+  left join production_line_totals plt
+    on plt.routing_id = fr.routing_id
+    and plt.so_number = jb.so_number
+    and plt.line_no::text = jb.line_no::text
+  left join production_routing_totals prt on prt.routing_id = fr.routing_id
+  left join public.sales_orders so on so.so_number = jb.so_number
+  left join public.sales_order_lines sol on sol.so_id = so.id and sol.line_no::text = jb.line_no::text
+  left join packing_totals pt on pt.so_line_id = sol.id
   where coalesce(upper(so.status), '') <> 'CANCELLED'
+),
+base as (
+  select *
+  from queue_base q
+  where coalesce(q.produced_qty, 0) > 0
 ),
 statused as (
   select
     b.*,
-    case when b.packing_status = 'COMPLETED' then 'Completed' else 'Packing' end as current_stage,
     case
-      when b.packing_status = 'COMPLETED' then 'COMPLETED'
-      when b.packing_status = 'IN_PROGRESS' or b.production_status = 'IN_PROGRESS' then 'IN_PROGRESS'
+      when coalesce(b.produced_qty, 0) >= coalesce(b.order_qty, 0) and coalesce(b.order_qty, 0) > 0 then 'COMPLETED'
+      when coalesce(b.produced_qty, 0) > 0 then 'IN_PROGRESS'
+      else 'PENDING'
+    end as production_status,
+    case
+      when coalesce(b.produced_qty, 0) <= 0 then 'PENDING'
+      when coalesce(b.packed_qty, 0) >= coalesce(b.produced_qty, 0) then 'COMPLETED'
+      when coalesce(b.packed_qty, 0) > 0 then 'IN_PROGRESS'
+      else 'PENDING'
+    end as packing_status,
+    'PENDING'::text as dispatch_status,
+    greatest(coalesce(b.order_qty, 0) - coalesce(b.produced_qty, 0), 0)::numeric as production_pending_qty,
+    greatest(coalesce(b.produced_qty, 0) - coalesce(b.packed_qty, 0), 0)::numeric as packing_pending_qty,
+    coalesce(b.packed_qty, 0)::numeric as dispatch_pending_qty
+  from base b
+),
+final_rows as (
+  select
+    s.*,
+    case when s.packing_status = 'COMPLETED' then 'Completed' else 'Packing' end as current_stage,
+    case
+      when s.packing_status = 'COMPLETED' then 'COMPLETED'
+      when s.packing_status = 'IN_PROGRESS' or s.production_status = 'IN_PROGRESS' then 'IN_PROGRESS'
       else 'PENDING'
     end as overall_status
-  from base b
+  from statused s
 )
 select
-  s.pack_id,
-  s.so_id,
-  s.so_line_id,
-  s.so_number,
-  s.line_no,
-  s.product_code,
-  s.product_name,
-  s.client_name,
-  s.category,
-  s.department_category,
-  s.category_group,
-  s.order_qty,
-  s.produced_qty,
-  s.packed_qty,
-  s.packed_weight_kg,
-  s.ready_to_dispatch,
-  s.expected_delivery,
-  s.final_delivery,
-  s.division,
-  s.quote_no,
-  s.pm_code,
-  s.product_remarks,
-  s.prepress_remarks,
-  s.so_remarks,
-  s.artwork_no,
-  s.wo_number,
-  s.wo_date,
-  s.transport_mode,
-  s.production_status,
-  s.packing_status,
-  s.dispatch_status,
-  s.production_pending_qty,
-  s.packing_pending_qty,
-  s.dispatch_pending_qty,
-  s.current_stage,
-  s.overall_status
-from statused s
+  f.pack_id,
+  f.so_id,
+  f.so_line_id,
+  f.so_number,
+  f.line_no,
+  f.product_code,
+  f.product_name,
+  f.client_name,
+  f.category,
+  f.department_category,
+  f.category_group,
+  f.order_qty,
+  f.produced_qty,
+  f.packed_qty,
+  f.packed_weight_kg,
+  f.ready_to_dispatch,
+  f.expected_delivery,
+  f.final_delivery,
+  f.division,
+  f.quote_no,
+  f.pm_code,
+  f.product_remarks,
+  f.prepress_remarks,
+  f.so_remarks,
+  f.artwork_no,
+  f.wo_number,
+  f.wo_date,
+  f.transport_mode,
+  f.production_status,
+  f.packing_status,
+  f.dispatch_status,
+  f.production_pending_qty,
+  f.packing_pending_qty,
+  f.dispatch_pending_qty,
+  f.current_stage,
+  f.overall_status
+from final_rows f
 where
   case
     when coalesce(p_show_pending_all, true) then
       case
-        when coalesce(p_include_completed, false) then s.packing_status <> 'SHORT_CLOSED'
-        else s.packing_status not in ('COMPLETED', 'SHORT_CLOSED')
+        when coalesce(p_include_completed, false) then f.packing_status <> 'SHORT_CLOSED'
+        else f.packing_status not in ('COMPLETED', 'SHORT_CLOSED')
       end
     else
-      (p_date_from is null or coalesce(s.wo_date, s.expected_delivery)::date >= p_date_from)
-      and (p_date_to is null or coalesce(s.wo_date, s.expected_delivery)::date <= p_date_to)
+      (p_date_from is null or coalesce(f.wo_date, f.expected_delivery)::date >= p_date_from)
+      and (p_date_to is null or coalesce(f.wo_date, f.expected_delivery)::date <= p_date_to)
   end
-order by s.wo_date desc nulls last, s.so_number asc, s.line_no asc
+order by f.wo_date desc nulls last, f.so_number asc, f.line_no asc
 limit greatest(coalesce(p_limit, 5000), 1)
 offset greatest(coalesce(p_offset, 0), 0);
-$$;
+$_$;
 
 
 --
@@ -6471,6 +6600,41 @@ CREATE VIEW public.inv_rts_register_v AS
     remarks
    FROM public.v_inventory_transaction_register
   WHERE (ref_type = 'RTS'::text);
+
+
+--
+-- Name: inv_rts_returns; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inv_rts_returns (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    ledger_id uuid NOT NULL,
+    rts_no text NOT NULL,
+    item_id uuid,
+    item_code text DEFAULT ''::text NOT NULL,
+    item_name text DEFAULT ''::text NOT NULL,
+    vendor_name text DEFAULT ''::text NOT NULL,
+    return_reason text DEFAULT ''::text NOT NULL,
+    po_no text DEFAULT ''::text NOT NULL,
+    grn_no text DEFAULT ''::text NOT NULL,
+    invoice_no text DEFAULT ''::text NOT NULL,
+    challan_no text DEFAULT ''::text NOT NULL,
+    challan_date date,
+    debit_note_no text DEFAULT ''::text NOT NULL,
+    debit_note_date date,
+    transporter text DEFAULT ''::text NOT NULL,
+    lr_no text DEFAULT ''::text NOT NULL,
+    department text DEFAULT ''::text NOT NULL,
+    location text DEFAULT 'MAIN'::text NOT NULL,
+    batch_summary text DEFAULT ''::text NOT NULL,
+    qty numeric DEFAULT 0 NOT NULL,
+    rate numeric DEFAULT 0 NOT NULL,
+    value numeric DEFAULT 0 NOT NULL,
+    status text DEFAULT 'POSTED'::text NOT NULL,
+    remarks text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
 
 
 --
@@ -13705,6 +13869,363 @@ CREATE VIEW public.v_report_planning_lines AS
 
 
 --
+-- Name: v_report_planning_lines_enriched; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_planning_lines_enriched WITH (security_invoker='on') AS
+ WITH posted_invoice_base AS (
+         SELECT il.so_line_id,
+            sum(COALESCE(il.qty, (0)::numeric)) AS posted_billed_qty,
+            (count(DISTINCT il.invoice_id))::integer AS posted_invoice_count,
+            min(inv.invoice_date) AS posted_first_invoice_date,
+            max(inv.invoice_date) AS posted_last_invoice_date,
+            max(inv.created_at) AS posted_last_billed_at,
+            string_agg(DISTINCT NULLIF(inv.invoice_no, ''::text), ', '::text ORDER BY NULLIF(inv.invoice_no, ''::text)) AS posted_invoice_nos,
+            string_agg(DISTINCT to_char((inv.invoice_date)::timestamp with time zone, 'YYYY-MM-DD'::text), ', '::text ORDER BY (to_char((inv.invoice_date)::timestamp with time zone, 'YYYY-MM-DD'::text))) FILTER (WHERE (inv.invoice_date IS NOT NULL)) AS posted_invoice_dates
+           FROM (public.invoice_lines il
+             JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+          WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          GROUP BY il.so_line_id
+        ), base AS (
+         SELECT p.so_id,
+            p.so_line_id,
+            p.so_number,
+            p.so_date,
+            p.po_number,
+            p.po_date,
+            p.so_datetime,
+            p.so_created_at,
+            p.so_time,
+            p.client_code,
+            p.client_name,
+            p.sales_rep,
+            p.line_no,
+            p.so_line_status,
+            p.product_code,
+            p.product_name,
+            p.category,
+            p.division,
+            p.order_qty,
+            p.unit,
+            p.rate,
+            p.expected_delivery,
+            p.final_delivery,
+            p.accounts_status,
+            p.accounts_at,
+            p.business_status,
+            p.business_at,
+            p.sales_approval_status,
+            p.sales_approval_at,
+            p.artwork_no,
+            p.product_type,
+            p.plate_status,
+            p.die_status,
+            p.artwork_status,
+            p.artwork_at,
+            p.artwork_approved_at,
+            p.wo_count,
+            p.wo_numbers,
+            p.first_wo_at,
+            p.last_wo_at,
+            p.routing_count,
+            p.routing_steps,
+            p.routing_marked_at,
+            p.routing_status,
+            p.current_stage,
+            p.current_stage_status,
+            p.stage_summary,
+            p.stage_last_updated_at,
+            p.rm_availability_status,
+            p.rm_required_qty,
+            p.rm_issued_qty,
+            p.rm_pending_qty,
+            p.rm_in_stock_qty,
+            p.rm_shortage_qty,
+            p.rm_pending_receipt_qty,
+            p.rm_po_nos,
+            p.rm_first_po_date,
+            p.rm_latest_grn_date,
+            p.rm_receipt_refs,
+            p.rm_pr_nos,
+            p.rm_detail,
+            p.plate_procurement_status,
+            p.plate_po_nos,
+            p.plate_ordered_on,
+            p.plate_received_on,
+            p.plate_ordered_qty,
+            p.plate_received_qty,
+            p.plate_pending_qty,
+            p.plate_vendors,
+            p.plate_receipt_refs,
+            p.die_procurement_status,
+            p.die_po_nos,
+            p.die_ordered_on,
+            p.die_received_on,
+            p.die_ordered_qty,
+            p.die_received_qty,
+            p.die_pending_qty,
+            p.die_vendors,
+            p.die_receipt_refs,
+            p.billed_qty,
+            p.billing_pending_qty,
+            p.invoice_count,
+            p.invoice_nos,
+            p.invoice_dates,
+            p.first_invoice_date,
+            p.last_invoice_date,
+            p.last_billed_at,
+            p.billing_status,
+            COALESCE(sol.status, p.so_line_status, 'OPEN'::text) AS raw_line_status,
+            sol.closed_at,
+            COALESCE(sol.closed_by, ''::text) AS closed_by,
+            sol.status_updated_at,
+            COALESCE(pib.posted_billed_qty, (0)::numeric) AS posted_billed_qty,
+            COALESCE(pib.posted_invoice_count, 0) AS posted_invoice_count,
+            pib.posted_first_invoice_date,
+            pib.posted_last_invoice_date,
+            pib.posted_last_billed_at,
+            COALESCE(pib.posted_invoice_nos, ''::text) AS posted_invoice_nos,
+            COALESCE(pib.posted_invoice_dates, ''::text) AS posted_invoice_dates
+           FROM ((public.v_report_planning_lines p
+             LEFT JOIN public.sales_order_lines sol ON ((sol.id = p.so_line_id)))
+             LEFT JOIN posted_invoice_base pib ON ((pib.so_line_id = p.so_line_id)))
+        ), classified AS (
+         SELECT b.so_id,
+            b.so_line_id,
+            b.so_number,
+            b.so_date,
+            b.po_number,
+            b.po_date,
+            b.so_datetime,
+            b.so_created_at,
+            b.so_time,
+            b.client_code,
+            b.client_name,
+            b.sales_rep,
+            b.line_no,
+            b.so_line_status,
+            b.product_code,
+            b.product_name,
+            b.category,
+            b.division,
+            b.order_qty,
+            b.unit,
+            b.rate,
+            b.expected_delivery,
+            b.final_delivery,
+            b.accounts_status,
+            b.accounts_at,
+            b.business_status,
+            b.business_at,
+            b.sales_approval_status,
+            b.sales_approval_at,
+            b.artwork_no,
+            b.product_type,
+            b.plate_status,
+            b.die_status,
+            b.artwork_status,
+            b.artwork_at,
+            b.artwork_approved_at,
+            b.wo_count,
+            b.wo_numbers,
+            b.first_wo_at,
+            b.last_wo_at,
+            b.routing_count,
+            b.routing_steps,
+            b.routing_marked_at,
+            b.routing_status,
+            b.current_stage,
+            b.current_stage_status,
+            b.stage_summary,
+            b.stage_last_updated_at,
+            b.rm_availability_status,
+            b.rm_required_qty,
+            b.rm_issued_qty,
+            b.rm_pending_qty,
+            b.rm_in_stock_qty,
+            b.rm_shortage_qty,
+            b.rm_pending_receipt_qty,
+            b.rm_po_nos,
+            b.rm_first_po_date,
+            b.rm_latest_grn_date,
+            b.rm_receipt_refs,
+            b.rm_pr_nos,
+            b.rm_detail,
+            b.plate_procurement_status,
+            b.plate_po_nos,
+            b.plate_ordered_on,
+            b.plate_received_on,
+            b.plate_ordered_qty,
+            b.plate_received_qty,
+            b.plate_pending_qty,
+            b.plate_vendors,
+            b.plate_receipt_refs,
+            b.die_procurement_status,
+            b.die_po_nos,
+            b.die_ordered_on,
+            b.die_received_on,
+            b.die_ordered_qty,
+            b.die_received_qty,
+            b.die_pending_qty,
+            b.die_vendors,
+            b.die_receipt_refs,
+            b.billed_qty,
+            b.billing_pending_qty,
+            b.invoice_count,
+            b.invoice_nos,
+            b.invoice_dates,
+            b.first_invoice_date,
+            b.last_invoice_date,
+            b.last_billed_at,
+            b.billing_status,
+            b.raw_line_status,
+            b.closed_at,
+            b.closed_by,
+            b.status_updated_at,
+            b.posted_billed_qty,
+            b.posted_invoice_count,
+            b.posted_first_invoice_date,
+            b.posted_last_invoice_date,
+            b.posted_last_billed_at,
+            b.posted_invoice_nos,
+            b.posted_invoice_dates,
+                CASE
+                    WHEN (upper(COALESCE(b.raw_line_status, 'OPEN'::text)) = 'CANCELLED'::text) THEN 'CANCELLED'::text
+                    WHEN ((COALESCE(b.order_qty, (0)::numeric) > (0)::numeric) AND (COALESCE(b.posted_billed_qty, (0)::numeric) >= COALESCE(b.order_qty, (0)::numeric))) THEN 'CLOSED'::text
+                    WHEN ((upper(COALESCE(b.raw_line_status, 'OPEN'::text)) = 'SHORT_CLOSED'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%SHORT%CLOSE%'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%SHORT_CLOSE%'::text)) THEN 'SHORT_CLOSED'::text
+                    WHEN (upper(COALESCE(b.raw_line_status, 'OPEN'::text)) = 'PARTIAL_DISPATCHED'::text) THEN 'PARTIAL_DISPATCHED'::text
+                    WHEN ((upper(COALESCE(b.raw_line_status, 'OPEN'::text)) = 'CLOSED'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%MANUAL CLOSE%'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%MANUAL BILLING%'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%LEGACY%'::text)) THEN 'CLOSED'::text
+                    ELSE 'OPEN'::text
+                END AS closure_status
+           FROM base b
+        )
+ SELECT so_id,
+    so_line_id,
+    so_number,
+    so_date,
+    po_number,
+    po_date,
+    so_datetime,
+    so_created_at,
+    so_time,
+    client_code,
+    client_name,
+    sales_rep,
+    line_no,
+    so_line_status,
+    product_code,
+    product_name,
+    category,
+    division,
+    order_qty,
+    unit,
+    rate,
+    expected_delivery,
+    final_delivery,
+    accounts_status,
+    accounts_at,
+    business_status,
+    business_at,
+    sales_approval_status,
+    sales_approval_at,
+    artwork_no,
+    product_type,
+    plate_status,
+    die_status,
+    artwork_status,
+    artwork_at,
+    artwork_approved_at,
+    wo_count,
+    wo_numbers,
+    first_wo_at,
+    last_wo_at,
+    routing_count,
+    routing_steps,
+    routing_marked_at,
+    routing_status,
+    current_stage,
+    current_stage_status,
+    stage_summary,
+    stage_last_updated_at,
+    rm_availability_status,
+    rm_required_qty,
+    rm_issued_qty,
+    rm_pending_qty,
+    rm_in_stock_qty,
+    rm_shortage_qty,
+    rm_pending_receipt_qty,
+    rm_po_nos,
+    rm_first_po_date,
+    rm_latest_grn_date,
+    rm_receipt_refs,
+    rm_pr_nos,
+    rm_detail,
+    plate_procurement_status,
+    plate_po_nos,
+    plate_ordered_on,
+    plate_received_on,
+    plate_ordered_qty,
+    plate_received_qty,
+    plate_pending_qty,
+    plate_vendors,
+    plate_receipt_refs,
+    die_procurement_status,
+    die_po_nos,
+    die_ordered_on,
+    die_received_on,
+    die_ordered_qty,
+    die_received_qty,
+    die_pending_qty,
+    die_vendors,
+    die_receipt_refs,
+    billed_qty,
+    billing_pending_qty,
+    invoice_count,
+    invoice_nos,
+    invoice_dates,
+    first_invoice_date,
+    last_invoice_date,
+    last_billed_at,
+    billing_status,
+    raw_line_status,
+    closed_at,
+    closed_by,
+    status_updated_at,
+    posted_billed_qty,
+    posted_invoice_count,
+    posted_first_invoice_date,
+    posted_last_invoice_date,
+    posted_last_billed_at,
+    posted_invoice_nos,
+    posted_invoice_dates,
+    closure_status,
+        CASE
+            WHEN (closure_status = 'SHORT_CLOSED'::text) THEN COALESCE(NULLIF(closed_by, ''::text), 'Manual short close'::text)
+            WHEN (closure_status = 'PARTIAL_DISPATCHED'::text) THEN COALESCE(NULLIF(closed_by, ''::text), 'Marked for partial dispatch'::text)
+            WHEN ((closure_status = 'CLOSED'::text) AND (COALESCE(posted_billed_qty, (0)::numeric) >= COALESCE(order_qty, (0)::numeric))) THEN 'Fully billed'::text
+            WHEN (closure_status = 'CLOSED'::text) THEN COALESCE(NULLIF(closed_by, ''::text), 'Closed'::text)
+            WHEN (closure_status = 'CANCELLED'::text) THEN COALESCE(NULLIF(closed_by, ''::text), 'Cancelled'::text)
+            ELSE ''::text
+        END AS closure_reason,
+    GREATEST((COALESCE(order_qty, (0)::numeric) - COALESCE(posted_billed_qty, (0)::numeric)), (0)::numeric) AS billing_gap_qty,
+        CASE
+            WHEN (closure_status = 'SHORT_CLOSED'::text) THEN GREATEST((COALESCE(order_qty, (0)::numeric) - COALESCE(posted_billed_qty, (0)::numeric)), (0)::numeric)
+            ELSE (0)::numeric
+        END AS short_closed_qty,
+        CASE
+            WHEN (closure_status = ANY (ARRAY['CLOSED'::text, 'CANCELLED'::text, 'SHORT_CLOSED'::text])) THEN (0)::numeric
+            ELSE GREATEST((COALESCE(order_qty, (0)::numeric) - COALESCE(posted_billed_qty, (0)::numeric)), (0)::numeric)
+        END AS operational_billing_pending_qty,
+        CASE
+            WHEN (closure_status = ANY (ARRAY['CLOSED'::text, 'CANCELLED'::text, 'SHORT_CLOSED'::text, 'PARTIAL_DISPATCHED'::text])) THEN closure_status
+            WHEN (GREATEST((COALESCE(order_qty, (0)::numeric) - COALESCE(posted_billed_qty, (0)::numeric)), (0)::numeric) > (0)::numeric) THEN 'PENDING'::text
+            ELSE 'CLOSED'::text
+        END AS planning_billing_status,
+    ((COALESCE(posted_billed_qty, (0)::numeric) > (0)::numeric) AND (COALESCE(posted_billed_qty, (0)::numeric) < COALESCE(order_qty, (0)::numeric))) AS partially_billed_flag
+   FROM classified c;
+
+
+--
 -- Name: v_report_wip_ageing_all_lines; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -19039,6 +19560,14 @@ ALTER TABLE ONLY public.inv_rate_corrections
 
 
 --
+-- Name: inv_rts_returns inv_rts_returns_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inv_rts_returns
+    ADD CONSTRAINT inv_rts_returns_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: inv_sheet_conversion_allocations inv_sheet_conversion_allocations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -20489,6 +21018,41 @@ CREATE INDEX idx_inv_purchase_requests_created_status ON public.inv_purchase_req
 --
 
 CREATE INDEX idx_inv_purchase_requests_item_pr ON public.inv_purchase_requests USING btree (item_id, pr_no, created_at);
+
+
+--
+-- Name: idx_inv_rts_returns_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_rts_returns_created_at ON public.inv_rts_returns USING btree (created_at DESC);
+
+
+--
+-- Name: idx_inv_rts_returns_grn_no; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_rts_returns_grn_no ON public.inv_rts_returns USING btree (grn_no);
+
+
+--
+-- Name: idx_inv_rts_returns_ledger_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_inv_rts_returns_ledger_id ON public.inv_rts_returns USING btree (ledger_id);
+
+
+--
+-- Name: idx_inv_rts_returns_po_no; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_rts_returns_po_no ON public.inv_rts_returns USING btree (po_no);
+
+
+--
+-- Name: idx_inv_rts_returns_vendor; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_rts_returns_vendor ON public.inv_rts_returns USING btree (vendor_name);
 
 
 --
@@ -21968,6 +22532,14 @@ ALTER TABLE ONLY public.inv_purchase_requests
 
 
 --
+-- Name: inv_rts_returns inv_rts_returns_ledger_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inv_rts_returns
+    ADD CONSTRAINT inv_rts_returns_ledger_id_fkey FOREIGN KEY (ledger_id) REFERENCES public.inv_ledger(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: inv_sheet_conversion_allocations inv_sheet_conversion_allocations_item_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -22502,6 +23074,12 @@ ALTER TABLE public.inv_purchase_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.inv_rate_corrections ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: inv_rts_returns; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inv_rts_returns ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: inv_sheet_conversion_allocations; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -22816,5 +23394,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict BpEweV1U4zwPO2UiwuDmMgDRmg2MQCXFC4VIx37jbRl48cfuK5xOPKQQyXqTW53
+\unrestrict Mf26qVebwhNtIQ8DNIKQY412PaxpwWufESGy6zHGZVABex8u8hjW4aAJkeFZseN
 

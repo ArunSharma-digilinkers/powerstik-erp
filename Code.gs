@@ -2274,12 +2274,20 @@ function _purchaseBuildActivePRPoLineMap_(prNos, receiptSeed) {
       }, 0);
       const shortClosedQty = _purchasePOLineShortClosedQty_(line, allocated);
       if (!result[prNo]) {
-        result[prNo] = { orderedQty: 0, openPOQty: 0, refs: [], latestRate: 0, latestTaxPct: 0 };
+        result[prNo] = { orderedQty: 0, openPOQty: 0, refs: [], latestRate: 0, latestTaxPct: 0, firstPoDate: '', latestPoDate: '' };
       }
+      const header = headerMap[String(line.poId || '')] || headerByNo[String(line.poNo || '')] || {};
+      const poDate = String(header.orderDate || line.createdAt || '').trim();
       result[prNo].orderedQty += Number(line.qty || 0);
       result[prNo].openPOQty += Math.max(0, Number(line.qty || 0) - allocated - shortClosedQty);
       result[prNo].latestRate = Number(line.rate || 0) || result[prNo].latestRate;
       result[prNo].latestTaxPct = Number(line.taxPct || 0) || result[prNo].latestTaxPct;
+      if (poDate && (!result[prNo].firstPoDate || poDate < result[prNo].firstPoDate)) {
+        result[prNo].firstPoDate = poDate;
+      }
+      if (poDate && (!result[prNo].latestPoDate || poDate > result[prNo].latestPoDate)) {
+        result[prNo].latestPoDate = poDate;
+      }
       if (line.poNo && result[prNo].refs.indexOf(line.poNo) === -1) {
         result[prNo].refs.push(line.poNo);
       }
@@ -3128,6 +3136,8 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
         uom: String(r.uom || itemUomMap[r.item_code] || '').trim(),
         poRate: Number(linked.latestRate || 0),
         taxPct: Number(linked.latestTaxPct || r.tax_pct || 0),
+        firstPoDate: linked.firstPoDate || '',
+        latestPoDate: linked.latestPoDate || '',
         availableToOrderQty: Math.max(0, pendingReceiptQty - Number(linked.openPOQty || 0)),
         department: r.department || '',
         jobRef: r.job_ref || '',
@@ -3202,6 +3212,8 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
         uom: String(itemUomMap[r.item_code] || '').trim(),
         poRate: Number(linked.latestRate || 0),
         taxPct: Number(itemTaxMap[r.item_code] || 0),
+        firstPoDate: linked.firstPoDate || '',
+        latestPoDate: linked.latestPoDate || '',
         availableToOrderQty: Math.max(0, pendingReceiptQty - openPOQty),
         department: r.department || '',
         jobRef: r.job_ref || '',
@@ -18177,7 +18189,8 @@ function invListPurchaseRequestsJSON(opts = {}) {
   }
 
   const filters = {};
-  if (opts.status && !(includeOpenOutsideDate && normalizedStatus === 'OPEN')) {
+  const canFilterRawStatus = ['CANCELLED', 'SHORT_CLOSED'].indexOf(normalizedStatus) !== -1;
+  if (opts.status && canFilterRawStatus && !(includeOpenOutsideDate && normalizedStatus === 'OPEN')) {
     filters.status = 'eq.' + opts.status;
   }
   const shouldApplyDateFilter = !(includeOpenOutsideDate && normalizedStatus === 'OPEN');
@@ -18228,6 +18241,11 @@ function invListPurchaseRequestsJSON(opts = {}) {
     const effectiveStatus = terminalStatus
       ? storedStatus
       : (effectiveReceivedQty >= requestedQty && requestedQty > 0 ? 'CLOSED' : (hasLinkedPO || requestedQty > 0 ? 'OPEN' : storedStatus));
+    const displayStatus = terminalStatus
+      ? storedStatus
+      : (effectiveReceivedQty >= requestedQty && requestedQty > 0
+          ? 'CLOSED'
+          : (effectiveReceivedQty > 0 ? 'PARTIAL_RECEIVED' : effectiveStatus));
     return {
       prNo: r.pr_no,
       date: r.created_at,
@@ -18246,13 +18264,18 @@ function invListPurchaseRequestsJSON(opts = {}) {
       jobRef: r.job_ref,
       remarks: r.remarks || '',
       status: effectiveStatus,
+      displayStatus: displayStatus,
+      lifecycleStatus: displayStatus,
       canEdit: String(effectiveStatus || '').toUpperCase() === 'OPEN' &&
         effectiveReceivedQty <= 0 &&
         !((linked.poRefs || linked.refs || []).length)
     };
   }).filter(function(row) {
     if (!opts.status) return true;
-    return String(row.status || '').trim().toUpperCase() === String(opts.status || '').trim().toUpperCase();
+    const requested = String(opts.status || '').trim().toUpperCase();
+    if (requested === 'OPEN') return String(row.status || '').trim().toUpperCase() === 'OPEN';
+    return String(row.status || '').trim().toUpperCase() === requested ||
+      String(row.displayStatus || '').trim().toUpperCase() === requested;
   });
 
   const result = { ok: true, rows: normalizedRows };
@@ -19888,9 +19911,110 @@ function invPostIssueBulk(input) {
   };
 }
 
+function invBuildRTSRemark_(payload) {
+  const parts = [
+    payload.vendorName ? 'Vendor:' + String(payload.vendorName).trim() : '',
+    payload.returnReason ? 'Reason:' + String(payload.returnReason).trim() : '',
+    payload.poNo ? 'PO:' + String(payload.poNo).trim() : '',
+    payload.grnNo ? 'GRN:' + String(payload.grnNo).trim() : '',
+    payload.invoiceNo ? 'INV:' + String(payload.invoiceNo).trim() : '',
+    payload.challanNo ? 'Challan:' + String(payload.challanNo).trim() : '',
+    payload.challanDate ? 'ChallanDate:' + String(payload.challanDate).trim() : '',
+    payload.debitNoteNo ? 'DebitNote:' + String(payload.debitNoteNo).trim() : '',
+    payload.debitNoteDate ? 'DebitNoteDate:' + String(payload.debitNoteDate).trim() : '',
+    payload.transporter ? 'Transporter:' + String(payload.transporter).trim() : '',
+    payload.lrNo ? 'LR:' + String(payload.lrNo).trim() : '',
+    payload.remarks ? 'Remarks:' + String(payload.remarks).trim() : ''
+  ].filter(Boolean);
+  return parts.join(' | ');
+}
+
+function invTryInsertRTSMetadata_(ledger, payload, allocations) {
+  if (!ledger || !ledger.id) return;
+  try {
+    supabaseInsertMinimal('inv_rts_returns', {
+      id: Utilities.getUuid(),
+      ledger_id: ledger.id,
+      rts_no: ledger.id,
+      item_id: ledger.item_id || null,
+      item_code: String(payload.itemCode || '').trim(),
+      item_name: String(payload.itemName || '').trim(),
+      vendor_name: String(payload.vendorName || '').trim(),
+      return_reason: String(payload.returnReason || '').trim(),
+      po_no: String(payload.poNo || '').trim(),
+      grn_no: String(payload.grnNo || '').trim(),
+      invoice_no: String(payload.invoiceNo || '').trim(),
+      challan_no: String(payload.challanNo || '').trim(),
+      challan_date: String(payload.challanDate || '').trim() || null,
+      debit_note_no: String(payload.debitNoteNo || '').trim(),
+      debit_note_date: String(payload.debitNoteDate || '').trim() || null,
+      transporter: String(payload.transporter || '').trim(),
+      lr_no: String(payload.lrNo || '').trim(),
+      department: String(payload.department || '').trim(),
+      location: String(payload.location || DEFAULT_LOCATION || '').trim(),
+      batch_summary: (allocations || []).map(function(part) { return part.batchNo; }).filter(Boolean).join(', '),
+      qty: Number(payload.qty || 0),
+      rate: Number(ledger.rate || 0),
+      value: Math.abs(Number(ledger.value || 0)),
+      status: 'POSTED',
+      remarks: String(payload.remarks || '').trim(),
+      created_at: ledger.created_at || new Date().toISOString()
+    });
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'inv_rts_returns')) return;
+    throw err;
+  }
+}
+
+function invGetRTSMetadataMap_(ledgerIds) {
+  const ids = [...new Set((ledgerIds || []).map(function(id) {
+    return String(id || '').trim();
+  }).filter(Boolean))];
+  const out = {};
+  if (!ids.length) return out;
+  try {
+    const rows = _supabaseSelectByKeyInBatches_(
+      'inv_rts_returns',
+      'ledger_id,vendor_name,return_reason,po_no,grn_no,invoice_no,challan_no,challan_date,debit_note_no,debit_note_date,transporter,lr_no,department,status,remarks',
+      'ledger_id',
+      ids,
+      null,
+      25
+    ) || [];
+    rows.forEach(function(row) {
+      const key = String(row.ledger_id || '').trim();
+      if (!key) return;
+      out[key] = {
+        vendorName: row.vendor_name || '',
+        returnReason: row.return_reason || '',
+        poNo: row.po_no || '',
+        grnNo: row.grn_no || '',
+        invoiceNo: row.invoice_no || '',
+        challanNo: row.challan_no || '',
+        challanDate: row.challan_date || '',
+        debitNoteNo: row.debit_note_no || '',
+        debitNoteDate: row.debit_note_date || '',
+        transporter: row.transporter || '',
+        lrNo: row.lr_no || '',
+        department: row.department || '',
+        status: row.status || '',
+        remarks: row.remarks || ''
+      };
+    });
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'inv_rts_returns')) return out;
+    throw err;
+  }
+  return out;
+}
+
 function invPostRTS(payload) {
   if (!payload.itemCode || !payload.qty)
     throw new Error('Item and qty required');
+  if (!String(payload.vendorName || '').trim())
+    throw new Error('Vendor name required for RTS');
+  if (!String(payload.returnReason || '').trim())
+    throw new Error('Return reason required for RTS');
 
   const location = payload.location || DEFAULT_LOCATION;
   const qty = Number(payload.qty);
@@ -19917,7 +20041,8 @@ function invPostRTS(payload) {
     rate: rate,
     batchNo: batchSummary.length === 1 ? batchSummary[0] : (batchSummary[0] || ''),
     location: location,
-    remarks: payload.remarks || ''
+    department: payload.department || '',
+    remarks: invBuildRTSRemark_(payload)
   });
   invApplyLotIssue_(ledger?.id || null, {
     itemCode: payload.itemCode,
@@ -19926,6 +20051,7 @@ function invPostRTS(payload) {
     batchNo: payload.batchNo || '',
     txnType: 'RTS'
   });
+  invTryInsertRTSMetadata_(ledger, Object.assign({}, payload, { location: location }), allocations);
 
 refreshStockMV_();
 
@@ -19946,29 +20072,47 @@ function invListRTSJSON(opts = {}) {
       department,
       batch_no,
       item_code,
-      item_name
+      item_name,
+      remarks
     `, filters, requestLimit);
 
   const allocationMap = invGetAllocationSummaryMap_(rows.map(r => r.id));
   const reversalMap = invGetReversalSummaryMap_(rows.map(r => r.id));
+  const metadataMap = invGetRTSMetadataMap_(rows.map(r => r.id));
 
   return {
     ok: true,
-    rows: rows.map(r => ({
-      rtsNo: r.id,
-      date: r.created_at,
-      itemCode: r.item_code || '',
-      itemName: r.item_name || '',
-      department: r.department || '',
-      batchNo: allocationMap[r.id]?.batchNo || r.batch_no || '',
-      batchDisplay: allocationMap[r.id]?.batchDisplay || r.batch_no || '',
-      qty: Number(r.qty_out || 0),
-      rate: Number(r.rate || 0),
-      value: Math.abs(Number(r.value || 0)),
-      location: r.location || '',
-      reversed: reversalMap[String(r.id || '')]?.reversed === true,
-      reversalDate: reversalMap[String(r.id || '')]?.reversalDate || ''
-    }))
+    rows: rows.map(r => {
+      const note = invParseReceiptNote_(r.remarks || '');
+      const meta = metadataMap[String(r.id || '')] || {};
+      return {
+        rtsNo: r.id,
+        date: r.created_at,
+        itemCode: r.item_code || '',
+        itemName: r.item_name || '',
+        department: meta.department || r.department || '',
+        vendorName: meta.vendorName || note.VENDOR || '',
+        returnReason: meta.returnReason || note.REASON || '',
+        poNo: meta.poNo || note.PO || '',
+        grnNo: meta.grnNo || note.GRN || '',
+        invoiceNo: meta.invoiceNo || note.INV || '',
+        challanNo: meta.challanNo || note.CHALLAN || '',
+        challanDate: meta.challanDate || note.CHALLANDATE || '',
+        debitNoteNo: meta.debitNoteNo || note.DEBITNOTE || '',
+        debitNoteDate: meta.debitNoteDate || note.DEBITNOTEDATE || '',
+        transporter: meta.transporter || note.TRANSPORTER || '',
+        lrNo: meta.lrNo || note.LR || '',
+        remarks: meta.remarks || note.REMARKS || r.remarks || '',
+        batchNo: allocationMap[r.id]?.batchNo || r.batch_no || '',
+        batchDisplay: allocationMap[r.id]?.batchDisplay || r.batch_no || '',
+        qty: Number(r.qty_out || 0),
+        rate: Number(r.rate || 0),
+        value: Math.abs(Number(r.value || 0)),
+        location: r.location || '',
+        reversed: reversalMap[String(r.id || '')]?.reversed === true,
+        reversalDate: reversalMap[String(r.id || '')]?.reversalDate || ''
+      };
+    })
   };
 }
 
@@ -29200,11 +29344,27 @@ function _reportsPlanningRows_(filters) {
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
 
-  const result = _reportsSelectAll_('v_report_planning_lines', {
+  const queryOpts = {
     filters: _reportsApplyDateFilterToQuery_(filters, 'so_date'),
     order: 'so_datetime.desc,so_number.desc,line_no.asc'
-  }).map(function(row) {
+  };
+  let sourceRows;
+  try {
+    sourceRows = _reportsSelectAllRequired_('v_report_planning_lines_enriched', queryOpts);
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_report_planning_lines_enriched')) throw err;
+    sourceRows = _reportsSelectAll_('v_report_planning_lines', queryOpts);
+  }
+
+  const result = sourceRows.map(function(row) {
     const soDateTime = row.so_datetime || row.so_created_at || row.so_date || '';
+    const orderQty = _reportsSafeNumber_(row.order_qty);
+    const billedQty = row.posted_billed_qty == null
+      ? _reportsSafeNumber_(row.billed_qty)
+      : _reportsSafeNumber_(row.posted_billed_qty);
+    const billingGapQty = row.billing_gap_qty == null
+      ? Math.max(orderQty - billedQty, 0)
+      : _reportsSafeNumber_(row.billing_gap_qty);
     return {
       soNumber: row.so_number || '',
       lineNo: row.line_no == null ? '' : String(row.line_no),
@@ -29213,6 +29373,11 @@ function _reportsPlanningRows_(filters) {
       poNumber: row.po_number || '',
       poDate: row.po_date || '',
       soLineStatus: row.so_line_status || 'OPEN',
+      closureStatus: row.closure_status || '',
+      closureReason: row.closure_reason || '',
+      closedBy: row.closed_by || '',
+      closedAt: row.closed_at || '',
+      statusUpdatedAt: row.status_updated_at || '',
       division: row.division || '',
       soDateTime: soDateTime,
       salesRep: row.sales_rep || '',
@@ -29279,24 +29444,33 @@ function _reportsPlanningRows_(filters) {
       diePendingQty: _reportsSafeNumber_(row.die_pending_qty),
       dieVendors: row.die_vendors || '',
       dieReceiptRefs: row.die_receipt_refs || '',
-      billingStatus: row.billing_status || 'PENDING',
-      billedQty: _reportsSafeNumber_(row.billed_qty),
-      billingPendingQty: _reportsSafeNumber_(row.billing_pending_qty),
-      invoiceCount: _reportsSafeNumber_(row.invoice_count),
-      invoiceNos: row.invoice_nos || '',
-      invoiceDates: row.invoice_dates || '',
-      firstInvoiceDate: row.first_invoice_date || '',
-      lastInvoiceDate: row.last_invoice_date || '',
-      lastBilledAt: row.last_billed_at || ''
+      billingStatus: row.planning_billing_status || row.billing_status || 'PENDING',
+      billedQty: billedQty,
+      billingPendingQty: billingGapQty,
+      billingGapQty: billingGapQty,
+      shortClosedQty: _reportsSafeNumber_(row.short_closed_qty),
+      operationalBillingPendingQty: _reportsSafeNumber_(row.operational_billing_pending_qty),
+      partiallyBilled: row.partially_billed_flag === true || String(row.partially_billed_flag || '').toLowerCase() === 'true' ? 'YES' : '',
+      invoiceCount: row.posted_invoice_count == null ? _reportsSafeNumber_(row.invoice_count) : _reportsSafeNumber_(row.posted_invoice_count),
+      invoiceNos: row.posted_invoice_nos || row.invoice_nos || '',
+      invoiceDates: row.posted_invoice_dates || row.invoice_dates || '',
+      firstInvoiceDate: row.posted_first_invoice_date || row.first_invoice_date || '',
+      lastInvoiceDate: row.posted_last_invoice_date || row.last_invoice_date || '',
+      lastBilledAt: row.posted_last_billed_at || row.last_billed_at || ''
     };
   }).filter(function(row) {
-    const pendingPass = filters.pendingOnly ? String(row.billingStatus || '').toUpperCase() !== 'CLOSED' : true;
+    const pendingPass = filters.pendingOnly
+      ? _reportsSafeNumber_(row.billingGapQty) > 0 || ['CLOSED', 'CANCELLED'].indexOf(String(row.billingStatus || '').toUpperCase()) === -1
+      : true;
     return pendingPass &&
       _reportsDatePasses_(row.soDate, filters) &&
       _reportsTextPasses_(row, filters, [
         'soNumber',
         'poNumber',
         'soLineStatus',
+        'closureStatus',
+        'closureReason',
+        'closedBy',
         'lineNo',
         'clientName',
         'division',
@@ -29334,6 +29508,8 @@ function _reportsPlanningRows_(filters) {
         'plateProcurementStatus',
         'dieProcurementStatus',
         'billingStatus',
+        'closureStatus',
+        'partiallyBilled',
         'plateStatus',
         'dieStatus'
       ]);
@@ -29373,6 +29549,8 @@ function _reportsSectionPlanning_(token, params) {
         { key:'poNumber', label:'PO No' },
         { key:'poDate', label:'PO Date', type:'date' },
         { key:'soLineStatus', label:'SO Line Status', type:'status' },
+        { key:'closureStatus', label:'Closure Status', type:'status' },
+        { key:'closureReason', label:'Closure Reason' },
         { key:'division', label:'Division' },
         { key:'salesRep', label:'Sales Rep' },
         { key:'clientName', label:'Client' },
@@ -29436,7 +29614,10 @@ function _reportsSectionPlanning_(token, params) {
         { key:'dieReceiptRefs', label:'Die Receipt Refs' },
         { key:'billingStatus', label:'Billing Status', type:'status' },
         { key:'billedQty', label:'Billed Qty', type:'number' },
-        { key:'billingPendingQty', label:'Pending Qty', type:'number' },
+        { key:'billingPendingQty', label:'Billing Gap Qty', type:'number' },
+        { key:'shortClosedQty', label:'Short Closed Qty', type:'number' },
+        { key:'operationalBillingPendingQty', label:'Operational Pending Qty', type:'number' },
+        { key:'partiallyBilled', label:'Partially Billed' },
         { key:'invoiceCount', label:'Invoice Count', type:'number' },
         { key:'invoiceNos', label:'Invoice Nos' },
         { key:'invoiceDates', label:'Invoice Dates' },
@@ -30693,6 +30874,10 @@ function _reportsSectionPRLifecycle_(token, params) {
       pendingReceiptQty: _reportsSafeNumber_(row.pendingReceiptQty),
       poRate: _reportsSafeNumber_(row.poRate),
       taxPct: _reportsSafeNumber_(row.taxPct),
+      firstPoDate: row.firstPoDate || '',
+      latestPoDate: row.latestPoDate || '',
+      prToFirstPoLeadDays: row.firstPoDate ? _reportsDateDiffDays_(row.date || '', row.firstPoDate) : null,
+      daysWaitingForPO: row.firstPoDate ? 0 : _reportsDateDiffDays_(row.date || ''),
       poRefs: Array.isArray(row.poRefs) ? row.poRefs.join(', ') : (row.poRefs || ''),
       receiptCount: _reportsSafeNumber_(receiptMeta.receiptCount),
       latestGrnNo: receiptMeta.lastGrnNo || '',
@@ -30729,6 +30914,15 @@ function _reportsSectionPRLifecycle_(token, params) {
       String(b.prNo || '').localeCompare(String(a.prNo || ''));
   });
 
+  const poLeadRows = rows.filter(function(row) {
+    return row.prToFirstPoLeadDays !== null && typeof row.prToFirstPoLeadDays !== 'undefined';
+  });
+  const avgPrToPoLeadDays = poLeadRows.length
+    ? _reportsRoundNumber_(poLeadRows.reduce(function(sum, row) {
+        return sum + _reportsSafeNumber_(row.prToFirstPoLeadDays);
+      }, 0) / poLeadRows.length, 2)
+    : 0;
+
   return {
     ok: true,
     title: 'Purchase Request Lifecycle',
@@ -30740,6 +30934,7 @@ function _reportsSectionPRLifecycle_(token, params) {
       grnPendingRows: rows.filter(function(r){
         return ['GRN_PENDING','GRN_PARTIAL'].indexOf(String(r.lifecycleStatus || '').toUpperCase()) !== -1;
       }).length,
+      avgPrToPoLeadDays: avgPrToPoLeadDays,
       pendingQty: rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.pendingReceiptQty); }, 0)
     },
     tables: [{
@@ -30764,6 +30959,9 @@ function _reportsSectionPRLifecycle_(token, params) {
         { key:'pendingReceiptQty', label:'Pending GRN Qty', type:'number' },
         { key:'poRate', label:'PO Rate', type:'money' },
         { key:'taxPct', label:'Tax %', type:'number' },
+        { key:'firstPoDate', label:'First PO Date', type:'date' },
+        { key:'prToFirstPoLeadDays', label:'PR To PO Lead Days', type:'number' },
+        { key:'daysWaitingForPO', label:'Days Waiting For PO', type:'number' },
         { key:'poRefs', label:'PO Refs' },
         { key:'receiptCount', label:'GRN Count', type:'number' },
         { key:'latestGrnNo', label:'Latest GRN' },
