@@ -4014,6 +4014,88 @@ function purchaseCreateArtworkPO(payload) {
   return { ok: true, poNo: poNo };
 }
 
+function _purchasePOAuditActor_(payload) {
+  const explicit = String(payload && (payload.updatedBy || payload.changedBy || payload.createdBy) || '').trim();
+  if (explicit) return explicit;
+  try {
+    return Session.getActiveUser()?.getEmail?.() || 'ERP User';
+  } catch (e) {
+    return 'ERP User';
+  }
+}
+
+function _purchaseNormalizeAuditNumber_(value, places) {
+  const n = Number(value || 0);
+  return Number(n.toFixed(places || 2));
+}
+
+function _purchasePOHeaderAuditSnapshot_(row) {
+  row = row || {};
+  return {
+    vendorId: String(row.vendorId || '').trim(),
+    vendorName: String(row.vendorName || '').trim(),
+    paymentTerms: String(row.paymentTerms || '').trim(),
+    freightTerms: String(row.freightTerms || '').trim(),
+    freightValue: _purchaseNormalizeAuditNumber_(row.freightValue, 2),
+    deliveryTerms: String(row.deliveryTerms || '').trim(),
+    notes: String(row.notes || '').trim(),
+    totalQty: _purchaseNormalizeAuditNumber_(row.totalQty, 3),
+    basicTotal: _purchaseNormalizeAuditNumber_(row.basicTotal, 2),
+    taxTotal: _purchaseNormalizeAuditNumber_(row.taxTotal, 2),
+    totalValue: _purchaseNormalizeAuditNumber_(row.totalValue, 2)
+  };
+}
+
+function _purchasePOLineAuditSnapshot_(row) {
+  row = row || {};
+  return {
+    lineNo: Number(row.lineNo || 0),
+    sourceType: String(row.sourceType || '').trim().toUpperCase(),
+    sourceRef: String(row.sourceRef || '').trim(),
+    itemCode: String(row.itemCode || '').trim(),
+    itemName: String(row.itemName || '').trim(),
+    qty: _purchaseNormalizeAuditNumber_(row.qty, 3),
+    rate: _purchaseNormalizeAuditNumber_(row.rate, 2),
+    taxPct: _purchaseNormalizeAuditNumber_(row.taxPct, 2),
+    amount: _purchaseNormalizeAuditNumber_(row.amount, 2),
+    taxAmount: _purchaseNormalizeAuditNumber_(row.taxAmount, 2),
+    totalAmount: _purchaseNormalizeAuditNumber_(row.totalAmount, 2),
+    department: String(row.department || '').trim(),
+    jobRef: String(row.jobRef || '').trim(),
+    remarks: String(row.remarks || '').trim()
+  };
+}
+
+function _purchaseAuditSnapshotsDiffer_(beforeData, afterData) {
+  return JSON.stringify(beforeData || {}) !== JSON.stringify(afterData || {});
+}
+
+function _purchaseInsertPOAuditLog_(entry) {
+  try {
+    supabaseInsertMinimal('purchase_po_audit_log', {
+      po_id: entry.poId || null,
+      po_no: String(entry.poNo || '').trim(),
+      po_line_id: entry.poLineId || null,
+      line_no: entry.lineNo || null,
+      entity_type: String(entry.entityType || '').trim(),
+      action: String(entry.action || '').trim(),
+      before_data: entry.beforeData || null,
+      after_data: entry.afterData || null,
+      changed_by: String(entry.changedBy || '').trim(),
+      changed_at: entry.changedAt || _purchaseNowIso_()
+    });
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'purchase_po_audit_log')) return;
+    throw err;
+  }
+}
+
+function _purchaseRecordPOAuditLogs_(entries) {
+  (entries || []).filter(Boolean).forEach(function(entry) {
+    _purchaseInsertPOAuditLog_(entry);
+  });
+}
+
 function purchaseUpdatePO(payload) {
   if (!payload || !payload.poNo) throw new Error('PO No is required');
 
@@ -4024,6 +4106,9 @@ function purchaseUpdatePO(payload) {
   const vendor = _purchaseListVendors_().find(v => v.id === payload.vendorId);
   if (!vendor) throw new Error('Vendor not found');
 
+  const changedBy = _purchasePOAuditActor_(payload);
+  const changedAt = _purchaseNowIso_();
+  const auditEntries = [];
   const livePO = ((purchaseListPOsJSON({ poNo: header.poNo, forceRefresh: true }).rows || [])[0]) || { lines: [] };
   const existingLines = _purchaseListPOLines_()
     .filter(line => line.poNo === header.poNo)
@@ -4088,6 +4173,18 @@ function purchaseUpdatePO(payload) {
         throw new Error('Cannot delete line ' + line.lineNo + ' because receipts already exist.');
       }
       supabaseDelete('purchase_order_lines', { id: 'eq.' + line.id });
+      auditEntries.push({
+        poId: header.id,
+        poNo: header.poNo,
+        poLineId: line.id,
+        lineNo: line.lineNo,
+        entityType: 'LINE',
+        action: 'DELETE',
+        beforeData: _purchasePOLineAuditSnapshot_(line),
+        afterData: null,
+        changedBy: changedBy,
+        changedAt: changedAt
+      });
       return;
     }
     const sourceType = String(incoming.sourceType || line.sourceType || '').trim().toUpperCase() || 'DIRECT';
@@ -4126,6 +4223,8 @@ function purchaseUpdatePO(payload) {
     }
     next.id = line.id;
     next.poId = header.id;
+    next.hasReceipts = hasReceipts;
+    next.existingLineNo = Number(line.lineNo || 0);
     finalLines.push(next);
   });
 
@@ -4157,13 +4256,39 @@ function purchaseUpdatePO(payload) {
   existingLines.forEach(function(row) {
     existingLineIds[String(row.id)] = true;
   });
+  const existingLineMap = {};
+  existingLines.forEach(function(row) {
+    existingLineMap[String(row.id)] = row;
+  });
+
+  const usedLineNos = {};
+  finalLines.forEach(function(line) {
+    if (!line.hasReceipts || !line.existingLineNo) return;
+    line.lineNo = Number(line.existingLineNo || 0);
+    usedLineNos[String(line.lineNo)] = true;
+  });
+  let nextLineNo = 1;
+  finalLines.forEach(function(line) {
+    if (line.hasReceipts && line.existingLineNo) return;
+    while (usedLineNos[String(nextLineNo)]) nextLineNo++;
+    line.lineNo = nextLineNo;
+    usedLineNos[String(nextLineNo)] = true;
+    nextLineNo++;
+  });
 
   finalLines.forEach((line, idx) => {
-    line.lineNo = idx + 1;
     totalQty += line.qty;
     basicTotal += line.amount;
     taxTotal += line.taxAmount;
     if (existingLineIds[String(line.id)]) {
+      const beforeLine = existingLineMap[String(line.id)] || {};
+      const beforeData = _purchasePOLineAuditSnapshot_(beforeLine);
+      const afterData = _purchasePOLineAuditSnapshot_(line);
+      const changed = _purchaseAuditSnapshotsDiffer_(beforeData, afterData);
+      if (!changed) return;
+      if (line.hasReceipts) {
+        throw new Error('Received PO line ' + (beforeLine.lineNo || line.lineNo) + ' cannot be edited after GRN activity. Edit only lines with no received quantity.');
+      }
       supabaseUpdate('purchase_order_lines', { id: 'eq.' + line.id }, {
         line_no: line.lineNo,
         source_type: line.sourceType,
@@ -4179,6 +4304,18 @@ function purchaseUpdatePO(payload) {
         department: line.department,
         job_ref: line.jobRef,
         remarks: line.remarks
+      });
+      auditEntries.push({
+        poId: header.id,
+        poNo: header.poNo,
+        poLineId: line.id,
+        lineNo: line.lineNo,
+        entityType: 'LINE',
+        action: 'UPDATE',
+        beforeData: beforeData,
+        afterData: afterData,
+        changedBy: changedBy,
+        changedAt: changedAt
       });
     } else {
       let inserted = false;
@@ -4208,6 +4345,18 @@ function purchaseUpdatePO(payload) {
           });
           line.id = insertId;
           inserted = true;
+          auditEntries.push({
+            poId: header.id,
+            poNo: header.poNo,
+            poLineId: insertId,
+            lineNo: line.lineNo,
+            entityType: 'LINE',
+            action: 'INSERT',
+            beforeData: null,
+            afterData: _purchasePOLineAuditSnapshot_(line),
+            changedBy: changedBy,
+            changedAt: changedAt
+          });
         } catch (err) {
           lastInsertError = err;
           if (String(err && err.message || '').indexOf('23505') === -1) throw err;
@@ -4219,7 +4368,7 @@ function purchaseUpdatePO(payload) {
 
   try {
     const freightTax = _purchaseFreightTaxBreakup_(vendor.state, freightValue);
-    supabaseUpdate('purchase_orders', { id: 'eq.' + header.id }, {
+    const headerUpdate = {
       vendor_id: vendor.id,
       vendor_name: vendor.vendorName,
       vendor_email: vendor.email || '',
@@ -4235,12 +4384,42 @@ function purchaseUpdatePO(payload) {
       tax_total: Number((taxTotal + freightTax.taxAmount).toFixed(2)),
       total_value: Number((basicTotal + taxTotal + freightValue + freightTax.taxAmount).toFixed(2)),
       updated_at: _purchaseNowIso_()
+    };
+    const beforeHeader = _purchasePOHeaderAuditSnapshot_(header);
+    const afterHeader = _purchasePOHeaderAuditSnapshot_({
+      vendorId: vendor.id,
+      vendorName: vendor.vendorName,
+      paymentTerms: headerUpdate.payment_terms,
+      freightTerms: headerUpdate.freight_terms,
+      freightValue: headerUpdate.freight_value,
+      deliveryTerms: headerUpdate.delivery_terms,
+      notes: headerUpdate.notes,
+      totalQty: headerUpdate.total_qty,
+      basicTotal: headerUpdate.basic_total,
+      taxTotal: headerUpdate.tax_total,
+      totalValue: headerUpdate.total_value
     });
+    supabaseUpdate('purchase_orders', { id: 'eq.' + header.id }, headerUpdate);
+    if (_purchaseAuditSnapshotsDiffer_(beforeHeader, afterHeader)) {
+      auditEntries.push({
+        poId: header.id,
+        poNo: header.poNo,
+        poLineId: null,
+        lineNo: null,
+        entityType: 'HEADER',
+        action: 'UPDATE',
+        beforeData: beforeHeader,
+        afterData: afterHeader,
+        changedBy: changedBy,
+        changedAt: changedAt
+      });
+    }
   } catch (e) {
     throw new Error('Run purchase_freight_value_schema.sql in Supabase before updating freight-valued purchase orders.');
   }
 
   _purchaseUpdatePOStatus_(header.poNo);
+  _purchaseRecordPOAuditLogs_(auditEntries);
   PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
   return { ok: true, poNo: header.poNo };
 }
@@ -31387,6 +31566,223 @@ function _reportsSectionDispatchDiscrepancy_(token, params) {
   };
 }
 
+function _reportsSectionShortExcessDispatch_(token, params) {
+  _reportsRequireSession_(token);
+  const filters = _reportsNormalizeFilters_(params);
+  filters.pendingOnly = false;
+
+  const sourceRows = _reportsSelectAllRequired_('v_report_short_excess_dispatch_invoice_lines', {
+    filters: _reportsApplyDateFilterToQuery_(filters, 'invoice_date'),
+    order: 'invoice_date.desc,invoice_no.desc,so_number.desc,line_no.asc'
+  });
+
+  const grouped = {};
+  sourceRows.forEach(function(row) {
+    const key = String(row.so_line_id || '').trim() ||
+      [row.so_number || '', row.line_no == null ? '' : String(row.line_no)].join('|');
+    if (!key) return;
+    if (!grouped[key]) {
+      grouped[key] = {
+        soLineId: String(row.so_line_id || '').trim(),
+        soNumber: row.so_number || '',
+        lineNo: row.line_no == null ? '' : String(row.line_no),
+        soDate: row.so_date || '',
+        poNumber: row.po_number || '',
+        poDate: row.po_date || '',
+        salesRep: row.sales_rep || '',
+        clientName: row.client_name || '',
+        productCode: row.product_code || '',
+        productName: row.product_name || '',
+        category: row.category || '',
+        division: row.division || '',
+        unit: row.unit || '',
+        orderQty: _reportsSafeNumber_(row.order_qty),
+        billedQty: 0,
+        billedValue: 0,
+        invoiceLineCount: 0,
+        invoiceIds: {},
+        invoiceNos: {},
+        firstInvoiceDate: '',
+        lastInvoiceDate: '',
+        invoiceStatus: row.invoice_status || '',
+        soStatus: row.so_status || '',
+        soLineStatus: row.so_line_status || ''
+      };
+    }
+
+    const out = grouped[key];
+    const invoiceDate = String(row.invoice_date || '').trim();
+    const invoiceNo = String(row.invoice_no || '').trim();
+    const invoiceId = String(row.invoice_id || '').trim();
+    out.billedQty += _reportsSafeNumber_(row.billed_qty);
+    out.billedValue += _reportsSafeNumber_(row.billed_value);
+    out.invoiceLineCount += 1;
+    if (invoiceNo) out.invoiceNos[invoiceNo] = true;
+    if (invoiceId) out.invoiceIds[invoiceId] = true;
+    if (invoiceDate && (!out.firstInvoiceDate || invoiceDate < out.firstInvoiceDate)) out.firstInvoiceDate = invoiceDate;
+    if (invoiceDate && (!out.lastInvoiceDate || invoiceDate > out.lastInvoiceDate)) out.lastInvoiceDate = invoiceDate;
+  });
+
+  const rows = Object.keys(grouped).map(function(key) {
+    const row = grouped[key];
+    const orderQty = _reportsSafeNumber_(row.orderQty);
+    const billedQty = _reportsRoundNumber_(row.billedQty, 3);
+    const varianceQty = _reportsRoundNumber_(billedQty - orderQty, 3);
+    const shortDispatchQty = _reportsRoundNumber_(Math.max(orderQty - billedQty, 0), 3);
+    const excessDispatchQty = _reportsRoundNumber_(Math.max(billedQty - orderQty, 0), 3);
+    const dispatchStatus = excessDispatchQty > 0
+      ? 'EXCESS_DISPATCH'
+      : (shortDispatchQty > 0 ? 'SHORT_DISPATCH' : 'OK');
+    return Object.assign({}, row, {
+      invoiceCount: Object.keys(row.invoiceIds).length,
+      invoiceNos: Object.keys(row.invoiceNos).sort().join(', '),
+      billedQty: billedQty,
+      billedValue: _reportsRoundNumber_(row.billedValue, 2),
+      varianceQty: varianceQty,
+      shortDispatchQty: shortDispatchQty,
+      excessDispatchQty: excessDispatchQty,
+      dispatchStatus: dispatchStatus,
+      dispatchReason: dispatchStatus === 'EXCESS_DISPATCH'
+        ? ('Billed > SO by ' + excessDispatchQty)
+        : (dispatchStatus === 'SHORT_DISPATCH' ? ('Billed < SO by ' + shortDispatchQty) : 'Billed equals SO')
+    });
+  }).filter(function(row) {
+    return (row.shortDispatchQty > 0 || row.excessDispatchQty > 0) &&
+      _reportsTextPasses_(row, filters, [
+        'soNumber',
+        'lineNo',
+        'poNumber',
+        'salesRep',
+        'clientName',
+        'productCode',
+        'productName',
+        'category',
+        'division',
+        'invoiceNos',
+        'dispatchStatus',
+        'dispatchReason'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'dispatchStatus',
+        'dispatchReason',
+        'division',
+        'category',
+        'soStatus',
+        'soLineStatus'
+      ]);
+  }).sort(function(a, b) {
+    const dateSort = String(b.lastInvoiceDate || '').localeCompare(String(a.lastInvoiceDate || ''));
+    if (dateSort) return dateSort;
+    const soSort = String(b.soNumber || '').localeCompare(String(a.soNumber || ''));
+    if (soSort) return soSort;
+    return _reportsSafeNumber_(a.lineNo) - _reportsSafeNumber_(b.lineNo);
+  });
+
+  const summaryMap = {};
+  rows.forEach(function(row) {
+    const key = row.dispatchStatus || 'UNKNOWN';
+    if (!summaryMap[key]) {
+      summaryMap[key] = {
+        dispatchStatus: key,
+        lineCount: 0,
+        invoiceCount: 0,
+        billedQty: 0,
+        orderQty: 0,
+        shortDispatchQty: 0,
+        excessDispatchQty: 0,
+        billedValue: 0
+      };
+    }
+    const bucket = summaryMap[key];
+    bucket.lineCount += 1;
+    bucket.invoiceCount += _reportsSafeNumber_(row.invoiceCount);
+    bucket.billedQty += _reportsSafeNumber_(row.billedQty);
+    bucket.orderQty += _reportsSafeNumber_(row.orderQty);
+    bucket.shortDispatchQty += _reportsSafeNumber_(row.shortDispatchQty);
+    bucket.excessDispatchQty += _reportsSafeNumber_(row.excessDispatchQty);
+    bucket.billedValue += _reportsSafeNumber_(row.billedValue);
+  });
+
+  const summaryRows = Object.keys(summaryMap).map(function(key) {
+    const row = summaryMap[key];
+    return {
+      dispatchStatus: row.dispatchStatus,
+      lineCount: row.lineCount,
+      invoiceCount: row.invoiceCount,
+      orderQty: _reportsRoundNumber_(row.orderQty, 3),
+      billedQty: _reportsRoundNumber_(row.billedQty, 3),
+      shortDispatchQty: _reportsRoundNumber_(row.shortDispatchQty, 3),
+      excessDispatchQty: _reportsRoundNumber_(row.excessDispatchQty, 3),
+      billedValue: _reportsRoundNumber_(row.billedValue, 2)
+    };
+  }).sort(function(a, b) {
+    return _reportsSafeNumber_(b.lineCount) - _reportsSafeNumber_(a.lineCount) ||
+      String(a.dispatchStatus || '').localeCompare(String(b.dispatchStatus || ''));
+  });
+
+  return {
+    ok: true,
+    title: 'Short / Excess Dispatch',
+    metrics: {
+      exceptionLines: rows.length,
+      shortDispatchLines: rows.filter(function(row){ return _reportsSafeNumber_(row.shortDispatchQty) > 0; }).length,
+      excessDispatchLines: rows.filter(function(row){ return _reportsSafeNumber_(row.excessDispatchQty) > 0; }).length,
+      shortDispatchQty: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.shortDispatchQty); }, 0), 3),
+      excessDispatchQty: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.excessDispatchQty); }, 0), 3)
+    },
+    tables: [{
+      key: 'short-excess-dispatch-summary',
+      title: 'Short / Excess Summary',
+      subtitle: 'Invoice-date filtered exceptions comparing selected posted billed quantity against SO line quantity.',
+      minWidth: 1200,
+      columns: [
+        { key:'dispatchStatus', label:'Status', type:'status' },
+        { key:'lineCount', label:'SO Lines', type:'number' },
+        { key:'invoiceCount', label:'Invoices', type:'number' },
+        { key:'orderQty', label:'SO Qty', type:'number' },
+        { key:'billedQty', label:'Billed Qty', type:'number' },
+        { key:'shortDispatchQty', label:'Short Qty', type:'number' },
+        { key:'excessDispatchQty', label:'Excess Qty', type:'number' },
+        { key:'billedValue', label:'Billed Value', type:'money' }
+      ],
+      rows: summaryRows
+    }, {
+      key: 'short-excess-dispatch-lines',
+      title: 'Short / Excess Dispatch Line Details',
+      subtitle: 'One row per SO line with posted invoice quantity in the selected invoice date range compared to sales order quantity.',
+      minWidth: 3000,
+      columns: [
+        { key:'dispatchStatus', label:'Status', type:'status' },
+        { key:'dispatchReason', label:'Reason' },
+        { key:'firstInvoiceDate', label:'First Invoice Date', type:'date' },
+        { key:'lastInvoiceDate', label:'Last Invoice Date', type:'date' },
+        { key:'invoiceNos', label:'Invoice Nos' },
+        { key:'invoiceCount', label:'Invoice Count', type:'number' },
+        { key:'soNumber', label:'SO No' },
+        { key:'lineNo', label:'Line' },
+        { key:'soDate', label:'SO Date', type:'date' },
+        { key:'poNumber', label:'PO No' },
+        { key:'poDate', label:'PO Date', type:'date' },
+        { key:'clientName', label:'Client' },
+        { key:'salesRep', label:'Sales Rep' },
+        { key:'division', label:'Division' },
+        { key:'category', label:'Category' },
+        { key:'productCode', label:'Product Code' },
+        { key:'productName', label:'Product' },
+        { key:'orderQty', label:'SO Qty', type:'number' },
+        { key:'billedQty', label:'Billed Qty', type:'number' },
+        { key:'varianceQty', label:'Variance Qty', type:'number' },
+        { key:'shortDispatchQty', label:'Short Qty', type:'number' },
+        { key:'excessDispatchQty', label:'Excess Qty', type:'number' },
+        { key:'unit', label:'Unit' },
+        { key:'billedValue', label:'Billed Value', type:'money' },
+        { key:'soLineStatus', label:'SO Line Status', type:'status' }
+      ],
+      rows: rows
+    }]
+  };
+}
+
 function _reportsSectionTraceability_(token, params) {
   _reportsRequireSession_(token);
   const filters = _reportsNormalizeFilters_(params);
@@ -33002,6 +33398,7 @@ function reportsGetSectionData(section, params, token) {
   else if (key === 'salesorders') result = _reportsSectionSalesOrders_(token, params);
   else if (key === 'sheetutilization') result = _reportsSectionSheetUtilization_(token, params);
   else if (key === 'dispatchdiscrepancy') result = _reportsSectionDispatchDiscrepancy_(token, params);
+  else if (key === 'shortexcessdispatch') result = _reportsSectionShortExcessDispatch_(token, params);
   else if (key === 'polines') result = _reportsSectionPOLines_(token, params);
   else if (key === 'prlifecycle') result = _reportsSectionPRLifecycle_(token, params);
   else if (key === 'departmentpurchases') result = _reportsSectionDepartmentPurchases_(token, params);

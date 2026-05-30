@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Mf26qVebwhNtIQ8DNIKQY412PaxpwWufESGy6zHGZVABex8u8hjW4aAJkeFZseN
+\restrict 1QYJbjNh1tq583P4zjjt5CqqHgLWoIeUX9plGatbIDWU15YiyH7jL5xwDAia14C
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.3
@@ -7805,6 +7805,27 @@ CREATE TABLE public.purchase_orders (
     basic_total numeric(14,2) DEFAULT 0,
     tax_total numeric(14,2) DEFAULT 0,
     freight_value numeric DEFAULT 0 NOT NULL
+);
+
+
+--
+-- Name: purchase_po_audit_log; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.purchase_po_audit_log (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    po_id uuid,
+    po_no text NOT NULL,
+    po_line_id uuid,
+    line_no integer,
+    entity_type text NOT NULL,
+    action text NOT NULL,
+    before_data jsonb,
+    after_data jsonb,
+    changed_by text DEFAULT ''::text,
+    changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT purchase_po_audit_log_action_chk CHECK ((action = ANY (ARRAY['INSERT'::text, 'UPDATE'::text, 'DELETE'::text]))),
+    CONSTRAINT purchase_po_audit_log_entity_chk CHECK ((entity_type = ANY (ARRAY['HEADER'::text, 'LINE'::text])))
 );
 
 
@@ -17139,6 +17160,49 @@ CREATE VIEW public.v_report_sheet_utilization WITH (security_invoker='on') AS
 
 
 --
+-- Name: v_report_short_excess_dispatch_invoice_lines; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_short_excess_dispatch_invoice_lines WITH (security_invoker='on') AS
+ SELECT il.id AS invoice_line_id,
+    il.invoice_id,
+    inv.invoice_no,
+    inv.invoice_date,
+    inv.posted_at,
+    inv.created_at AS invoice_created_at,
+    upper(COALESCE(inv.status, 'POSTED'::text)) AS invoice_status,
+    upper(COALESCE(inv.document_type, 'INVOICE'::text)) AS document_type,
+    il.so_id,
+    il.so_line_id,
+    so.so_number,
+    so.so_date,
+    so.po_number,
+    so.po_date,
+    so.sales_rep,
+    COALESCE(c.client_name, so.client_code, inv.client_name, inv.client_code, ''::text) AS client_name,
+    COALESCE(so.client_code, inv.client_code, ''::text) AS client_code,
+    sol.line_no,
+    COALESCE(sol.product_code, il.product_code, ''::text) AS product_code,
+    COALESCE(sol.product_name, il.product_name, ''::text) AS product_name,
+    COALESCE(sol.category, ''::text) AS category,
+    COALESCE(sol.division, il.division, ''::text) AS division,
+    COALESCE(sol.unit, il.unit, 'Pcs'::text) AS unit,
+    COALESCE(sol.qty, (0)::numeric) AS order_qty,
+    COALESCE(il.qty, (0)::numeric) AS billed_qty,
+    COALESCE(il.rate, sol.rate, (0)::numeric) AS rate,
+    COALESCE(il.taxable_amount, il.line_amount, il.line_total, (COALESCE(il.qty, (0)::numeric) * COALESCE(il.rate, sol.rate, (0)::numeric)), (0)::numeric) AS billed_value,
+    COALESCE(sol.status, 'OPEN'::text) AS so_line_status,
+    COALESCE(so.status, 'OPEN'::text) AS so_status,
+    lower(concat_ws(' '::text, COALESCE(inv.invoice_no, ''::text), COALESCE(so.so_number, ''::text), COALESCE((sol.line_no)::text, ''::text), COALESCE(so.po_number, ''::text), COALESCE(so.sales_rep, ''::text), COALESCE(c.client_name, so.client_code, inv.client_name, inv.client_code, ''::text), COALESCE(sol.division, il.division, ''::text), COALESCE(sol.category, ''::text), COALESCE(sol.product_code, il.product_code, ''::text), COALESCE(sol.product_name, il.product_name, ''::text))) AS match_text
+   FROM ((((public.invoice_lines il
+     JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+     JOIN public.sales_order_lines sol ON ((sol.id = il.so_line_id)))
+     JOIN public.sales_orders so ON ((so.id = sol.so_id)))
+     LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+  WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text) AND (upper(COALESCE(so.order_prefix, ''::text)) <> 'MB'::text) AND (upper(COALESCE(so.sales_type, ''::text)) <> 'MANUAL_BILLING'::text) AND (COALESCE(so.so_number, ''::text) !~* '^MB[/-]'::text) AND (upper(COALESCE(so.remarks, ''::text)) !~~ '%SYSTEM GENERATED FOR MANUAL BILLING%'::text) AND (upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text));
+
+
+--
 -- Name: v_report_unbilled_dispatch; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -19792,6 +19856,14 @@ ALTER TABLE ONLY public.purchase_orders
 
 
 --
+-- Name: purchase_po_audit_log purchase_po_audit_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.purchase_po_audit_log
+    ADD CONSTRAINT purchase_po_audit_log_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: purchase_po_receipts purchase_po_receipts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -21473,6 +21545,20 @@ CREATE INDEX idx_purchase_orders_status_po ON public.purchase_orders USING btree
 --
 
 CREATE INDEX idx_purchase_orders_vendor_id ON public.purchase_orders USING btree (vendor_id);
+
+
+--
+-- Name: idx_purchase_po_audit_log_line; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_purchase_po_audit_log_line ON public.purchase_po_audit_log USING btree (po_line_id, changed_at DESC);
+
+
+--
+-- Name: idx_purchase_po_audit_log_po; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_purchase_po_audit_log_po ON public.purchase_po_audit_log USING btree (po_no, changed_at DESC);
 
 
 --
@@ -23200,6 +23286,12 @@ ALTER TABLE public.purchase_order_lines ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.purchase_orders ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: purchase_po_audit_log; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.purchase_po_audit_log ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: purchase_po_receipts; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -23394,5 +23486,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Mf26qVebwhNtIQ8DNIKQY412PaxpwWufESGy6zHGZVABex8u8hjW4aAJkeFZseN
+\unrestrict 1QYJbjNh1tq583P4zjjt5CqqHgLWoIeUX9plGatbIDWU15YiyH7jL5xwDAia14C
 
