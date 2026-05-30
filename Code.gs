@@ -4207,7 +4207,8 @@ function purchaseUpdatePO(payload) {
       next = _purchaseNormalizeDirectLine_(Object.assign({}, line, incoming, { sourceType: sourceType }), sourceType, finalLines.length + 1, header.poNo, line.createdAt || _purchaseNowIso_(), { keepId: true });
     }
     if (hasReceipts) {
-      if (Number(next.qty || 0) + 0.0001 < Number(live.receivedQty || 0)) {
+      const qtyChanged = Math.abs(Number(next.qty || 0) - Number(line.qty || 0)) > 0.0001;
+      if (qtyChanged && Number(next.qty || 0) + 0.0001 < Number(live.receivedQty || 0)) {
         throw new Error('PO qty cannot be reduced below received qty for line ' + line.lineNo);
       }
       const changedCommercial =
@@ -6816,12 +6817,41 @@ function _validateCorrugatedWorkOrderPayload_(payload) {
   p.jobDetails.totalBoardPlyCount = corrRows.length ? (corrRows.length + 1) : 1;
 }
 
+function _validateFlexoWorkOrderPayload_(payload) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const jobDetails = _safeJsonObject_(p.jobDetails);
+  const type = String(jobDetails.type || '').trim().toUpperCase();
+  if (type !== 'FLEXO') return;
+
+  const jobs = Array.isArray(p.jobs) ? p.jobs : [];
+  const totalJobQty = jobs.reduce(function(sum, job) {
+    return sum + (Number(job && job.qty || 0) || 0);
+  }, 0);
+
+  const flexoDetails = _safeJsonObject_(p.flexoDetails);
+  const plannedQty = Number(flexoDetails.woQty || flexoDetails.plannedQty || 0) || 0;
+  if (plannedQty > 0 && Math.abs(totalJobQty - plannedQty) > 0.0001) {
+    throw new Error('Flexo WO Qty must match the total saved job-line quantity.');
+  }
+
+  const labelType = String(flexoDetails.labelType || '').trim().toUpperCase();
+  const expectedEffectiveQty = labelType === 'SET' ? totalJobQty * 2 : totalJobQty;
+  const effectiveQty = Number(flexoDetails.effectiveQty || 0) || 0;
+  if (effectiveQty > 0 && Math.abs(effectiveQty - expectedEffectiveQty) > 0.0001) {
+    throw new Error('Flexo Effective Qty must be derived from the saved WO quantity.');
+  }
+
+  p.jobDetails = jobDetails;
+  p.flexoDetails = flexoDetails;
+}
+
 function saveWorkOrder(payload, options) {
 
   if (!payload?.jobs?.length) {
     throw new Error('No jobs to save.');
   }
   _validateCorrugatedWorkOrderPayload_(payload);
+  _validateFlexoWorkOrderPayload_(payload);
   const saveOpts = options || {};
 
   const now = new Date().toISOString();
@@ -15831,16 +15861,11 @@ function packGetDataset(params, token) {
     _prodCachePutJsonSafe_(cache, cacheKey, result, 60);
     return result;
   } catch (err) {
-    if (!_supabaseRelationMissing_(err, 'packing_queue_dataset')) throw err;
+    if (_supabaseRelationMissing_(err, 'packing_queue_dataset')) {
+      throw new Error('Packing queue RPC is missing. Apply supabase_packing_queue_dataset_rpc.sql so Flexo RM is converted to PCS using the saved work-order reverse formula.');
+    }
+    throw err;
   }
-  const fastRows = _opsFilterStageRows_(_opsMapPackingFastRows_(_excludeCancelledSalesOrdersByNumber_(supabaseSelect('v_packing_queue_fast', {
-    select: 'pack_id,so_id,so_line_id,so_number,line_no,product_code,product_name,client_name,category,department_category,order_qty,produced_qty,packed_qty,packed_weight_kg,ready_to_dispatch,expected_delivery,final_delivery,division,quote_no,pm_code,product_remarks,prepress_remarks,so_remarks,artwork_no,wo_number,wo_date,transport_mode',
-    order: 'wo_date.desc,so_number.asc,line_no.asc'
-  }) || [], 'so_number')), 'PACKING', p);
-  const rows = _opsResolveDatasetRows_('PACKING', fastRows, p, token);
-  const result = { ok: true, rows: rows, summary: _opsStageDatasetSummary_(rows, 'PACKING') };
-  _prodCachePutJsonSafe_(cache, cacheKey, result, 60);
-  return result;
 }
 
 function dispatchGetDataset(params, token) {
@@ -19601,9 +19626,8 @@ function _invNormalizeWorkOrderIssueListOpts_(opts) {
   const raw = opts || {};
   const status = String(raw.status || raw.materialStatus || '').trim().toUpperCase();
   const search = String(raw.search || raw.q || raw.woNo || '').trim();
-  const hasSearch = !!search;
   const normalizedStatus = status === 'ALL' ? '' : status;
-  const defaultLimit = hasSearch ? 50000 : (normalizedStatus === 'PENDING' ? 5000 : 1000);
+  const defaultLimit = 50000;
   const limit = Math.max(1, Number(raw.limit || defaultLimit) || defaultLimit);
   const offset = Math.max(0, Number(raw.offset || 0) || 0);
   return {
@@ -29900,8 +29924,11 @@ function _reportsWipAgeingMapRow_(row) {
     firstPackedAt: row.first_packed_at || '',
     latestPackedAt: row.latest_packed_at || '',
     billedQty: _reportsSafeNumber_(row.billed_qty),
+    draftInvoiceQty: _reportsSafeNumber_(row.draft_invoice_qty),
     lastInvoiceDate: row.last_invoice_date || '',
-    invoiceNos: row.invoice_nos || ''
+    lastDraftInvoiceDate: row.last_draft_invoice_date || '',
+    invoiceNos: row.invoice_nos || '',
+    draftInvoiceNos: row.draft_invoice_nos || ''
   };
 }
 
@@ -29933,7 +29960,8 @@ function _reportsWipAgeingRows_(filters) {
         'currentWoNumber',
         'currentRouteProcess',
         'currentRouteMachine',
-        'invoiceNos'
+        'invoiceNos',
+        'draftInvoiceNos'
       ]) &&
       _reportsStatusPasses_(row, filters, [
         'wipScope',
@@ -30086,8 +30114,11 @@ function _reportsWipAgeingDetailColumns_(includeProductionColumns) {
       { key:'firstPackedAt', label:'First Packed', type:'datetime' },
       { key:'latestPackedAt', label:'Latest Packed', type:'datetime' },
       { key:'billedQty', label:'Billed Qty', type:'number' },
+      { key:'draftInvoiceQty', label:'Draft Invoice Qty', type:'number' },
       { key:'lastInvoiceDate', label:'Last Invoice Date', type:'date' },
-      { key:'invoiceNos', label:'Invoice Nos' }
+      { key:'lastDraftInvoiceDate', label:'Last Draft Invoice Date', type:'date' },
+      { key:'invoiceNos', label:'Invoice Nos' },
+      { key:'draftInvoiceNos', label:'Draft Invoice Nos' }
     );
   }
   return columns;

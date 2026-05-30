@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 1QYJbjNh1tq583P4zjjt5CqqHgLWoIeUX9plGatbIDWU15YiyH7jL5xwDAia14C
+\restrict 3TTUMutx7iK9wdQcGA06U1SKYrSgYMpnp9jMGIXAXReSjOSAsLnEwcsPIfttG54
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.3
@@ -2369,7 +2369,24 @@ CREATE FUNCTION public.inv_work_orders_for_issue_summary_ui(p_status text DEFAUL
     s.line_count::integer
   from public.inv_wo_issue_status_fast_v s
   where (p_status is null or trim(p_status) = '' or upper(s.material_status) = upper(trim(p_status)))
-    and (p_search is null or trim(p_search) = '' or upper(s.wo_number) like '%' || upper(trim(p_search)) || '%')
+    and (
+      p_search is null
+      or trim(p_search) = ''
+      or s.wo_number ilike '%' || trim(p_search) || '%'
+      or exists (
+        select 1
+        from public.work_orders wo
+        join public.work_order_jobs woj on woj.wo_id = wo.id
+        where wo.wo_number = s.wo_number
+          and (
+            woj.job_reference ilike '%' || trim(p_search) || '%'
+            or woj.so_number ilike '%' || trim(p_search) || '%'
+            or woj.product_name ilike '%' || trim(p_search) || '%'
+            or woj.client_name ilike '%' || trim(p_search) || '%'
+            or woj.artwork_no ilike '%' || trim(p_search) || '%'
+          )
+      )
+    )
   order by s.wo_number desc
   limit greatest(coalesce(p_limit, 50000), 1)
   offset greatest(coalesce(p_offset, 0), 0);
@@ -2448,6 +2465,65 @@ work_order_flexo_meta as (
     wo.id as wo_id,
     coalesce(
       case
+        when (wo.snapshot_json #>> '{flexoDetails,baseRunningMeter}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{flexoDetails,baseRunningMeter}')::numeric
+      end,
+      0::numeric
+    ) as flexo_base_rm,
+    coalesce(
+      case
+        when (wo.snapshot_json #>> '{flexoDetails,makeReadyRm}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{flexoDetails,makeReadyRm}')::numeric
+      end,
+      case
+        when (wo.snapshot_json #>> '{wastage,makeReadyRm}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{wastage,makeReadyRm}')::numeric
+      end,
+      0::numeric
+    ) as flexo_make_ready_rm,
+    coalesce(
+      case
+        when (wo.snapshot_json #>> '{flexoDetails,processWastageRm}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{flexoDetails,processWastageRm}')::numeric
+      end,
+      case
+        when (wo.snapshot_json #>> '{wastage,processRm}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{wastage,processRm}')::numeric
+      end,
+      0::numeric
+    ) as flexo_process_rm,
+    upper(trim(coalesce(
+      nullif(wo.snapshot_json #>> '{flexoDetails,processWastageType}', ''),
+      nullif(wo.snapshot_json #>> '{wastage,processType}', ''),
+      '%'
+    ))) as flexo_process_type,
+    coalesce(
+      case
+        when (wo.snapshot_json #>> '{flexoDetails,effectiveQty}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{flexoDetails,effectiveQty}')::numeric
+      end,
+      0::numeric
+    ) as flexo_snapshot_effective_qty,
+    coalesce(
+      case
+        when (wo.snapshot_json #>> '{flexoDetails,totalUps}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{flexoDetails,totalUps}')::numeric
+      end,
+      0::numeric
+    ) as flexo_total_ups,
+    coalesce(
+      case
+        when (wo.snapshot_json #>> '{flexoDetails,repeatMm}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{flexoDetails,repeatMm}')::numeric
+      end,
+      case
+        when (wo.snapshot_json #>> '{flexoDetails,cylinderTeeth}') ~ '^[0-9]+([.][0-9]+)?$'
+          then (wo.snapshot_json #>> '{flexoDetails,cylinderTeeth}')::numeric * 3.175
+      end,
+      0::numeric
+    ) as flexo_repeat_mm,
+    coalesce(
+      case
         when (wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}') ~ '^[0-9]+([.][0-9]+)?$'
           then (wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}')::numeric
       end,
@@ -2461,6 +2537,42 @@ work_order_flexo_meta as (
   from public.work_orders wo
   left join public.work_order_jobs woj on woj.wo_id = wo.id
   group by wo.id, wo.snapshot_json
+),
+work_order_flexo_calc as (
+  select
+    m.*,
+    case
+      when m.flexo_process_type in ('RUNNING MTR', 'RUNNING MTR.', 'RUNNING METER', 'RUNNING METERS', 'RM', 'R.M.', 'MANUAL')
+        then coalesce(
+          nullif(m.flexo_base_rm, 0),
+          nullif(greatest(m.flexo_total_rm - m.flexo_make_ready_rm - m.flexo_process_rm, 0), 0),
+          nullif(m.flexo_total_rm, 0),
+          0::numeric
+        )
+      else coalesce(
+        nullif(m.flexo_base_rm + m.flexo_process_rm, 0),
+        nullif(greatest(m.flexo_total_rm - m.flexo_make_ready_rm, 0), 0),
+        nullif(m.flexo_total_rm, 0),
+        0::numeric
+      )
+    end as flexo_conversion_rm,
+    case
+      when m.flexo_process_type in ('RUNNING MTR', 'RUNNING MTR.', 'RUNNING METER', 'RUNNING METERS', 'RM', 'R.M.', 'MANUAL')
+        then m.flexo_make_ready_rm + m.flexo_process_rm
+      else m.flexo_make_ready_rm
+    end as flexo_non_productive_rm,
+    coalesce(
+      nullif(m.flexo_snapshot_effective_qty, 0),
+      case
+        when coalesce(m.flexo_base_rm, 0) > 0
+          and coalesce(m.flexo_total_ups, 0) > 0
+          and coalesce(m.flexo_repeat_mm, 0) > 0
+          then m.flexo_base_rm * m.flexo_total_ups * 1000 / nullif(m.flexo_repeat_mm, 0)
+      end,
+      nullif(m.flexo_total_job_qty, 0),
+      0::numeric
+    ) as flexo_effective_qty
+  from work_order_flexo_meta m
 ),
 job_base as (
   select
@@ -2548,12 +2660,31 @@ queue_base as (
       when upper(coalesce(jb.department_category, sol.category, '')) like '%DIGITAL%' then 'Digital'
       else coalesce(jb.department_category, sol.category, 'Other')::text
     end as category_group,
-    coalesce(sol.qty, jb.job_qty, 0)::numeric as order_qty,
     case
       when upper(coalesce(jb.department_category, sol.category, '')) like '%FLEXO%'
-        and coalesce(wfm.flexo_total_rm, 0) > 0
         and coalesce(jb.job_qty, 0) > 0
-        then round((coalesce(prt.produced_qty, plt.produced_qty, 0) * jb.job_qty / nullif(wfm.flexo_total_rm, 0))::numeric, 3)
+        and coalesce(wfc.flexo_total_job_qty, 0) > 0
+        then round((
+          jb.job_qty
+          * coalesce(nullif(wfc.flexo_effective_qty, 0), wfc.flexo_total_job_qty)
+          / nullif(wfc.flexo_total_job_qty, 0)
+        )::numeric, 3)
+      else coalesce(sol.qty, jb.job_qty, 0)
+    end::numeric as order_qty,
+    case
+      when upper(coalesce(jb.department_category, sol.category, '')) like '%FLEXO%'
+        and coalesce(wfc.flexo_conversion_rm, 0) > 0
+        and coalesce(jb.job_qty, 0) > 0
+        and coalesce(wfc.flexo_total_job_qty, 0) > 0
+        then round((
+          greatest(coalesce(prt.produced_qty, plt.produced_qty, 0) - coalesce(wfc.flexo_non_productive_rm, 0), 0)
+          * (
+            jb.job_qty
+            * coalesce(nullif(wfc.flexo_effective_qty, 0), wfc.flexo_total_job_qty)
+            / nullif(wfc.flexo_total_job_qty, 0)
+          )
+          / nullif(wfc.flexo_conversion_rm, 0)
+        )::numeric, 3)
       when upper(coalesce(fr.process_name, '')) like '%DIE CUT%'
         or upper(coalesce(fr.process_name, '')) like '%DIECUT%'
         then coalesce(plt.produced_qty, prt.produced_qty, 0) * coalesce(nullif(jb.job_ups, 0), 1::numeric)
@@ -2576,7 +2707,7 @@ queue_base as (
     coalesce(wo.snapshot_json ->> 'modeOfTransport', '')::text as transport_mode
   from job_base jb
   join public.work_orders wo on wo.id = jb.wo_id
-  left join work_order_flexo_meta wfm on wfm.wo_id = jb.wo_id
+  left join work_order_flexo_calc wfc on wfc.wo_id = jb.wo_id
   left join final_production_routing fr on fr.wo_id = jb.wo_id and fr.rn = 1
   left join production_line_totals plt
     on plt.routing_id = fr.routing_id
@@ -7331,18 +7462,44 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
 --
 
 CREATE VIEW public.inv_wo_issue_status_fast_v AS
- SELECT wo_number,
-    max(issue_department) AS issue_department,
+ WITH wo_base AS (
+         SELECT wo.id AS wo_id,
+            wo.wo_number,
+            COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text) AS raw_department
+           FROM public.work_orders wo
+          WHERE (COALESCE(upper(wo.status), ''::text) <> ALL (ARRAY['CANCELLED'::text, 'CANCELED'::text, 'VOID'::text, 'DELETED'::text]))
+        ), req_status AS (
+         SELECT inv_wo_issue_requirement_fast_v.wo_number,
+            max(inv_wo_issue_requirement_fast_v.issue_department) AS issue_department,
+                CASE
+                    WHEN bool_or((inv_wo_issue_requirement_fast_v.line_status = 'PENDING'::text)) THEN 'PENDING'::text
+                    ELSE 'ISSUED'::text
+                END AS material_status,
+            sum(inv_wo_issue_requirement_fast_v.required_qty) AS required_qty,
+            sum(inv_wo_issue_requirement_fast_v.issued_qty) AS issued_qty,
+            sum(inv_wo_issue_requirement_fast_v.remaining_qty) AS remaining_qty,
+            count(*) AS line_count
+           FROM public.inv_wo_issue_requirement_fast_v
+          GROUP BY inv_wo_issue_requirement_fast_v.wo_number
+        )
+ SELECT wb.wo_number,
+    COALESCE(rs.issue_department,
         CASE
-            WHEN bool_or((line_status = 'PENDING'::text)) THEN 'PENDING'::text
-            ELSE 'ISSUED'::text
-        END AS material_status,
-    sum(required_qty) AS required_qty,
-    sum(issued_qty) AS issued_qty,
-    sum(remaining_qty) AS remaining_qty,
-    count(*) AS line_count
-   FROM public.inv_wo_issue_requirement_fast_v
-  GROUP BY wo_number;
+            WHEN (upper(wb.raw_department) ~~ '%FLEXO%'::text) THEN 'Flexo'::text
+            WHEN (upper(wb.raw_department) ~~ '%OFFSET%'::text) THEN 'Offset'::text
+            WHEN (upper(wb.raw_department) = 'FLAT'::text) THEN 'Offset'::text
+            WHEN (upper(wb.raw_department) ~~ '%FLAT%'::text) THEN 'Offset'::text
+            WHEN (upper(wb.raw_department) ~~ '%DIGITAL%'::text) THEN 'Digital'::text
+            WHEN (upper(wb.raw_department) ~~ '%CORR%'::text) THEN 'Corrugation'::text
+            ELSE 'Offset'::text
+        END) AS issue_department,
+    COALESCE(rs.material_status, 'PENDING'::text) AS material_status,
+    COALESCE(rs.required_qty, (0)::numeric) AS required_qty,
+    COALESCE(rs.issued_qty, (0)::numeric) AS issued_qty,
+    COALESCE(rs.remaining_qty, (0)::numeric) AS remaining_qty,
+    COALESCE(rs.line_count, (0)::bigint) AS line_count
+   FROM (wo_base wb
+     LEFT JOIN req_status rs ON ((rs.wo_number = wb.wo_number)));
 
 
 --
@@ -14253,12 +14410,23 @@ CREATE VIEW public.v_report_planning_lines_enriched WITH (security_invoker='on')
 CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
  WITH billing_base AS (
          SELECT il.so_line_id,
-            sum(COALESCE(il.qty, (0)::numeric)) AS billed_qty,
-            max(inv.invoice_date) AS last_invoice_date,
-            string_agg(DISTINCT NULLIF(inv.invoice_no, ''::text), ', '::text ORDER BY NULLIF(inv.invoice_no, ''::text)) FILTER (WHERE (COALESCE(inv.invoice_no, ''::text) <> ''::text)) AS invoice_nos
+            sum(
+                CASE
+                    WHEN (upper(COALESCE(inv.status, 'DRAFT'::text)) = 'POSTED'::text) THEN COALESCE(il.qty, (0)::numeric)
+                    ELSE (0)::numeric
+                END) AS billed_qty,
+            sum(
+                CASE
+                    WHEN (upper(COALESCE(inv.status, 'DRAFT'::text)) <> 'POSTED'::text) THEN COALESCE(il.qty, (0)::numeric)
+                    ELSE (0)::numeric
+                END) AS draft_invoice_qty,
+            max(inv.invoice_date) FILTER (WHERE (upper(COALESCE(inv.status, 'DRAFT'::text)) = 'POSTED'::text)) AS last_invoice_date,
+            max(inv.invoice_date) FILTER (WHERE (upper(COALESCE(inv.status, 'DRAFT'::text)) <> 'POSTED'::text)) AS last_draft_invoice_date,
+            string_agg(DISTINCT NULLIF(inv.invoice_no, ''::text), ', '::text ORDER BY NULLIF(inv.invoice_no, ''::text)) FILTER (WHERE ((COALESCE(inv.invoice_no, ''::text) <> ''::text) AND (upper(COALESCE(inv.status, 'DRAFT'::text)) = 'POSTED'::text))) AS invoice_nos,
+            string_agg(DISTINCT NULLIF(inv.invoice_no, ''::text), ', '::text ORDER BY NULLIF(inv.invoice_no, ''::text)) FILTER (WHERE ((COALESCE(inv.invoice_no, ''::text) <> ''::text) AND (upper(COALESCE(inv.status, 'DRAFT'::text)) <> 'POSTED'::text))) AS draft_invoice_nos
            FROM (public.invoice_lines il
              JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
-          WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'DRAFT'::text)) <> ALL (ARRAY['CANCELLED'::text, 'VOID'::text, 'DELETED'::text])) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
           GROUP BY il.so_line_id
         ), line_base AS (
          SELECT p.so_id,
@@ -14302,8 +14470,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             p.die_ordered_on,
             p.die_received_on,
             COALESCE(bb.billed_qty, (0)::numeric) AS billed_qty,
+            COALESCE(bb.draft_invoice_qty, (0)::numeric) AS draft_invoice_qty,
             bb.last_invoice_date,
-            COALESCE(bb.invoice_nos, ''::text) AS invoice_nos
+            bb.last_draft_invoice_date,
+            COALESCE(bb.invoice_nos, ''::text) AS invoice_nos,
+            COALESCE(bb.draft_invoice_nos, ''::text) AS draft_invoice_nos
            FROM ((((public.v_report_planning_lines p
              LEFT JOIN public.sales_order_lines sol ON ((sol.id = p.so_line_id)))
              LEFT JOIN public.sales_orders so ON ((so.id = p.so_id)))
@@ -14352,8 +14523,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             lb.die_ordered_on,
             lb.die_received_on,
             lb.billed_qty,
+            lb.draft_invoice_qty,
             lb.last_invoice_date,
+            lb.last_draft_invoice_date,
             lb.invoice_nos,
+            lb.draft_invoice_nos,
             GREATEST((COALESCE(lb.order_qty, (0)::numeric) - COALESCE(lb.billed_qty, (0)::numeric)), (0)::numeric) AS open_qty,
                 CASE
                     WHEN (COALESCE(lb.order_qty, (0)::numeric) > (0)::numeric) THEN (COALESCE(lb.order_value, (0)::numeric) / NULLIF(lb.order_qty, (0)::numeric))
@@ -14533,8 +14707,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             al.die_ordered_on,
             al.die_received_on,
             al.billed_qty,
+            al.draft_invoice_qty,
             al.last_invoice_date,
+            al.last_draft_invoice_date,
             al.invoice_nos,
+            al.draft_invoice_nos,
             al.open_qty,
             al.unit_value,
             COALESCE(wb.wo_count, 0) AS wo_count,
@@ -14629,8 +14806,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ls.die_ordered_on,
             ls.die_received_on,
             ls.billed_qty,
+            ls.draft_invoice_qty,
             ls.last_invoice_date,
+            ls.last_draft_invoice_date,
             ls.invoice_nos,
+            ls.draft_invoice_nos,
             ls.open_qty,
             ls.unit_value,
             ls.wo_count,
@@ -14674,7 +14854,9 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ls.current_route_planned_qty,
             ls.current_route_produced_qty,
             ls.current_route_balance_qty,
-            LEAST(ls.open_qty, GREATEST((COALESCE(ls.packed_qty, (0)::numeric) - COALESCE(ls.billed_qty, (0)::numeric)), (0)::numeric)) AS fg_pending_billing_qty
+            LEAST(ls.open_qty, GREATEST(COALESCE(ls.draft_invoice_qty, (0)::numeric), (0)::numeric)) AS draft_invoice_pending_posting_qty,
+            GREATEST((ls.open_qty - LEAST(ls.open_qty, GREATEST(COALESCE(ls.draft_invoice_qty, (0)::numeric), (0)::numeric))), (0)::numeric) AS floor_open_qty,
+            LEAST(GREATEST((ls.open_qty - LEAST(ls.open_qty, GREATEST(COALESCE(ls.draft_invoice_qty, (0)::numeric), (0)::numeric))), (0)::numeric), GREATEST((COALESCE(ls.packed_qty, (0)::numeric) - COALESCE(ls.billed_qty, (0)::numeric)), (0)::numeric)) AS fg_pending_billing_qty
            FROM line_state ls
         ), allocated_state_2 AS (
          SELECT ast.so_id,
@@ -14718,8 +14900,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -14763,8 +14948,10 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
-            LEAST(GREATEST((ast.open_qty - ast.fg_pending_billing_qty), (0)::numeric), GREATEST((COALESCE(ast.production_completed_qty, (0)::numeric) - COALESCE(ast.packed_qty, (0)::numeric)), (0)::numeric)) AS packing_pending_qty
+            LEAST(GREATEST((ast.floor_open_qty - ast.fg_pending_billing_qty), (0)::numeric), GREATEST((COALESCE(ast.production_completed_qty, (0)::numeric) - COALESCE(ast.packed_qty, (0)::numeric)), (0)::numeric)) AS packing_pending_qty
            FROM allocated_state ast
         ), allocated_state_3 AS (
          SELECT ast.so_id,
@@ -14808,8 +14995,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -14853,9 +15043,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
             ast.packing_pending_qty,
-            GREATEST(((ast.open_qty - ast.fg_pending_billing_qty) - ast.packing_pending_qty), (0)::numeric) AS pre_fg_remaining_qty
+            GREATEST(((ast.floor_open_qty - ast.fg_pending_billing_qty) - ast.packing_pending_qty), (0)::numeric) AS pre_fg_remaining_qty
            FROM allocated_state_2 ast
         ), allocated_state_4 AS (
          SELECT ast.so_id,
@@ -14899,8 +15091,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -14944,15 +15139,17 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
             ast.packing_pending_qty,
             ast.pre_fg_remaining_qty,
                 CASE
-                    WHEN ((COALESCE(ast.wo_count, 0) > 0) AND (ast.pre_fg_remaining_qty > (0)::numeric) AND (COALESCE(ast.production_completed_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.packed_qty, (0)::numeric) <= (0)::numeric) AND (upper(COALESCE(ast.rm_availability_status, ''::text)) = ANY (ARRAY['ORDERED_PENDING_RECEIPT'::text, 'PR_PENDING_PO'::text, 'SHORTAGE'::text]))) THEN ast.pre_fg_remaining_qty
+                    WHEN ((COALESCE(ast.wo_count, 0) > 0) AND (ast.pre_fg_remaining_qty > (0)::numeric) AND (COALESCE(ast.production_completed_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.packed_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.production_entry_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.issued_qty_by_ledger, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.rm_issued_qty, (0)::numeric) <= (0)::numeric) AND (upper(COALESCE(ast.rm_availability_status, ''::text)) = ANY (ARRAY['ORDERED_PENDING_RECEIPT'::text, 'PR_PENDING_PO'::text, 'SHORTAGE'::text]))) THEN ast.pre_fg_remaining_qty
                     ELSE (0)::numeric
                 END AS material_purchase_pending_qty,
                 CASE
-                    WHEN ((COALESCE(ast.wo_count, 0) > 0) AND (ast.pre_fg_remaining_qty > (0)::numeric) AND (COALESCE(ast.production_completed_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.packed_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.rm_required_qty, (0)::numeric) > (0)::numeric) AND (COALESCE(ast.rm_pending_qty, (0)::numeric) > (0)::numeric) AND (upper(COALESCE(ast.rm_availability_status, ''::text)) = ANY (ARRAY['IN_STOCK'::text, 'ISSUE_PENDING'::text]))) THEN ast.pre_fg_remaining_qty
+                    WHEN ((COALESCE(ast.wo_count, 0) > 0) AND (ast.pre_fg_remaining_qty > (0)::numeric) AND (COALESCE(ast.production_completed_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.packed_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.production_entry_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.issued_qty_by_ledger, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.rm_issued_qty, (0)::numeric) <= (0)::numeric) AND (COALESCE(ast.rm_required_qty, (0)::numeric) > (0)::numeric) AND (COALESCE(ast.rm_pending_qty, (0)::numeric) > (0)::numeric) AND (upper(COALESCE(ast.rm_availability_status, ''::text)) = ANY (ARRAY['IN_STOCK'::text, 'ISSUE_PENDING'::text]))) THEN ast.pre_fg_remaining_qty
                     ELSE (0)::numeric
                 END AS material_issue_pending_qty
            FROM allocated_state_3 ast
@@ -14998,8 +15195,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -15043,6 +15243,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
             ast.packing_pending_qty,
             ast.pre_fg_remaining_qty,
@@ -15098,8 +15300,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
                     WHEN (upper(COALESCE(ast.artwork_status, 'NO_ART'::text)) <> 'APPROVED'::text) THEN 'Artwork created date, else approval/SO date'::text
                     ELSE 'Artwork approval date'::text
                 END AS stage_entry_basis,
-            ast.open_qty AS wip_qty,
-            (ast.open_qty * ast.unit_value) AS wip_value,
+            ast.floor_open_qty AS wip_qty,
+            (ast.floor_open_qty * ast.unit_value) AS wip_value,
             ast.so_id,
             ast.so_line_id,
             ast.so_number,
@@ -15141,8 +15343,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -15186,6 +15391,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
             ast.packing_pending_qty,
             ast.pre_fg_remaining_qty,
@@ -15193,7 +15400,7 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.material_issue_pending_qty,
             ast.production_wip_qty
            FROM allocated_state_5 ast
-          WHERE (COALESCE(ast.wo_count, 0) = 0)
+          WHERE ((COALESCE(ast.wo_count, 0) = 0) AND (ast.floor_open_qty > (0)::numeric))
         ), wip_material_purchase_rows AS (
          SELECT 'WIP'::text AS wip_scope,
             'MATERIAL_PURCHASE_PENDING'::text AS wip_stage_code,
@@ -15245,8 +15452,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -15290,6 +15500,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
             ast.packing_pending_qty,
             ast.pre_fg_remaining_qty,
@@ -15349,8 +15561,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -15394,6 +15609,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
             ast.packing_pending_qty,
             ast.pre_fg_remaining_qty,
@@ -15456,8 +15673,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -15501,6 +15721,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
             ast.packing_pending_qty,
             ast.pre_fg_remaining_qty,
@@ -15560,8 +15782,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -15605,6 +15830,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
             ast.packing_pending_qty,
             ast.pre_fg_remaining_qty,
@@ -15664,8 +15891,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.die_ordered_on,
             ast.die_received_on,
             ast.billed_qty,
+            ast.draft_invoice_qty,
             ast.last_invoice_date,
+            ast.last_draft_invoice_date,
             ast.invoice_nos,
+            ast.draft_invoice_nos,
             ast.open_qty,
             ast.unit_value,
             ast.wo_count,
@@ -15709,6 +15939,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.current_route_planned_qty,
             ast.current_route_produced_qty,
             ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
             ast.fg_pending_billing_qty,
             ast.packing_pending_qty,
             ast.pre_fg_remaining_qty,
@@ -15717,6 +15949,119 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             ast.production_wip_qty
            FROM allocated_state_5 ast
           WHERE (ast.fg_pending_billing_qty > (0)::numeric)
+        ), wip_draft_invoice_rows AS (
+         SELECT 'WIP'::text AS wip_scope,
+            'DRAFT_INVOICE_PENDING_POSTING'::text AS wip_stage_code,
+            'Draft Invoice Pending Posting'::text AS wip_stage_name,
+            500 AS wip_stage_sort,
+            ('Invoice created but not posted'::text ||
+                CASE
+                    WHEN (COALESCE(ast.draft_invoice_nos, ''::text) <> ''::text) THEN (': '::text || ast.draft_invoice_nos)
+                    ELSE ''::text
+                END) AS stage_detail,
+            COALESCE(((ast.last_draft_invoice_date)::timestamp without time zone)::timestamp with time zone, (ast.latest_packed_at)::timestamp with time zone, ast.latest_production_at, ((ast.first_wo_date)::timestamp without time zone)::timestamp with time zone) AS stage_entry_at,
+            'Draft invoice date; fallback latest packing/production/WO date'::text AS stage_entry_basis,
+            ast.draft_invoice_pending_posting_qty AS wip_qty,
+            (ast.draft_invoice_pending_posting_qty * ast.unit_value) AS wip_value,
+            ast.so_id,
+            ast.so_line_id,
+            ast.so_number,
+            ast.so_date,
+            ast.so_created_at,
+            ast.client_code,
+            ast.client_name,
+            ast.sales_rep,
+            ast.line_no,
+            ast.division,
+            ast.product_code,
+            ast.product_name,
+            ast.category,
+            ast.order_qty,
+            ast.unit,
+            ast.rate,
+            ast.order_value,
+            ast.so_line_status,
+            ast.closed_by,
+            ast.expected_delivery,
+            ast.final_delivery,
+            ast.accounts_status,
+            ast.accounts_at,
+            ast.business_status,
+            ast.business_at,
+            ast.sales_approval_status,
+            ast.sales_approval_at,
+            ast.artwork_no,
+            ast.product_type,
+            ast.artwork_status,
+            ast.artwork_at,
+            ast.artwork_approved_at,
+            ast.plate_procurement_status,
+            ast.plate_po_nos,
+            ast.plate_ordered_on,
+            ast.plate_received_on,
+            ast.die_procurement_status,
+            ast.die_po_nos,
+            ast.die_ordered_on,
+            ast.die_received_on,
+            ast.billed_qty,
+            ast.draft_invoice_qty,
+            ast.last_invoice_date,
+            ast.last_draft_invoice_date,
+            ast.invoice_nos,
+            ast.draft_invoice_nos,
+            ast.open_qty,
+            ast.unit_value,
+            ast.wo_count,
+            ast.wo_numbers,
+            ast.first_wo_date,
+            ast.latest_wo_date,
+            ast.rm_availability_status,
+            ast.rm_required_qty,
+            ast.rm_issued_qty,
+            ast.rm_pending_qty,
+            ast.rm_in_stock_qty,
+            ast.rm_shortage_qty,
+            ast.rm_pending_receipt_qty,
+            ast.rm_po_nos,
+            ast.rm_first_po_date,
+            ast.rm_latest_grn_date,
+            ast.rm_receipt_refs,
+            ast.rm_pr_nos,
+            ast.rm_detail,
+            ast.first_material_issue_at,
+            ast.latest_material_issue_at,
+            ast.issued_qty_by_ledger,
+            ast.packed_qty,
+            ast.production_completed_qty,
+            ast.first_packed_at,
+            ast.latest_packed_at,
+            ast.first_production_at,
+            ast.latest_production_at,
+            ast.production_entry_qty,
+            ast.open_route_count,
+            ast.open_route_balance_qty,
+            ast.route_display,
+            ast.routing_id,
+            ast.current_wo_number,
+            ast.current_route_process,
+            ast.current_route_department,
+            ast.current_route_machine,
+            ast.current_route_sequence,
+            ast.current_route_department_category,
+            ast.current_route_status,
+            ast.current_route_planned_qty,
+            ast.current_route_produced_qty,
+            ast.current_route_balance_qty,
+            ast.draft_invoice_pending_posting_qty,
+            ast.floor_open_qty,
+            ast.fg_pending_billing_qty,
+            ast.packing_pending_qty,
+            ast.pre_fg_remaining_qty,
+            ast.material_purchase_pending_qty,
+            ast.material_issue_pending_qty,
+            ast.production_wip_qty
+           FROM allocated_state_5 ast
+          WHERE (ast.draft_invoice_pending_posting_qty > (0)::numeric)
         ), unioned AS (
          SELECT pre_wip_rows.wip_scope,
             pre_wip_rows.wip_stage_code,
@@ -15768,8 +16113,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             pre_wip_rows.die_ordered_on,
             pre_wip_rows.die_received_on,
             pre_wip_rows.billed_qty,
+            pre_wip_rows.draft_invoice_qty,
             pre_wip_rows.last_invoice_date,
+            pre_wip_rows.last_draft_invoice_date,
             pre_wip_rows.invoice_nos,
+            pre_wip_rows.draft_invoice_nos,
             pre_wip_rows.open_qty,
             pre_wip_rows.unit_value,
             pre_wip_rows.wo_count,
@@ -15813,6 +16161,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             pre_wip_rows.current_route_planned_qty,
             pre_wip_rows.current_route_produced_qty,
             pre_wip_rows.current_route_balance_qty,
+            pre_wip_rows.draft_invoice_pending_posting_qty,
+            pre_wip_rows.floor_open_qty,
             pre_wip_rows.fg_pending_billing_qty,
             pre_wip_rows.packing_pending_qty,
             pre_wip_rows.pre_fg_remaining_qty,
@@ -15871,8 +16221,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_material_purchase_rows.die_ordered_on,
             wip_material_purchase_rows.die_received_on,
             wip_material_purchase_rows.billed_qty,
+            wip_material_purchase_rows.draft_invoice_qty,
             wip_material_purchase_rows.last_invoice_date,
+            wip_material_purchase_rows.last_draft_invoice_date,
             wip_material_purchase_rows.invoice_nos,
+            wip_material_purchase_rows.draft_invoice_nos,
             wip_material_purchase_rows.open_qty,
             wip_material_purchase_rows.unit_value,
             wip_material_purchase_rows.wo_count,
@@ -15916,6 +16269,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_material_purchase_rows.current_route_planned_qty,
             wip_material_purchase_rows.current_route_produced_qty,
             wip_material_purchase_rows.current_route_balance_qty,
+            wip_material_purchase_rows.draft_invoice_pending_posting_qty,
+            wip_material_purchase_rows.floor_open_qty,
             wip_material_purchase_rows.fg_pending_billing_qty,
             wip_material_purchase_rows.packing_pending_qty,
             wip_material_purchase_rows.pre_fg_remaining_qty,
@@ -15974,8 +16329,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_material_issue_rows.die_ordered_on,
             wip_material_issue_rows.die_received_on,
             wip_material_issue_rows.billed_qty,
+            wip_material_issue_rows.draft_invoice_qty,
             wip_material_issue_rows.last_invoice_date,
+            wip_material_issue_rows.last_draft_invoice_date,
             wip_material_issue_rows.invoice_nos,
+            wip_material_issue_rows.draft_invoice_nos,
             wip_material_issue_rows.open_qty,
             wip_material_issue_rows.unit_value,
             wip_material_issue_rows.wo_count,
@@ -16019,6 +16377,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_material_issue_rows.current_route_planned_qty,
             wip_material_issue_rows.current_route_produced_qty,
             wip_material_issue_rows.current_route_balance_qty,
+            wip_material_issue_rows.draft_invoice_pending_posting_qty,
+            wip_material_issue_rows.floor_open_qty,
             wip_material_issue_rows.fg_pending_billing_qty,
             wip_material_issue_rows.packing_pending_qty,
             wip_material_issue_rows.pre_fg_remaining_qty,
@@ -16077,8 +16437,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_production_rows.die_ordered_on,
             wip_production_rows.die_received_on,
             wip_production_rows.billed_qty,
+            wip_production_rows.draft_invoice_qty,
             wip_production_rows.last_invoice_date,
+            wip_production_rows.last_draft_invoice_date,
             wip_production_rows.invoice_nos,
+            wip_production_rows.draft_invoice_nos,
             wip_production_rows.open_qty,
             wip_production_rows.unit_value,
             wip_production_rows.wo_count,
@@ -16122,6 +16485,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_production_rows.current_route_planned_qty,
             wip_production_rows.current_route_produced_qty,
             wip_production_rows.current_route_balance_qty,
+            wip_production_rows.draft_invoice_pending_posting_qty,
+            wip_production_rows.floor_open_qty,
             wip_production_rows.fg_pending_billing_qty,
             wip_production_rows.packing_pending_qty,
             wip_production_rows.pre_fg_remaining_qty,
@@ -16180,8 +16545,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_packing_rows.die_ordered_on,
             wip_packing_rows.die_received_on,
             wip_packing_rows.billed_qty,
+            wip_packing_rows.draft_invoice_qty,
             wip_packing_rows.last_invoice_date,
+            wip_packing_rows.last_draft_invoice_date,
             wip_packing_rows.invoice_nos,
+            wip_packing_rows.draft_invoice_nos,
             wip_packing_rows.open_qty,
             wip_packing_rows.unit_value,
             wip_packing_rows.wo_count,
@@ -16225,6 +16593,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_packing_rows.current_route_planned_qty,
             wip_packing_rows.current_route_produced_qty,
             wip_packing_rows.current_route_balance_qty,
+            wip_packing_rows.draft_invoice_pending_posting_qty,
+            wip_packing_rows.floor_open_qty,
             wip_packing_rows.fg_pending_billing_qty,
             wip_packing_rows.packing_pending_qty,
             wip_packing_rows.pre_fg_remaining_qty,
@@ -16283,8 +16653,11 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_fg_rows.die_ordered_on,
             wip_fg_rows.die_received_on,
             wip_fg_rows.billed_qty,
+            wip_fg_rows.draft_invoice_qty,
             wip_fg_rows.last_invoice_date,
+            wip_fg_rows.last_draft_invoice_date,
             wip_fg_rows.invoice_nos,
+            wip_fg_rows.draft_invoice_nos,
             wip_fg_rows.open_qty,
             wip_fg_rows.unit_value,
             wip_fg_rows.wo_count,
@@ -16328,6 +16701,8 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_fg_rows.current_route_planned_qty,
             wip_fg_rows.current_route_produced_qty,
             wip_fg_rows.current_route_balance_qty,
+            wip_fg_rows.draft_invoice_pending_posting_qty,
+            wip_fg_rows.floor_open_qty,
             wip_fg_rows.fg_pending_billing_qty,
             wip_fg_rows.packing_pending_qty,
             wip_fg_rows.pre_fg_remaining_qty,
@@ -16335,6 +16710,114 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
             wip_fg_rows.material_issue_pending_qty,
             wip_fg_rows.production_wip_qty
            FROM wip_fg_rows
+        UNION ALL
+         SELECT wip_draft_invoice_rows.wip_scope,
+            wip_draft_invoice_rows.wip_stage_code,
+            wip_draft_invoice_rows.wip_stage_name,
+            wip_draft_invoice_rows.wip_stage_sort,
+            wip_draft_invoice_rows.stage_detail,
+            wip_draft_invoice_rows.stage_entry_at,
+            wip_draft_invoice_rows.stage_entry_basis,
+            wip_draft_invoice_rows.wip_qty,
+            wip_draft_invoice_rows.wip_value,
+            wip_draft_invoice_rows.so_id,
+            wip_draft_invoice_rows.so_line_id,
+            wip_draft_invoice_rows.so_number,
+            wip_draft_invoice_rows.so_date,
+            wip_draft_invoice_rows.so_created_at,
+            wip_draft_invoice_rows.client_code,
+            wip_draft_invoice_rows.client_name,
+            wip_draft_invoice_rows.sales_rep,
+            wip_draft_invoice_rows.line_no,
+            wip_draft_invoice_rows.division,
+            wip_draft_invoice_rows.product_code,
+            wip_draft_invoice_rows.product_name,
+            wip_draft_invoice_rows.category,
+            wip_draft_invoice_rows.order_qty,
+            wip_draft_invoice_rows.unit,
+            wip_draft_invoice_rows.rate,
+            wip_draft_invoice_rows.order_value,
+            wip_draft_invoice_rows.so_line_status,
+            wip_draft_invoice_rows.closed_by,
+            wip_draft_invoice_rows.expected_delivery,
+            wip_draft_invoice_rows.final_delivery,
+            wip_draft_invoice_rows.accounts_status,
+            wip_draft_invoice_rows.accounts_at,
+            wip_draft_invoice_rows.business_status,
+            wip_draft_invoice_rows.business_at,
+            wip_draft_invoice_rows.sales_approval_status,
+            wip_draft_invoice_rows.sales_approval_at,
+            wip_draft_invoice_rows.artwork_no,
+            wip_draft_invoice_rows.product_type,
+            wip_draft_invoice_rows.artwork_status,
+            wip_draft_invoice_rows.artwork_at,
+            wip_draft_invoice_rows.artwork_approved_at,
+            wip_draft_invoice_rows.plate_procurement_status,
+            wip_draft_invoice_rows.plate_po_nos,
+            wip_draft_invoice_rows.plate_ordered_on,
+            wip_draft_invoice_rows.plate_received_on,
+            wip_draft_invoice_rows.die_procurement_status,
+            wip_draft_invoice_rows.die_po_nos,
+            wip_draft_invoice_rows.die_ordered_on,
+            wip_draft_invoice_rows.die_received_on,
+            wip_draft_invoice_rows.billed_qty,
+            wip_draft_invoice_rows.draft_invoice_qty,
+            wip_draft_invoice_rows.last_invoice_date,
+            wip_draft_invoice_rows.last_draft_invoice_date,
+            wip_draft_invoice_rows.invoice_nos,
+            wip_draft_invoice_rows.draft_invoice_nos,
+            wip_draft_invoice_rows.open_qty,
+            wip_draft_invoice_rows.unit_value,
+            wip_draft_invoice_rows.wo_count,
+            wip_draft_invoice_rows.wo_numbers,
+            wip_draft_invoice_rows.first_wo_date,
+            wip_draft_invoice_rows.latest_wo_date,
+            wip_draft_invoice_rows.rm_availability_status,
+            wip_draft_invoice_rows.rm_required_qty,
+            wip_draft_invoice_rows.rm_issued_qty,
+            wip_draft_invoice_rows.rm_pending_qty,
+            wip_draft_invoice_rows.rm_in_stock_qty,
+            wip_draft_invoice_rows.rm_shortage_qty,
+            wip_draft_invoice_rows.rm_pending_receipt_qty,
+            wip_draft_invoice_rows.rm_po_nos,
+            wip_draft_invoice_rows.rm_first_po_date,
+            wip_draft_invoice_rows.rm_latest_grn_date,
+            wip_draft_invoice_rows.rm_receipt_refs,
+            wip_draft_invoice_rows.rm_pr_nos,
+            wip_draft_invoice_rows.rm_detail,
+            wip_draft_invoice_rows.first_material_issue_at,
+            wip_draft_invoice_rows.latest_material_issue_at,
+            wip_draft_invoice_rows.issued_qty_by_ledger,
+            wip_draft_invoice_rows.packed_qty,
+            wip_draft_invoice_rows.production_completed_qty,
+            wip_draft_invoice_rows.first_packed_at,
+            wip_draft_invoice_rows.latest_packed_at,
+            wip_draft_invoice_rows.first_production_at,
+            wip_draft_invoice_rows.latest_production_at,
+            wip_draft_invoice_rows.production_entry_qty,
+            wip_draft_invoice_rows.open_route_count,
+            wip_draft_invoice_rows.open_route_balance_qty,
+            wip_draft_invoice_rows.route_display,
+            wip_draft_invoice_rows.routing_id,
+            wip_draft_invoice_rows.current_wo_number,
+            wip_draft_invoice_rows.current_route_process,
+            wip_draft_invoice_rows.current_route_department,
+            wip_draft_invoice_rows.current_route_machine,
+            wip_draft_invoice_rows.current_route_sequence,
+            wip_draft_invoice_rows.current_route_department_category,
+            wip_draft_invoice_rows.current_route_status,
+            wip_draft_invoice_rows.current_route_planned_qty,
+            wip_draft_invoice_rows.current_route_produced_qty,
+            wip_draft_invoice_rows.current_route_balance_qty,
+            wip_draft_invoice_rows.draft_invoice_pending_posting_qty,
+            wip_draft_invoice_rows.floor_open_qty,
+            wip_draft_invoice_rows.fg_pending_billing_qty,
+            wip_draft_invoice_rows.packing_pending_qty,
+            wip_draft_invoice_rows.pre_fg_remaining_qty,
+            wip_draft_invoice_rows.material_purchase_pending_qty,
+            wip_draft_invoice_rows.material_issue_pending_qty,
+            wip_draft_invoice_rows.production_wip_qty
+           FROM wip_draft_invoice_rows
         )
  SELECT wip_scope,
     wip_stage_code,
@@ -16431,7 +16914,10 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
     latest_packed_at,
     billed_qty,
     last_invoice_date,
-    invoice_nos
+    invoice_nos,
+    draft_invoice_qty,
+    last_draft_invoice_date,
+    draft_invoice_nos
    FROM unioned u
   WHERE (COALESCE(wip_qty, (0)::numeric) > (0)::numeric);
 
@@ -16536,7 +17022,10 @@ CREATE VIEW public.v_report_pre_wip_ageing_lines WITH (security_invoker='on') AS
     latest_packed_at,
     billed_qty,
     last_invoice_date,
-    invoice_nos
+    invoice_nos,
+    draft_invoice_qty,
+    last_draft_invoice_date,
+    draft_invoice_nos
    FROM public.v_report_wip_ageing_all_lines
   WHERE (wip_scope = 'PRE_WIP'::text);
 
@@ -17335,7 +17824,10 @@ CREATE VIEW public.v_report_wip_ageing_lines WITH (security_invoker='on') AS
     latest_packed_at,
     billed_qty,
     last_invoice_date,
-    invoice_nos
+    invoice_nos,
+    draft_invoice_qty,
+    last_draft_invoice_date,
+    draft_invoice_nos
    FROM public.v_report_wip_ageing_all_lines
   WHERE (wip_scope = 'WIP'::text);
 
@@ -21856,6 +22348,13 @@ CREATE INDEX idx_work_order_jobs_client_trgm ON public.work_order_jobs USING gin
 
 
 --
+-- Name: idx_work_order_jobs_job_reference_trgm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_order_jobs_job_reference_trgm ON public.work_order_jobs USING gin (job_reference public.gin_trgm_ops);
+
+
+--
 -- Name: idx_work_order_jobs_product_trgm; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -21898,6 +22397,13 @@ CREATE INDEX idx_work_order_jobs_wo_id ON public.work_order_jobs USING btree (wo
 
 
 --
+-- Name: idx_work_order_jobs_wo_issue_search; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_order_jobs_wo_issue_search ON public.work_order_jobs USING btree (wo_id);
+
+
+--
 -- Name: idx_work_order_materials_wo_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -21923,6 +22429,13 @@ CREATE INDEX idx_work_order_routing_wo_seq ON public.work_order_routing USING bt
 --
 
 CREATE INDEX idx_work_order_routing_wo_seq_view ON public.work_order_routing USING btree (wo_id, sequence_no);
+
+
+--
+-- Name: idx_work_orders_issue_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_orders_issue_active ON public.work_orders USING btree (wo_number DESC) WHERE (COALESCE(upper(status), ''::text) <> ALL (ARRAY['CANCELLED'::text, 'CANCELED'::text, 'VOID'::text, 'DELETED'::text]));
 
 
 --
@@ -23486,5 +23999,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 1QYJbjNh1tq583P4zjjt5CqqHgLWoIeUX9plGatbIDWU15YiyH7jL5xwDAia14C
+\unrestrict 3TTUMutx7iK9wdQcGA06U1SKYrSgYMpnp9jMGIXAXReSjOSAsLnEwcsPIfttG54
 
