@@ -36,9 +36,11 @@ The Artwork module manages artwork preparation, plate/die status tracking, and a
 
 ## Key Functions (Code.gs)
 
+> The Artwork section starts at roughly line 13998 in `Code.gs` (`saveArtworkGroup`).
+
 | Function | Purpose |
 |----------|---------|
-| `createArtworksFromSoLines(soId)` | Auto-create artwork records for all SO lines |
+| `createArtworksFromSoLines(soId)` | Legacy helper — no longer the primary path. The artwork row is now auto-created by the `trg_sales_order_lines_ensure_artwork` database trigger whenever an SO line is inserted or its identifying fields change. The helper remains for back-fill scenarios. |
 | `getArtworkJobs()` | List artworks via `v_artwork_jobs` view |
 | `getArtworkWorkbench(fromDate, toDate, pendingOnly)` | Get artwork workbench data (grouped view) |
 | `saveArtworkBulk(payload)` | Save artwork specs for multiple records |
@@ -65,7 +67,7 @@ The workbench supports:
 ## Artwork Lifecycle
 
 ```
-SO Line Created ──> Artwork Auto-Created (status: null/PENDING)
+SO Line Created ──> Artwork row auto-created by DB trigger (status: PENDING)
                             |
                     Artwork Prepared (plate/die status set, sheet layout defined)
                             |
@@ -73,6 +75,8 @@ SO Line Created ──> Artwork Auto-Created (status: null/PENDING)
                             |
                     Available for WO creation (via v_workorder_candidates)
 ```
+
+> The auto-create on SO-line insert is now a database trigger (`trg_sales_order_lines_ensure_artwork`) rather than application code, so it runs no matter where the SO line is created from.
 
 ## Plate and Die Procurement
 
@@ -86,12 +90,16 @@ When `plate_status` or `die_status` is `NEW`, the artwork appears in the Plates 
 
 | View | Purpose |
 |------|---------|
-| `v_artwork_jobs` | Main artwork working screen - joins artworks + SO lines + SO header + client |
+| `v_artwork_jobs` / `_active` | Main artwork working screen - joins artworks + SO lines + SO header + client (all / active only) |
+| `v_artwork_workbench_active` | Workbench dataset (active only) |
+| `v_artwork_groups` / `_active` | Approval-group rollup |
+| `v_artwork_reference` | Look-up dataset for copying prior artwork specs onto a new line |
 | `v_purchase_plate_die_jobs` | Artworks needing new plates or dies |
+| `v_purchase_tooling_workbench` | Plate / die procurement workbench (joins the artwork row + procurement record) |
 
 ## Integration
 
-- **Sales Orders**: Artworks auto-created when SO lines are saved
-- **Work Orders**: Artwork status must be APPROVED for WO candidate eligibility; artwork data (sheet layout, UPS, colors) flows into WO snapshot
-- **Flexo WO**: `getFlexoArtworkApprovalData()` fetches flexo-specific artwork specs (teeth, across_width, gaps) for flexo WO creation
-- **Purchasing**: Plate/die procurement tracked via `purchase_artwork_procurement`
+- **Sales Orders**: Artwork rows are auto-created by a database trigger when an SO line is inserted or its identifying fields change.
+- **Work Orders**: Artwork status must be APPROVED for WO candidate eligibility; artwork data (sheet layout, UPS, colors) flows into the WO snapshot.
+- **Flexo WO**: `getFlexoArtworkApprovalData()` fetches flexo-specific artwork specs (teeth, across_width, gaps) for flexo WO creation.
+- **Purchasing**: Plate/die procurement tracked via `purchase_artwork_procurement`; the new tooling workbench replaces ad-hoc spreadsheets.

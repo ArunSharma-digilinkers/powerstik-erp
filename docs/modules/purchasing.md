@@ -4,6 +4,8 @@
 
 The Purchasing module manages vendor master data, purchase order creation, goods receipt, and artwork plate/die procurement. It integrates with both the inventory system (for raw material POs) and the artwork system (for plate/die POs).
 
+> The Purchase Management section starts at roughly line 3770 in `Code.gs` (`purchaseCreatePO`). Plates & Dies starts at line 1633.
+
 ## Tables
 
 | Table | Purpose |
@@ -13,7 +15,8 @@ The Purchasing module manages vendor master data, purchase order creation, goods
 | `purchase_order_lines` | PO line items |
 | `purchase_po_receipts` | PO receipt entries |
 | `purchase_artwork_procurement` | Artwork plate/die procurement tracking |
-| `purchase_requests` | Legacy purchase requests |
+
+> The legacy `purchase_requests` table has been removed. Inventory purchase requests live in `inv_purchase_requests` (see the [Inventory module](inventory.md)).
 
 ## Vendor Master
 
@@ -129,13 +132,35 @@ The Purchasing module manages vendor master data, purchase order creation, goods
 
 ## Views
 
+### Core PO / PR views
+
 | View | Purpose |
 |------|---------|
-| `v_purchase_plate_die_jobs` | Artworks needing plate/die procurement |
-| `v_purchase_requests_open` | Open inventory purchase requests with pending qty |
+| `v_purchase_requests_open` | Open inventory PRs with pending qty |
+| `v_pr_po_receipt_cycle` | PR → PO → Receipt lifecycle |
+| `v_purchase_order_summary` | PO summary with line totals + receipt status |
+| `v_purchase_orders_read_model` | Optimised PO read-model for the workbench |
+| `v_purchase_po_print_lines` | Per-line dataset for PO printing |
+| `v_purchase_dashboard_core_metrics` | KPI tiles for the purchase dashboard |
+| `v_purchase_lead_time_items` | Vendor / item lead-time analytics |
+
+### Tooling (plate / die) procurement
+
+| View | Purpose |
+|------|---------|
+| `v_purchase_plate_die_jobs` | Artworks needing plate/die procurement (queue) |
+| `v_purchase_tooling_workbench` | Workbench dataset (artwork + procurement row + SO context) |
+| `v_purchase_tooling_pending_summary` | Aggregate (department, vendor, type) of pending tooling |
+| `v_purchase_tooling_register_search` | Searchable register of every tooling event |
+
+### Department register
+
+| View | Purpose |
+|------|---------|
+| `v_report_department_purchase_grn` | Department-wise purchase / GRN summary |
 
 ## Integration
 
-- **Inventory**: PO receipts post to inventory ledger; PRs drive PO creation
-- **Artwork**: Plate/die procurement tracked against artworks
-- **Reports**: Procurement section in dashboard
+- **Inventory**: PO receipts post to inventory ledger via `invPostPOReceiptLine_()`; PRs drive PO creation; rate corrections can be triggered from the receipt screen (see [Inventory](inventory.md)).
+- **Artwork**: Plate/die procurement tracked against artworks via `purchase_artwork_procurement`; the tooling workbench replaces ad-hoc spreadsheets.
+- **Reports**: Purchase metrics surface in the dashboard, the planning report (`v_report_planning_lines_enriched` includes tooling status), and the department GRN view.

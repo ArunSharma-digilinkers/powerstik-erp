@@ -4,6 +4,8 @@
 
 The system uses custom session-based authentication with role-based access control (RBAC). Users log in with credentials, receive a session token, and the token is validated on every request. Permissions are defined per role per module with granular action flags.
 
+> The Auth / RBAC section starts at roughly line 8933 in `Code.gs` (`loginAndGetToken`, `getSessionUser`, `checkPermission`).
+
 ## Tables
 
 | Table | Purpose |

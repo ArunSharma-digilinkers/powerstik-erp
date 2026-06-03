@@ -98,7 +98,7 @@ Each WO has materials with a unique `material_key` (enforced by `uq_wom_material
 | `uom` | Unit of measure |
 | `item_code` / `item_id` | Links to inventory item |
 
-`buildWOMaterialRequirementRows_()` calculates requirements from the WO snapshot. Materials connect to inventory for issue tracking via `wo_material_pending` view.
+`buildWOMaterialRequirementRows_()` calculates requirements from the WO snapshot. Materials connect to inventory for issue tracking via the `inv_wo_issue_requirement_v` / `_fast_v` and `inv_wo_issue_status_v` / `_fast_v` views (which replace the older `wo_material_pending` view).
 
 ## Routing
 
@@ -118,12 +118,18 @@ Routing status per step: PENDING, IN_PROGRESS, COMPLETED, SHORT_CLOSED, HOLD
 
 | View | Purpose |
 |------|---------|
-| `v_workorder_candidates` | SO lines eligible for WO creation |
-| `wo_material_pending` | Materials pending issue from inventory |
+| `v_workorder_candidates` / `_active` | SO lines eligible for WO creation (all / active) |
+| `v_flexo_work_order_jobs` | Flexo-specific job dataset (cylinder / teeth fields) |
+| `inv_wo_issue_requirement_v` / `_fast_v` | WO material requirements |
+| `inv_wo_issue_status_v` / `_fast_v` | Planned vs issued material |
+| `inv_wo_issue_material_source_v` | Candidate lots to issue from |
+| `v_production_jobcard_lookup_fast` | Job card lookup (used by production screens) |
+
+> The legacy `wo_material_pending` view has been removed — use the `inv_wo_issue_*` family above.
 
 ## Integration
 
-- **Sales Orders**: WO jobs reference SO number + line_no; WO status rolls up via cache triggers
-- **Inventory**: WO materials drive inventory issue; `invListWorkOrdersForIssue()` lists WOs needing material
-- **Production**: Production entries recorded against `work_order_routing` steps
-- **Artwork**: Artwork data flows into WO snapshot at creation time
+- **Sales Orders**: WO jobs reference SO number + line_no; WO status rolls up via the rollup-cache triggers and the SO-line-status cascade triggers.
+- **Inventory**: WO materials drive inventory issue — see the [Inventory module doc](inventory.md).
+- **Production**: Production entries recorded against `work_order_routing` steps.
+- **Artwork**: Artwork data flows into the WO snapshot at creation time.

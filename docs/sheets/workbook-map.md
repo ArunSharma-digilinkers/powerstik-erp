@@ -19,7 +19,7 @@ The `PAGE_MODULE_MAP` constant defines the mapping from URL page keys to RBAC mo
 
 | Page Key | Module Code | Description |
 |----------|------------|-------------|
-| `menu` | MENU | Main menu / dashboard |
+| `menu` | MENU | Main menu / dashboard landing |
 | `order` | SALES_ORDER_ENTRY | Sales order creation and editing |
 | `salesorderapproval` | SALES_ORDER_APPROVAL | Accounts and business approval of SO lines |
 | `artwork` | ARTWORK | Artwork workbench |
@@ -27,19 +27,22 @@ The `PAGE_MODULE_MAP` constant defines the mapping from URL page keys to RBAC mo
 | `plates` | PURCHASE | Plate and die procurement |
 | `purchase` | PURCHASE | Purchase order management |
 | `itemmaster` | ITEMMASTER | Item master with BOM management |
-| `wow` | WOW | Offset/Digital work order creation |
+| `wow` | WOW | Offset / Digital work order creation |
 | `flexowo` | WOW | Flexo work order creation |
-| `inventory` | INVENTORY | Inventory management |
+| `inventory` | INVENTORY | Inventory management (including sheet conversion and rate corrections) |
 | `packing` | PACKING | Packing operations |
 | `dispatch` | DISPATCH | Dispatch operations |
 | `production` | PRODUCTION | Production entry and tracking |
-| `billing` | BILLING | Invoice/challan creation |
+| `billing` | BILLING | Invoice / challan creation |
 | `printinvoice` | BILLING | Invoice print view |
 | `printchallan` | BILLING | Delivery challan print view |
-| `planning` | REPORTS | Planning report |
-| `reports` | REPORTS | Reports dashboard |
+| `planning` | PLANNING | Planning dashboard (uses `v_report_planning_lines_enriched`) |
+| `reports` | REPORTS | Reports dashboard (WIP, machine load, profitability, registers) |
 | `costing` | COSTING | Product costing |
+| `checklist` | CHECKLIST | Daily / periodic task module (templates → instances → completion) |
 | `masteradmin` | MASTERADMIN | Admin panel (users, roles, permissions) |
+
+> `PAGE_MODULE_MAP` lives at roughly line 700 in `Code.gs`.
 
 ## Sheet Constants
 

@@ -32,6 +32,9 @@ The Item Master module manages the product catalog with Bill of Materials (BOM) 
 | `wo_module` | WOW or FLEXOWO |
 | `item_lifecycle_status` | DRAFT, ACTIVE, INACTIVE, OBSOLETE |
 | `current_revision_no` | Current active BOM revision number |
+| `length_mm` / `width_mm` / `height_mm` / `dimension_unit` | Physical dimensions of the finished good (used by sheet-conversion planning, packing weight estimates, and BOM material calculations) |
+
+> The Item Master section starts at roughly line 7715 in `Code.gs` (`saveItem`).
 
 ## BOM Revision System
 
@@ -119,13 +122,11 @@ The merge feature handles deduplication by moving all references from a source i
 
 ## Views
 
-| View | Purpose |
-|------|---------|
-| `v_item_bom_current` | Current active BOM per item (joins revisions with items) |
+The previous `v_item_bom_current` view has been removed. The current active revision is read directly from `item_bom_revisions WHERE is_current = true` — the partial unique index `item_bom_revisions_current_uk` guarantees there is at most one such row per item. `itemMasterGetActiveBom()` in Code.gs does this lookup.
 
 ## Integration
 
-- **Sales Orders**: Items referenced by `product_code` in SO lines
-- **Work Orders**: Item's `product_category` and `wo_module` determine WO type
-- **Inventory**: `syncItemToInventory_()` ensures inv_items stays in sync
-- **Costing**: Item properties feed into cost estimation
+- **Sales Orders**: Items referenced by `product_code` in SO lines; `v_sales_order_item_picker` exposes the picker dataset.
+- **Work Orders**: Item's `product_category` and `wo_module` determine WO type.
+- **Inventory**: `syncItemToInventory_()` ensures `inv_items` stays in sync.
+- **Costing**: Item properties (HSN, GST, default rate, dimensions) feed into cost estimation.

@@ -4,13 +4,16 @@
 
 The Clients module manages customer master data including multi-party addresses for billing and shipping. Each client can have multiple bill-to and ship-to addresses (via `client_parties`), with one default per type. Clients are referenced throughout the system by `client_code`.
 
+> The Client Management section starts at roughly line 1057 in `Code.gs` (`mastersSaveClient`, `mastersGetBootstrap`).
+
 ## Tables
 
 | Table | Purpose |
 |-------|---------|
 | `clients` | Customer master (code, name, state, GSTIN, PAN, credit days) |
 | `client_parties` | Multiple bill-to/ship-to addresses per client |
-| `client_master_import_staging` | Bulk import staging table |
+
+> The `client_master_import_staging` table has been removed. Bulk client imports now run directly against `clients` + `client_parties` via the masters screen.
 
 ## Client Fields
 
@@ -80,8 +83,14 @@ The `_clientSelectRows_()` function has a multi-level fallback for column compat
 
 This handles schema migrations where new columns may not yet exist.
 
+## Views
+
+| View | Purpose |
+|------|---------|
+| `v_client_master_register` | Flat register of clients with default addresses, GSTIN, PAN, credit terms |
+
 ## Integration
 
-- **Sales Orders**: `client_code` is FK on `sales_orders`
-- **Invoicing**: Bill-to/ship-to resolved from `client_parties` during invoice creation
-- **Masters Page**: Client management UI (page: `masters`, module: MASTERS)
+- **Sales Orders**: `client_code` is FK on `sales_orders`.
+- **Invoicing**: Bill-to / ship-to resolved from `client_parties` during invoice creation.
+- **Masters Page**: Client management UI (page: `masters`, module: MASTERS).

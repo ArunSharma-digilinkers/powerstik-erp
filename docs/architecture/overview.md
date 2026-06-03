@@ -9,7 +9,7 @@ Powerstik ERP uses a serverless three-tier architecture with no traditional appl
 |   Google Sheets     |       |  Google Apps Script  |       |      Supabase       |
 |   (Presentation)    | <---> |   (Integration)      | <---> |   (Data Backend)    |
 |                     |       |                      |       |                     |
-|  - HTML pages via   |       |  - Code.gs (~20.5K   |       |  - PostgreSQL DB    |
+|  - HTML pages via   |       |  - Code.gs (~34.2K   |       |  - PostgreSQL DB    |
 |    doGet()          |       |    lines)             |       |  - PostgREST API    |
 |  - Module-specific  |       |  - REST calls to     |       |  - Triggers &       |
 |    UI forms         |       |    Supabase           |       |    functions        |

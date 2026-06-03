@@ -105,10 +105,10 @@ Flexo routing options include:
 
 ## After WO Creation
 
-- WO appears in Production stage queue
-- Materials appear in inventory issue queue (`invListWorkOrdersForIssue`)
-- WO can be printed (`printWorkOrder` or `printFlexoWorkOrder`)
-- SO rollup cache shows `wo_status: CREATED`
+- WO appears in the Production stage queue (`v_production_stage_queue_fast` / `v_production_stage_rows_fast`).
+- Materials appear in the inventory issue queue (`invListWorkOrdersForIssue`); planned vs issued is in `inv_wo_issue_status_v` / `_fast_v` (the older `wo_material_pending` view has been removed).
+- WO can be printed (`printWorkOrder` or `printFlexoWorkOrder`).
+- SO rollup cache shows `wo_status: CREATED`; the per-line `sales_order_lines.status` will start flipping as dispatch / invoice events fire.
 
 ## Deleting a Work Order
 

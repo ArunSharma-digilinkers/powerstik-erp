@@ -4,6 +4,8 @@
 
 The Costing module estimates product costs by breaking down raw material costs and process costs. It currently supports sticker costing with a master revision system for maintaining rate tables. Each costing record calculates a selling price from raw materials, processes, overheads, and profit margins.
 
+> The Costing section starts at roughly line 12324 in `Code.gs` (`saveCostingRequest`).
+
 ## Tables
 
 | Table | Purpose |

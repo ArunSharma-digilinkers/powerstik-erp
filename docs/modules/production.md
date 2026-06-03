@@ -2,14 +2,19 @@
 
 ## Overview
 
-The Production module records machine-level output against work order routing steps. It supports both batch entry (after-the-fact logging) and real-time tracking (start/stop/complete). Production views use recursive CTEs to cascade planned quantities through the routing chain.
+The Production module records machine-level output against work order routing steps. Every entry is auditable (before/after JSON) and corrugation entries carry per-set material composition. Production views use recursive CTEs to cascade planned quantities through the routing chain.
+
+> The Production section starts at roughly line 27887 in `Code.gs` (`saveProductionBulk`).
 
 ## Tables
 
 | Table | Purpose |
 |-------|---------|
-| `production_entries` | Batch production logs (produced/rejected/ok qty per routing step) |
-| `production_live_entries` | Real-time production tracking (RUNNING/COMPLETED/STOPPED/HOLD) |
+| `production_entries` | Production logs (produced / rejected / OK qty per routing step) |
+| `production_entry_audit_log` | Audit trail — before/after JSON for every edit, delete, reversal |
+| `corrugation_2ply_entry_details` | Per-set material composition for 2-ply corrugation entries (liner + fluting reels, gsm, kg consumed) |
+
+> The old `production_live_entries` table has been removed; real-time start/stop tracking is no longer in scope and the corresponding `set_production_live_entries_updated_at()` function is dangling.
 
 ## Production Entry Fields
 
@@ -25,26 +30,27 @@ The Production module records machine-level output against work order routing st
 | `downtime_reason` | Reason for any downtime |
 | `so_number` / `line_no` / `job_reference` | Job-level tracking (used for post-die-cut split) |
 
-## Production Live Entry Fields
+## Corrugation 2-Ply Composition
 
-| Field | Description |
-|-------|-------------|
-| `job_card_no` | Unique job card identifier |
-| `status` | RUNNING, COMPLETED, STOPPED, HOLD |
-| `start_at` / `end_at` | Production time window |
-| `downtime_minutes` | Recorded downtime |
-| `remarks` | Operator notes |
-| `created_by` / `completed_by` | Who started/finished |
+For 2-ply corrugation entries, `corrugation_2ply_entry_details` captures the actual material set used (which can differ from the WO snapshot). Each set group records:
+
+- WO-snapshot liner / fluting (`liner_item_code`, `liner_wo_gsm`, `fluting_item_code`, `fluting_wo_gsm`)
+- Actual liner / fluting used (`liner_actual_item_code`, `liner_actual_gsm`, `fluting_actual_*`)
+- Reel numbers and widths (`liner_reel_no`, `liner_reel_width_mm`, `fluting_*`)
+- Output sheets (`produced_sheets`, `rejected_sheets`) and consumed kg per side (`liner_consumed_kg`, `fluting_consumed_kg`, `total_consumed_kg`)
+- `flute`, `deckle_mm`, `cut_size_mm`, `set_numbers`
+
+`saveProductionBulk()` writes the parent `production_entries` row and these detail rows together.
 
 ## Key Functions (Code.gs)
 
 | Function | Purpose |
 |----------|---------|
-| `saveProductionBulk(entries, token)` | Save multiple production entries at once |
+| `saveProductionBulk(entries, token)` | Save multiple production entries at once (writes audit log, writes corrugation details when applicable) |
 | `getProductionBoardByWO(woId, token)` | Get detailed production data for a single WO |
 | `prodGetStageQueue(params, token)` | Get production stage queue with filtering |
 | `prodGetCategories(token)` | Get available department categories |
-| `shortCloseStage(routingId, reason, token)` | Short-close a routing step (mark as done even if not fully completed) |
+| `shortCloseStage(routingId, reason, token)` | Short-close a routing step (mark as done even if not fully completed) — writes an audit row |
 | `searchWorkOrders(query, token)` | Search WOs by number, artwork, client, product |
 
 ## Production Stage Queue
@@ -87,16 +93,23 @@ Category is derived from artwork `product_type` or WO snapshot `jobDetails.type`
 
 | View | Purpose |
 |------|---------|
-| `v_production_stage_queue_fast` | Stage queue with planned/produced/balance (recursive CTE) |
-| `v_production_stage_rows_fast` | Combined + job-split rows for production screen |
-| `v_production_summary_fast` | Aggregated summary by date/category/process/status |
-| `v_production_board` | Legacy production board by WO |
+| `v_production_stage_queue_fast` | Stage queue with planned / produced / balance (recursive CTE) |
+| `v_production_stage_rows_fast` | Combined + job-split rows for the production screen |
 | `v_production_jobcard_lookup_fast` | Job card lookup for quick WO search |
 | `v_report_production_bottleneck` | Routing steps with pending balance > 0 |
+| `v_report_production_nop_daily` | Net output per machine, daily |
+| `v_report_machine_load_lines` | Machine load / capacity analysis |
+| `v_report_sheet_utilization` / `_lines` | Sheet utilisation per WO |
+| `v_report_wip_ageing_lines` / `_summary` / `_all_lines` | WIP ageing across active production |
+| `v_report_wip_stage_lines` / `_summary` / `_reconciliation` | WIP by stage; reconciliation flags missing entries |
+| `v_report_pre_wip_ageing_lines` / `_summary` | Pre-WIP ageing (approved but not yet on a WO) |
+
+> The legacy `v_production_board` and `v_production_summary_fast` views have been removed; the reports above replace them.
 
 ## Integration
 
-- **Work Orders**: Production is recorded against WO routing steps
-- **Packing**: Production totals flow into packing queue (`v_packing_queue_fast`)
-- **Reports**: Production data feeds bottleneck analysis and planning reports
-- **Inventory**: Material issue from inventory is tracked against WO
+- **Work Orders**: Production is recorded against WO routing steps.
+- **Packing**: Production totals flow into the packing queue (`v_packing_queue_fast`).
+- **Reports**: Production data feeds bottleneck, WIP, machine load, sheet utilisation, NOP, and job profitability reports.
+- **Inventory**: Material issued from inventory is tracked against the WO via `inv_wo_issue_status_v` / `_fast_v`.
+- **Audit**: Every edit / delete / reversal writes to `production_entry_audit_log`.

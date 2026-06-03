@@ -4,6 +4,8 @@
 
 The Billing module generates invoices and delivery challans with GST breakup. It supports three billing modes (dispatch-based, FG-based, and direct), multiple document types (Invoice and Challan), and enforces billing constraints at the database level. Posted invoices are locked and cannot be modified.
 
+> The Billing / Invoicing section starts at roughly line 24528 in `Code.gs` (`createInvoice`).
+
 ## Tables
 
 | Table | Purpose |
@@ -11,6 +13,7 @@ The Billing module generates invoices and delivery challans with GST breakup. It
 | `invoices` | Invoice/challan header (bill-to/ship-to, transport, GST, status) |
 | `invoice_lines` | Line items linked to SO lines with billing snapshots |
 | `invoice_sequences` | Invoice number sequences by financial year and prefix |
+| `billing_division_bulk_fix` | Staging table for the bulk billing-division correction routine |
 
 ## Document Types
 
@@ -137,26 +140,39 @@ The system supports creating invoices without existing SOs. `_billingCreateManua
 
 | View | Purpose |
 |------|---------|
-| `v_billing_line_read_model` | Main billing dataset - all SO lines with billable quantities |
+| `v_billing_line_read_model` | Main billing dataset — all SO lines with billable quantities |
 | `v_billing_dispatch_summary` | Dispatched qty and latest dispatch details per SO line |
 | `v_billing_packing_summary` | Packed qty per SO line |
-| `v_billing_invoice_usage_summary` | Already-billed qty per SO line (with POSTED/DRAFT breakdown) |
-| `v_billing_document_register` | Invoice/challan register for listing |
-| `so_line_billed_qty` | Simple view: total billed qty per SO line (excluding cancelled) |
+| `v_billing_invoice_usage_summary` | Already-billed qty per SO line (POSTED / DRAFT breakdown) |
+| `v_billing_document_register` | Invoice / challan register for listing |
+| `v_billed_order_closure` | SOs fully billed and eligible for closure |
+| `v_billing_division_needs_fix` | Posted invoice lines with division mismatches (input to bulk fix) |
+| `so_line_billed_qty` | Total billed qty per SO line (excluding cancelled) |
+| `v_report_billing_register` | Date-ranged register for accounting exports |
 | `v_report_unbilled_dispatch` | Dispatched but not yet billed items |
 
-## Constraints
+## Constraints / Triggers
 
-| Constraint | Purpose |
+| Mechanism | Purpose |
 |-----------|---------|
 | `ux_invoice_so_line` | One invoice line per SO line per invoice |
 | `invoice_status_chk` | Status must be DRAFT, POSTED, or CANCELLED |
 | `trg_lock_invoice_lines` | Prevents edit/delete of lines on posted invoices |
+| `trg_sales_order_line_status_from_invoice` | Recomputes the parent SO line `status` whenever an invoice's status / posted_at / document_type / invoice_no changes |
+| `trg_sales_order_line_status_from_invoice_line` | Recomputes the parent SO line `status` whenever an `invoice_lines` row is inserted / updated / deleted |
+
+## Bulk Billing-Division Correction
+
+When historical invoice lines were posted with the wrong `division` (a one-off data hygiene issue), the workflow is:
+
+1. Identify offending rows via `v_billing_division_needs_fix`.
+2. Load the correct (invoice_no, line_no, division) tuples into `billing_division_bulk_fix`.
+3. Run the correction routine — it rewrites the division on the SO line and the matching invoice line and stamps `applied_at`. The trigger `trg_lock_invoice_lines` does not block this update because the column is whitelisted by the fix routine; in practice it runs against fields that aren't financial.
 
 ## Integration
 
-- **Sales Orders**: Invoice lines reference SO lines; billing remarks flow from SO header
-- **Dispatch**: Dispatch qty determines billable amount in dispatch mode
-- **FG Stock**: FG adjustments affect billable amount in FG mode
-- **Client Parties**: Bill-to/ship-to addresses resolved from client_parties
-- **Reports**: Invoice data feeds billing reports and unbilled dispatch analysis
+- **Sales Orders**: Invoice lines reference SO lines; billing remarks flow from SO header; SO line status is auto-recomputed on every invoice change.
+- **Dispatch**: Dispatch qty determines billable amount in dispatch mode.
+- **FG Stock**: FG adjustments affect billable amount in FG mode.
+- **Client Parties**: Bill-to / ship-to addresses resolved from `client_parties`.
+- **Reports**: Invoice data feeds the billing register, unbilled dispatch, job profitability, and dispatch discrepancy reports.

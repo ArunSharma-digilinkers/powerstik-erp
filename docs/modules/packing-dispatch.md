@@ -2,18 +2,23 @@
 
 ## Overview
 
-The Packing and Dispatch modules track post-production packaging and shipment of finished goods. Packing records quantity packed per SO line (one record per line), while dispatch records track individual shipments with transporter details. These are separate but closely linked modules.
+The Packing and Dispatch modules track post-production packaging and shipment of finished goods. Packing records the cumulative packed qty per SO line (one `packing_records` row per line), every individual posting is logged in `packing_entry_log`, and every edit is audited. Dispatch records track individual shipments with transporter details. These are separate but closely linked modules.
+
+> The Packing + Dispatch section starts at roughly line 25851 in `Code.gs` (`savePackingBulk`).
 
 ## Tables
 
 | Table | Purpose |
 |-------|---------|
-| `packing_records` | One record per SO line - packed qty, ready-to-dispatch flag |
-| `dispatch_records` | Multiple records per SO line - dispatch qty, transporter, vehicle |
-| `dispatch_sequence` | Auto-increment for dispatch numbers |
+| `packing_records` | One row per SO line — packed qty, ready-to-dispatch flag |
+| `packing_entry_log` | One row per individual packing posting (rolls up into the above) |
+| `packing_entry_audit_log` | Audit trail for packing edits / reversals |
+| `dispatch_records` | Multiple rows per SO line — dispatch qty, transporter, vehicle, LR |
 | `fg_opening_stock` | Finished goods opening balances |
 | `fg_opening_dispatch_entries` | FG opening stock dispatches |
-| `fg_stock_adjustments` | FG stock adjustments (linked to packing/opening/SO line) |
+| `fg_stock_adjustments` | FG stock adjustments (linked to packing / opening / SO line) |
+
+> The `dispatch_sequence` table has been removed. Dispatch numbers are now generated in Apps Script.
 
 ## Packing
 
@@ -34,11 +39,15 @@ One packing record per SO line (enforced by `uq_packing_records_so_line_id` part
 | `ready_to_dispatch` | Boolean flag indicating dispatch readiness |
 | `packed_by` / `packed_at` | Who packed and when |
 
+### Per-posting log
+
+`packing_entry_log` records each individual posting (operator, qty, weight kg, source stage, ready-to-dispatch flag). `packing_records` is the cumulative roll-up per SO line. `packing_entry_audit_log` keeps the before/after JSON of every edit / reversal along with the `changed_by` and `reason`.
+
 ### Key Functions
 
 | Function | Purpose |
 |----------|---------|
-| `savePackingBulk(entries)` | Save multiple packing records |
+| `savePackingBulk(entries)` | Save multiple packing records — writes both `packing_entry_log` (per posting) and updates the roll-up `packing_records` row; on edits, also writes `packing_entry_audit_log`. |
 | `packGetDataset(params, token)` | Get packing queue dataset |
 
 ### Packing Queue
@@ -108,15 +117,23 @@ Finished goods stock is tracked separately for:
 
 | View | Purpose |
 |------|---------|
-| `v_packing_board` | Legacy packing board (balance = produced - packed) |
 | `v_packing_queue_fast` | Fast packing queue with production totals |
-| `v_dispatch_board` | Items ready to dispatch with balance qty |
+| `v_packing_board` | Packing board (balance = produced - packed) |
 | `v_dispatch_queue_fast` | Fast dispatch queue (extends packing queue) |
+| `v_dispatch_board` | Items ready to dispatch with balance qty |
+| `v_fg_stock_available` | FG stock available for dispatch (per client / product) |
 | `v_billing_dispatch_summary` | Dispatch totals per SO line for billing |
 | `v_billing_packing_summary` | Packing totals per SO line for billing |
+| `v_report_dispatch_register` | Date-ranged dispatch register |
+| `v_report_dispatch_discrepancy_lines` | Lines where dispatched qty doesn't match SO qty |
+
+## Triggers / Cascades
+
+- `trg_sales_order_line_status_from_dispatch` (on `dispatch_records`) recomputes the parent `sales_order_lines.status` whenever a dispatch row is inserted / updated / deleted — so the SO line auto-flips to `PARTIAL_DISPATCHED` or `CLOSED` without any application code change.
 
 ## Integration
 
-- **Production**: Produced qty flows from production entries into packing queue
-- **Billing**: Dispatched qty determines billable quantity; `v_billing_line_read_model` calculates `dispatch_billable_qty` and `fg_billable_qty`
-- **Reports**: Delivery performance and unbilled dispatch reports use dispatch data
+- **Production**: Produced qty flows from production entries into the packing queue.
+- **Billing**: Dispatched qty determines billable quantity — `v_billing_line_read_model` exposes `dispatch_billable_qty` and `fg_billable_qty` (see [Invoicing](invoicing.md)).
+- **Reports**: Delivery performance, unbilled dispatch, dispatch register, and dispatch discrepancy reports all read from this module.
+- **SO line status**: Auto-cascaded via the trigger family — see [business-rules.md](../database/business-rules.md).

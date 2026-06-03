@@ -12,16 +12,7 @@ Sales Order -> Artwork -> Approvals -> Work Order -> Production -> Packing -> Di
 
 ### SO Number Generation
 
-SO numbers are generated using a prefix + financial year (FY) counter system.
-
-```sql
-create table public.so_counters (
-  fy     text not null,      -- e.g. '2425' for FY 2024-25
-  prefix text not null,      -- e.g. 'SL', 'SLF', 'SLC'
-  last_no integer default 0, -- Auto-incrementing counter
-  primary key (fy, prefix)
-);
-```
+SO numbers are generated using a prefix + financial year (FY) counter system. The dedicated `so_counters` table has been removed; counters are now maintained in Apps Script using `PropertiesService` / a generic sequence row, but the logical format is unchanged.
 
 The format is `{prefix}{sequence}/{fy}`, for example: `SL001/2425`, `SLF042/2425`.
 
@@ -45,7 +36,7 @@ The `idempotency_keys` table records the submission key to prevent duplicates.
 
 ### Auto-Creation from SO Lines
 
-When a sales order is saved, the system automatically creates one artwork record per SO line via `createArtworksFromSoLines()`.
+When a sales-order line is inserted or its identifying fields change, the **database trigger `trg_sales_order_lines_ensure_artwork`** auto-creates the matching `artworks` row. (The earlier application-side helper `createArtworksFromSoLines()` is kept as a back-fill but is no longer the primary path.)
 
 ### Artwork Number Sequence
 
@@ -234,24 +225,9 @@ create table public.production_entries (
 );
 ```
 
-**Live entry** (`production_live_entries`): Real-time tracking with start/end timestamps and status transitions.
+**Audit trail**: every edit / reverse on `production_entries` writes a before / after JSON row in `production_entry_audit_log`. For 2-ply corrugation, per-set material details (liner + fluting reels, kg consumed) are written to `corrugation_2ply_entry_details`.
 
-```sql
--- Status flow: RUNNING -> COMPLETED | STOPPED | HOLD
-create table public.production_live_entries (
-  wo_id           uuid,
-  routing_id      uuid,
-  job_card_no     text,
-  machine         text,
-  status          text default 'RUNNING',   -- RUNNING, COMPLETED, STOPPED, HOLD
-  start_at        timestamp with time zone,
-  end_at          timestamp with time zone,
-  produced_qty    numeric(14,2),
-  rejected_qty    numeric(14,2),
-  ok_qty          numeric(14,2),
-  downtime_minutes numeric(14,2)
-);
-```
+> The earlier `production_live_entries` table (real-time start/stop tracking) has been removed; the function `set_production_live_entries_updated_at()` still exists in the schema dump but is now dangling.
 
 Production entries update the `completed_qty` on the corresponding `work_order_routing` record, enabling progress tracking per process step.
 
@@ -303,7 +279,9 @@ create table public.dispatch_records (
 );
 ```
 
-Dispatch numbers are sequenced via the `dispatch_sequence` table.
+Dispatch numbers are generated in Apps Script (the dedicated `dispatch_sequence` table has been removed).
+
+> Whenever a `dispatch_records` row is inserted / updated / deleted, the database trigger `trg_sales_order_line_status_from_dispatch` recomputes the parent `sales_order_lines.status` — see [SO line status cascade](../database/business-rules.md#sales-order-line-status-cascade-triggers).
 
 The `v_dispatch_board` and `v_dispatch_queue_fast` views power the dispatch dashboard, showing what is ready and what has been shipped.
 
@@ -379,7 +357,7 @@ A unique index on `(invoice_id, so_line_id)` prevents billing the same SO line t
 
 ### Over-Billing Prevention
 
-The `trg_prevent_over_billing` trigger checks that the total billed quantity across all invoices for a given SO line does not exceed the ordered quantity. The `so_line_billed_qty` view aggregates billed quantities:
+The `prevent_over_billing()` function exists in the schema but is not currently attached to a trigger — over-billing is prevented at the application layer by `v_billing_line_read_model` (and the modes it exposes: `dispatch_billable_qty`, `fg_billable_qty`, `direct_billable_qty`). The `so_line_billed_qty` view aggregates billed quantities:
 
 ```sql
 create view public.so_line_billed_qty as
@@ -433,12 +411,12 @@ These items:
 
 | Stage        | Table(s)                          | Key Status Values                | Trigger/Constraint                     |
 |--------------|-----------------------------------|----------------------------------|----------------------------------------|
-| Sales Order  | `sales_orders`, `sales_order_lines` | OPEN, HOLD, CANCELLED          | `trg_sales_order_rollup_*` (3 triggers)|
-| Artwork      | `artworks`                        | PENDING, APPROVED, REJECTED      | `trg_artworks_updated`                 |
+| Sales Order  | `sales_orders`, `sales_order_lines` | OPEN, HOLD, CANCELLED; per-line OPEN/PARTIAL_DISPATCHED/CLOSED/CANCELLED/HOLD | `trg_sales_order_rollup_*` (3 triggers), `trg_sales_order_line_status_*` (5 triggers) |
+| Artwork      | `artworks`                        | PENDING, APPROVED, REJECTED      | `trg_artworks_updated`, `trg_sales_order_lines_ensure_artwork` (on SO lines) |
 | Approval     | `sales_order_lines` (status cols) | PENDING, APPROVED, REJECTED      | RBAC (`can_approve_*` permissions)     |
 | Work Order   | `work_orders`, `work_order_jobs`  | (status on WO)                   | `trg_sales_order_rollup_from_work_order_jobs` |
 | Routing      | `work_order_routing`              | PENDING, IN_PROGRESS, COMPLETED  | --                                     |
-| Production   | `production_entries`, `production_live_entries` | RUNNING, COMPLETED, STOPPED, HOLD | `trg_production_live_entries_updated_at` |
-| Packing      | `packing_records`                 | `ready_to_dispatch` flag         | Unique index on `so_line_id`           |
-| Dispatch     | `dispatch_records`                | DISPATCHED                       | --                                     |
-| Invoice      | `invoices`, `invoice_lines`       | DRAFT, POSTED, CANCELLED        | `trg_lock_invoice_lines`, `trg_prevent_over_billing` |
+| Production   | `production_entries`, `production_entry_audit_log`, `corrugation_2ply_entry_details` | (no per-entry status — qty + status comes from `v_production_stage_queue_fast`) | -- (audit log is application-written) |
+| Packing      | `packing_records`, `packing_entry_log`, `packing_entry_audit_log` | `ready_to_dispatch` flag | Unique index on `so_line_id` |
+| Dispatch     | `dispatch_records`                | DISPATCHED                       | `trg_sales_order_line_status_from_dispatch` |
+| Invoice      | `invoices`, `invoice_lines`       | DRAFT, POSTED, CANCELLED        | `trg_lock_invoice_lines`, `trg_sales_order_line_status_from_invoice` / `_invoice_line` |

@@ -2,6 +2,8 @@
 
 This document describes all regular views and materialized views in the Powerstik ERP database.
 
+> **Removed views** (referenced by older docs but no longer in the schema): `v_sales_orders_dashboard`, `wo_material_pending`, `v_production_board`, `v_production_summary_fast`, `v_item_bom_current`. Where the functionality moved, the replacement view is called out below.
+
 ---
 
 ## Materialized Views
@@ -53,21 +55,6 @@ This document describes all regular views and materialized views in the Powersti
 **Output:** SO header fields, client_name, accounts_status, business_status, wo_status, plus product_code/name/remarks from line 1 only.
 
 **Used by:** Legacy sales order list screen
-
----
-
-### v_sales_orders_dashboard
-
-**Purpose:** Sales order dashboard with computed approval and WO statuses.
-
-**Key logic:**
-- Uses EXISTS subqueries on sales_order_lines to derive aggregate accounts_approved and business_approved statuses
-- Uses EXISTS on work_order_jobs to derive wo_status
-- Status logic: REJECTED if any line rejected, PENDING if any line pending, else APPROVED
-
-**Output:** SO header fields plus computed wo_status, accounts_approved, business_approved
-
-**Used by:** Sales dashboard module
 
 ---
 
@@ -124,6 +111,22 @@ This document describes all regular views and materialized views in the Powersti
 
 ---
 
+### v_sales_order_item_picker
+
+**Purpose:** Item-picker dataset surfaced inside the SO entry screen — gives one row per item with the columns the picker shows (HSN, GST, last sold rate, default unit) and supports fuzzy match.
+
+**Used by:** SO line entry / quick add.
+
+---
+
+### v_sales_order_advance_payment_clearance
+
+**Purpose:** Tracks orders that need advance-payment clearance before they can move to artwork / production. Combines advance-payment fields from the SO with current accounts approval and billed-vs-paid context.
+
+**Used by:** Accounts approval / billing dashboard.
+
+---
+
 ## Regular Views -- Artwork Module
 
 ### v_artwork_jobs
@@ -135,6 +138,30 @@ This document describes all regular views and materialized views in the Powersti
 **Output:** Artwork fields (sheet dimensions, UPS layout, plate/die details), SO fields (so_number, so_date, sales_rep), line fields (product_code, product_name, qty), client_name, approval statuses
 
 **Used by:** Artwork module in Google Sheets
+
+---
+
+### v_artwork_jobs_active
+
+**Purpose:** Same shape as `v_artwork_jobs` but filtered to in-flight artworks (excludes cancelled / archived SO lines). Use this in screens that should not show closed history.
+
+---
+
+### v_artwork_workbench_active
+
+**Purpose:** Workbench-shaped dataset used by the artwork module to drive its main grid — includes approval-group rollups, plate/die status, and the action flags that drive the inline-edit buttons.
+
+---
+
+### v_artwork_groups / v_artwork_groups_active
+
+**Purpose:** Approval-group level rollup — one row per artwork approval group with member counts, plate/die roll-up status, approval timestamps. `_active` filters out closed groups.
+
+---
+
+### v_artwork_reference
+
+**Purpose:** Look-up dataset used when an operator wants to copy the specs of a prior artwork onto a new SO line. Returns one row per distinct (client, product, sheet spec) combination with the latest approved artwork details.
 
 ---
 
@@ -160,36 +187,25 @@ This document describes all regular views and materialized views in the Powersti
 
 ---
 
-### wo_material_pending
+### v_workorder_candidates_active
 
-**Purpose:** Shows pending material requirements per work order.
+**Purpose:** Same shape as `v_workorder_candidates` but filtered to actionable rows only — excludes lines already fully assigned, on hold, or cancelled.
 
-**Key logic:**
-- Compares work_order_materials.required_qty against issued qty from inv_ledger
-- Issue matching: ref_type = 'ISSUE', ref_no = wo_id, remarks = material_key
+---
 
-**Output:** wo_id, material_key, required_qty, uom, issued_qty, pending_qty
+### v_flexo_work_order_jobs
 
-**Used by:** Material issue screens, WO material tracking
+**Purpose:** Flexo-specific view of `work_order_jobs`. Surfaces the cylinder / teeth / repeat fields stored on the WO snapshot for use by the flexo WO creation screen and downstream production views.
+
+---
+
+> **Replaced view note:** `wo_material_pending` has been removed; the WO material-issue progress is now exposed by the new family below: `inv_wo_issue_requirement_v` / `_fast_v` (planned), `inv_wo_issue_status_v` / `_fast_v` (planned vs issued), and `inv_wo_issue_material_source_v` (which lots / receipts to draw from).
 
 ---
 
 ## Regular Views -- Production Module
 
-### v_production_board
-
-**Purpose:** Simple production board showing routing stages with planned vs produced quantities.
-
-**Key logic:**
-- For sequence 1: planned qty comes from snapshot_json (coreSheets + processSheets)
-- For subsequent stages: planned qty = previous stage's produced total
-- Uses work_order_routing joined with production_entries aggregates
-
-**Output:** routing_id, wo_id, wo_number, artwork_no, client_name, process_name, sequence_no, department, planned_machine, planned_qty, produced_qty
-
-**Used by:** Basic production board
-
----
+> **Replaced view note:** `v_production_board` and `v_production_summary_fast` have been removed. Use `v_production_stage_queue_fast` and `v_production_stage_rows_fast` for stage-level data; for board-style summary the reports module now uses `v_report_wip_stage_summary` and friends (see Reports below).
 
 ### v_production_jobcard_lookup_fast
 
@@ -240,18 +256,6 @@ This document describes all regular views and materialized views in the Powersti
 **Output:** row_key, row_sort, row_kind (COMBINED/JOB), plan_unit (SHEETS/UNITS/RM), all routing and job fields, process_display_name, planned_qty, produced_qty, balance_qty, status
 
 **Used by:** Production stage detail screen in Google Sheets
-
----
-
-### v_production_summary_fast
-
-**Purpose:** Aggregated production summary by date, department, process, and status.
-
-**Source:** v_production_stage_rows_fast (aggregated)
-
-**Output:** wo_date, department_category, process_display_name, status, total_rows, pending_qty, in_progress_rows, short_closed_rows
-
-**Used by:** Production summary dashboard
 
 ---
 
@@ -313,6 +317,14 @@ This document describes all regular views and materialized views in the Powersti
 **Output:** All packing queue fields plus dispatched_qty
 
 **Used by:** Dispatch queue in Google Sheets
+
+---
+
+### v_fg_stock_available
+
+**Purpose:** Available finished-goods stock per client + product (or per SO line, depending on the source mode). Combines opening stock, FG adjustments, packed-not-yet-dispatched, and dispatch history to arrive at the qty that is currently dispatchable from FG.
+
+**Used by:** Dispatch screen, FG stock dashboard.
 
 ---
 
@@ -389,17 +401,43 @@ This document describes all regular views and materialized views in the Powersti
 
 ---
 
+### v_billed_order_closure
+
+**Purpose:** Lists sales orders whose lines are fully billed (and therefore eligible to be marked closed). Used by the closure routine to decide which SOs to flip to `CLOSED` and to drive the "billed but not closed" warning.
+
+---
+
+### v_billing_division_needs_fix
+
+**Purpose:** Identifies posted invoice lines whose division doesn't match the SO line's division — input to the `billing_division_bulk_fix` correction job.
+
+---
+
+## Regular Views -- Client Master
+
+### v_client_master_register
+
+**Purpose:** Flat register of clients + their default bill-to / ship-to addresses, GSTIN, PAN, and credit terms. Used by masters listing and the export-to-Excel feature.
+
+---
+
+## Regular Views -- Checklist / Task Module
+
+### v_checklist_task_instances_ui
+
+**Purpose:** UI-shaped view of `checklist_task_instances` — joins template / version / assignment, exposes display columns (badge color from priority, due-by relative text, etc.) and the action flags used by the checklist screen.
+
+---
+
+### v_checklist_user_summary
+
+**Purpose:** Per-user task summary: today's open / overdue / done counts, this week's totals, and the next due task. Drives the dashboard tile and the menu badge.
+
+---
+
 ## Regular Views -- Item Master Module
 
-### v_item_bom_current
-
-**Purpose:** Shows the current active BOM revision for each item.
-
-**Joins:** item_bom_revisions (WHERE is_current = true) + items
-
-**Output:** revision_id, item_code, item_name, category, item_unit, item_active, item_lifecycle_status, revision details, effective_from, approved metadata
-
-**Used by:** BOM management screens
+> **Replaced view note:** `v_item_bom_current` has been removed. The current revision is now read directly from `item_bom_revisions WHERE is_current = true` (a partial unique index enforces one current revision per item) — see `itemMasterActivateRevision()` in Code.gs.
 
 ---
 
@@ -430,6 +468,122 @@ This document describes all regular views and materialized views in the Powersti
 **Output:** pr_no, created_at, item fields, requested_qty, received_qty, department, job_ref, remarks, status, pending_qty
 
 **Used by:** Purchase order creation screen
+
+---
+
+### v_pr_po_receipt_cycle
+
+**Purpose:** Lifecycle view that walks every PR through its PO and each receipt event, so the purchase screen can show "raised → ordered → received" timing for each request.
+
+---
+
+### v_purchase_dashboard_core_metrics
+
+**Purpose:** KPI tiles for the purchase dashboard — open PR count, open PO count, value receivable this week, overdue receipts. One row.
+
+---
+
+### v_purchase_lead_time_items
+
+**Purpose:** Vendor / item lead-time analytics — average days between PO date and first receipt per (vendor, item), with sample counts.
+
+---
+
+### v_purchase_order_summary
+
+**Purpose:** PO listing with derived totals (line count, total qty, total value, receipt status). Backs the PO list grid.
+
+---
+
+### v_purchase_orders_read_model
+
+**Purpose:** Read-model variant of `v_purchase_order_summary` used by the new purchase workbench (extra context fields, more aggressive denormalization, fewer joins on the client side).
+
+---
+
+### v_purchase_po_print_lines
+
+**Purpose:** Per-line dataset formatted for PO printing (sl no, description, qty + uom, rate, tax %, line total, etc.).
+
+---
+
+### v_purchase_tooling_workbench
+
+**Purpose:** Plate / die procurement workbench: combines `purchase_artwork_procurement`, the originating `artworks` row and the source SO line, with the action flags driving the tooling-procurement screen.
+
+---
+
+### v_purchase_tooling_pending_summary
+
+**Purpose:** Aggregate (department, vendor, type) of plate / die procurement entries still pending — used by the dashboard tile and the daily pending email.
+
+---
+
+### v_purchase_tooling_register_search
+
+**Purpose:** Searchable register of every plate / die procurement event with concatenated search text and prepared display columns (artwork_no, type, vendor, status, ordered / received dates).
+
+---
+
+## Regular Views -- Inventory Registers
+
+### inv_stock_reconciled_v
+
+**Purpose:** Stock view that reconciles `inv_lots` qty-available against the ledger net qty per (item, location) and flags discrepancies. Used during stock audit.
+
+---
+
+### inv_issue_register_v
+
+**Purpose:** Material-issue register — one row per issue (`inv_ledger` rows where `ref_type = 'ISSUE'`) with item, batch, WO, department, value, and the consuming material_key.
+
+---
+
+### inv_receipt_register_v
+
+**Purpose:** Receipt register — one row per receipt (`PR-RECEIPT` / `PO-RECEIPT` ledger rows) with PO / PR linkage, lot info, rate, value, and the corresponding `purchase_po_receipts` row when present.
+
+---
+
+### inv_adjustment_register_v
+
+**Purpose:** Stock-adjustment register — `inv_ledger` rows where `ref_type = 'ADJUSTMENT'` with reason text and the lot adjusted.
+
+---
+
+### inv_rfp_register_v
+
+**Purpose:** Inventory purchase-request (RFP) register — every PR with its current status, pending qty, and the PO line(s) it has been pulled into.
+
+---
+
+### inv_rts_register_v
+
+**Purpose:** Return-to-supplier register — every `inv_rts_returns` row joined with its `inv_ledger` reversal and vendor / debit-note context.
+
+---
+
+### v_inventory_transaction_register
+
+**Purpose:** Combined inventory transaction register — every ledger movement (receipt, issue, adjustment, conversion, RTS) in one timeline, used by the inventory screen and the daily transaction email.
+
+---
+
+### inv_wo_issue_requirement_v / inv_wo_issue_requirement_fast_v
+
+**Purpose:** Per-WO material requirement: rolls up `work_order_materials` to (wo, material_key, item) with planned qty and uom. The `_fast_v` variant pre-aggregates for the issue screen.
+
+---
+
+### inv_wo_issue_status_v / inv_wo_issue_status_fast_v
+
+**Purpose:** Per-WO material issue status — planned qty (from the requirement view) vs already-issued qty (from `inv_ledger`) with pending qty and last issue timestamp. Replaces the old `wo_material_pending` view.
+
+---
+
+### inv_wo_issue_material_source_v
+
+**Purpose:** For each pending WO material requirement, the candidate `inv_lots` / receipts that could satisfy it (FIFO order, with qty available and rate). Drives the "issue from" picker.
 
 ---
 
@@ -510,3 +664,125 @@ This document describes all regular views and materialized views in the Powersti
 **Output:** so_line_id, so_number, line_no, product_name, dispatch_date, dispatched_qty, billed_qty, unbilled_qty
 
 **Used by:** Unbilled dispatch report -- helps ensure all dispatches are invoiced
+
+---
+
+### v_report_planning_lines_enriched
+
+**Purpose:** Same per-line shape as `v_report_planning_lines` but adds material readiness, tooling readiness, and pre-WIP / WIP stage badges in one shot — fewer round trips for the planning screen.
+
+---
+
+### v_report_planning_material_status
+
+**Purpose:** Per planning line, "is the WO's material requirement covered?" — combines `inv_wo_issue_status_v` totals to give a single material-status badge (READY / SHORT / ISSUED).
+
+---
+
+### v_report_planning_tooling_status
+
+**Purpose:** Per planning line, "is the plate / die procurement done?" — combines artwork + `purchase_artwork_procurement` to give one tooling-status badge.
+
+---
+
+## Regular Views -- WIP / Pre-WIP Reports
+
+These views back the new WIP module and replace the older ad-hoc dashboards.
+
+### v_report_pre_wip_ageing_lines
+
+**Purpose:** Pre-WIP ageing at the line level — sales-order lines that are approved but not yet on a work order, with the age in days from approval (bucketed: 0–7, 7–15, 15–30, 30+).
+
+### v_report_pre_wip_ageing_summary
+
+**Purpose:** Bucketed counts and totals of the lines view, grouped by client / product / category — the summary tile and CSV export.
+
+### v_report_wip_ageing_lines / _summary / _all_lines
+
+**Purpose:** WIP ageing — work-order jobs that have started production but are not yet packed.
+- `_lines` is per WO job with age bucket and current stage.
+- `_summary` aggregates by bucket / department / process.
+- `_all_lines` is the unfiltered superset including jobs not yet started (used by the global "all WIP" view).
+
+### v_report_wip_stage_lines / _summary / _reconciliation
+
+**Purpose:** WIP at the production-stage level.
+- `_lines` is one row per (WO, routing step) currently in WIP.
+- `_summary` aggregates by stage / department.
+- `_reconciliation` cross-checks WIP qty against `v_production_stage_queue_fast` balance to flag mismatches that indicate missing production entries.
+
+---
+
+## Regular Views -- Machine Load / Capacity
+
+### v_report_machine_load_lines
+
+**Purpose:** Per-machine load — the planned hours / qty queued on each machine across the next N days, derived from work orders + routing standards.
+
+### v_report_machine_load_machine_cleanup
+
+**Purpose:** Helper for the machine load report that normalises machine names across legacy spellings — read-only mapping.
+
+### v_report_machine_load_missing_targets
+
+**Purpose:** Lists routing rows that don't have a per-machine standard qty/hour, so the report can warn when planning is unreliable.
+
+---
+
+## Regular Views -- Sheet Utilisation
+
+### v_report_sheet_utilization
+
+**Purpose:** Per-WO sheet utilisation summary — sheets planned vs sheets produced vs scrap, including UPS and material breakdown.
+
+### v_report_sheet_utilization_lines
+
+**Purpose:** Per-line drilldown for the same report.
+
+---
+
+## Regular Views -- Net Output Per Machine (NOP)
+
+### v_report_production_nop_daily
+
+**Purpose:** Daily net-output-per-machine — produced qty vs target qty per (date, machine, shift). Drives the production NOP dashboard.
+
+### v_report_production_nop_machine_cleanup
+
+**Purpose:** Machine-name normalisation helper for the NOP report (same idea as the machine-load cleanup view).
+
+---
+
+## Regular Views -- Job Profitability
+
+### v_report_job_profitability_phase1
+
+**Purpose:** Per SO line — revenue vs material cost vs process cost vs estimated overhead, with the resulting gross margin. "Phase 1" because it uses point-in-time receipt rates; a phase-2 view that uses actual lot allocations is planned.
+
+### v_report_job_profitability_production_stages
+
+**Purpose:** Per-line breakdown of process cost by routing stage — drills the phase-1 margin into where production hours were consumed.
+
+---
+
+## Regular Views -- Billing & Dispatch Registers
+
+### v_report_billing_register
+
+**Purpose:** Date-ranged register of invoices / challans (subtotal, tax, total, status, posted-at) used by accounting exports.
+
+### v_report_dispatch_register
+
+**Purpose:** Date-ranged register of dispatch_records joined with SO + client + invoice info — the dispatch ledger.
+
+### v_report_dispatch_discrepancy_lines
+
+**Purpose:** Lines where the dispatched qty doesn't match the SO ordered qty (short or excess), used by the discrepancy report.
+
+---
+
+## Regular Views -- Department Purchase / GRN
+
+### v_report_department_purchase_grn
+
+**Purpose:** Department-wise purchase summary — POs raised, receipts taken, value purchased per department over a date range. Used by department spend reviews.
