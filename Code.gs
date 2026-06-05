@@ -495,7 +495,8 @@ const M_PREFIX_TRADING_ITEMS = [
   { itemCode: 'MTR017', itemName: 'Standy', category: 'Standy', hsnGroup: 'STANDY', gstPct: 18, unit: 'Pcs' },
   { itemCode: 'MTR018', itemName: 'T Shirt', category: 'T Shirt', hsnGroup: 'T SHIRT', gstPct: 5, unit: 'Pcs' },
   { itemCode: 'MTR019', itemName: 'Table Matt', category: 'Table Matt', hsnGroup: 'TABLE MATT', gstPct: 18, unit: 'Pcs' },
-  { itemCode: 'MTR020', itemName: 'Designing Charges', category: 'Designing Charges', hsnGroup: 'DESIGNING CHARGES', gstPct: 18, unit: 'Pcs' }
+  { itemCode: 'MTR020', itemName: 'Designing Charges', category: 'Designing Charges', hsnGroup: 'DESIGNING CHARGES', gstPct: 18, unit: 'Pcs' },
+  { itemCode: 'MTR021', itemName: 'Stepney Cover', category: 'Stepney Cover', hsnGroup: 'STEPNEY COVER', gstPct: 18, unit: 'Pcs' }
 ];
 
 const SL_PREFIX_COMMON_ITEMS = [
@@ -717,6 +718,7 @@ const PAGE_MODULE_MAP = {
   'planning':'PLANNING',
   'reports':'REPORTS',
   'costing':'COSTING',
+  'npd':'NPD',
   'checklist':'CHECKLIST',
   'menu': 'MENU',
   'masteradmin':'MASTERADMIN'
@@ -5683,6 +5685,219 @@ function _workOrderQueueDateFilters_(dateFrom, dateTo) {
   return {};
 }
 
+function _nextWorkOrderDateYMD_(value) {
+  const text = _normalizeWorkOrderDateYMD_(value);
+  if (!text) return '';
+  const parts = text.split('-').map(function(part) { return Number(part); });
+  const dt = new Date(parts[0], parts[1] - 1, parts[2] + 1);
+  return _formatWorkOrderDateYMD_(dt);
+}
+
+function _standardProcessedWODateFilters_(dateFrom, dateTo) {
+  const from = _normalizeWorkOrderDateYMD_(dateFrom);
+  const toNext = _nextWorkOrderDateYMD_(dateTo);
+  if (from && toNext) return { and: '(wo_date.gte.' + from + ',wo_date.lt.' + toNext + ')' };
+  if (from) return { wo_date: 'gte.' + from };
+  if (toNext) return { wo_date: 'lt.' + toNext };
+  return {};
+}
+
+function _formatWorkOrderDateTimeText_(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const dt = new Date(text);
+  if (isNaN(dt.getTime())) return text;
+  return Utilities.formatDate(dt, Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd HH:mm');
+}
+
+function _isFlexoWorkOrderSnapshot_(snapshotJson) {
+  const snap = _safeJsonObject_(snapshotJson);
+  const type = String(snap?.jobDetails?.type || '').trim().toUpperCase();
+  return type === 'FLEXO' || !!snap.flexoDetails;
+}
+
+function _mapStandardProcessedWORow_(r) {
+  const processedQty = Math.max(0, Number(r.processed_qty != null ? r.processed_qty : r.qty) || 0);
+  const remainingQty = Math.max(0, Number(r.remaining_qty || 0) || 0);
+  const woNo = String(r.wo_no || r.wo_number || r.woList || '').trim();
+  const woDate = r.wo_date || '';
+  const woTime = r.wo_time || '';
+  const woDateTime = r.wo_date_time || _formatWorkOrderDateTimeText_(woDate);
+  const soDateTime = r.so_date_time || [r.so_date || '', r.so_time || ''].filter(Boolean).join(' ');
+  return {
+    so: r.so_number || r.so || '',
+    lineNo: String(r.line_no || r.lineNo || ''),
+    productCode: r.product_code || r.productCode || '',
+    client: r.client_name || r.client || r.client_code || '',
+    productName: r.product_name || r.productName || '',
+    artworkNo: r.artwork_no || r.artworkNo || '',
+    qty: processedQty,
+    orderQty: Number(r.order_qty || r.qty || 0) || 0,
+    stockQtyToBill: Math.max(0, Number(r.stock_qty_to_bill || 0) || 0),
+    remainingQty: remainingQty,
+    processedQty: processedQty,
+    unit: r.unit || '',
+    category: r.category || '',
+    productType: r.product_type || r.productType || r.department_category || '',
+    soDate: r.so_date || '',
+    soTime: r.so_time || '',
+    soDateTime: soDateTime,
+    woDate: woDate,
+    woTime: woTime,
+    woDateTime: woDateTime,
+    salesRep: r.sales_rep || r.salesRep || '',
+    po_number: r.po_number || '',
+    expected_delivery: r.expected_delivery || '',
+    job_priority: r.job_priority || '',
+    job_type: r.job_type || '',
+    so_remarks: r.so_remarks || '',
+    product_remarks: r.product_remarks || '',
+    job_reference: r.job_reference || '',
+    prepress_remark: r.prepress_remark || r.prepress_remarks || '',
+    woList: woNo,
+    woNo: woNo,
+    accountsStatus: String(r.accounts_status || '').trim().toUpperCase() || 'PENDING',
+    businessStatus: String(r.business_status || '').trim().toUpperCase() || 'PENDING',
+    artworkStatus: String(r.artwork_status || r.status || '').trim().toUpperCase() || 'NO_ART',
+    approvalStage: r.approval_stage || '',
+    canCreateWo: false,
+    artSheetLength: r.sheet_length == null ? '' : Number(r.sheet_length),
+    artSheetWidth: r.sheet_width == null ? '' : Number(r.sheet_width),
+    artSheetUps: r.sheet_ups == null ? '' : Number(r.sheet_ups),
+    artPrintingColors: r.printing_colors || '',
+    artAcrossUps: r.across_ups == null ? '' : Number(r.across_ups),
+    artAlongUps: r.along_ups == null ? '' : Number(r.along_ups),
+    artTotalUps: r.total_ups == null ? '' : Number(r.total_ups),
+    artAcrossWidth: r.across_width == null ? '' : Number(r.across_width),
+    artTeeth: r.teeth == null ? '' : Number(r.teeth),
+    artAcrossGapMm: r.across_gap_mm == null ? '' : Number(r.across_gap_mm),
+    artAlongGapMm: r.along_gap_mm == null ? '' : Number(r.along_gap_mm),
+    artStatus: r.artwork_status || r.status || '',
+    artApprovedAt: r.artwork_approved_at || r.approved_at || null
+  };
+}
+
+function _standardProcessedWOSelect_() {
+  return [
+    'wo_id','wo_number','wo_no','wo_date','wo_time','wo_date_time',
+    'so_number','so_date','so_time','so_date_time','sales_rep','client_code','client_name',
+    'line_no','product_code','product_name','category','department_category','product_type',
+    'qty','order_qty','stock_qty_to_bill','remaining_qty','processed_qty','unit',
+    'po_number','expected_delivery','job_priority','job_type','so_remarks','product_remarks',
+    'prepress_remark','job_reference','accounts_status','business_status','artwork_no',
+    'sheet_length','sheet_width','sheet_ups','printing_colors','across_ups','along_ups',
+    'total_ups','across_width','teeth','across_gap_mm','along_gap_mm','artwork_status',
+    'artwork_approved_at','approval_stage'
+  ].join(',');
+}
+
+function _listStandardProcessedWOsFromView_(request) {
+  const req = _normalizeWorkOrderQueueRequest_(request);
+  const rows = _supabaseSelectAllUnbounded_('v_standard_processed_work_orders', {
+    select: _standardProcessedWOSelect_(),
+    filters: _standardProcessedWODateFilters_(req.dateFrom, req.dateTo),
+    order: 'wo_date.desc,wo_number.desc,line_no.asc'
+  }, 1000) || [];
+  return rows
+    .map(_mapStandardProcessedWORow_)
+    .filter(function(row) {
+      return row.processedQty > 0 && !_isFlexoWorkOrderItem_(row);
+    });
+}
+
+function _listStandardProcessedWOsFromTables_(request) {
+  const req = _normalizeWorkOrderQueueRequest_(request);
+  const workOrders = _supabaseSelectAll_('work_orders', {
+    select: 'id,wo_number,wo_date,status,snapshot_json',
+    filters: _standardProcessedWODateFilters_(req.dateFrom, req.dateTo),
+    order: 'wo_date.desc'
+  }, 1000, 50000) || [];
+
+  const standardWOs = workOrders.filter(function(wo) {
+    return wo && wo.id && !_isFlexoWorkOrderSnapshot_(wo.snapshot_json);
+  });
+  const woIds = standardWOs.map(function(wo) { return wo.id; }).filter(Boolean);
+  if (!woIds.length) return [];
+
+  const woMap = {};
+  standardWOs.forEach(function(wo) {
+    woMap[String(wo.id)] = wo;
+  });
+
+  const jobs = _filterSalesServiceOnlyItems_(_supabaseSelectByKeyInBatches_(
+    'work_order_jobs',
+    'wo_id,so_number,line_no,product_name,qty,unit,ups,group_ups,category,sales_rep,so_date,artwork_no,client_name,expected_delivery,po_number,job_priority,product_remarks,so_remarks,job_reference,prepress_remark',
+    'wo_id',
+    woIds,
+    'so_number.asc,line_no.asc',
+    40
+  ) || []);
+
+  const rows = [];
+  jobs.forEach(function(job) {
+    const wo = woMap[String(job.wo_id || '')];
+    const qty = Math.max(0, Number(job.qty || 0) || 0);
+    if (!wo || !qty) return;
+    const snap = _safeJsonObject_(wo.snapshot_json);
+    const snapJobs = Array.isArray(snap.jobs) ? snap.jobs : [];
+    const lineNo = String(job.line_no || '').trim();
+    const soNo = String(job.so_number || '').trim();
+    const snapJob = snapJobs.find(function(row) {
+      return String(row && (row.so || row.so_number) || '').trim() === soNo &&
+        String(row && (row.lineNo || row.line_no) || '').trim() === lineNo;
+    }) || {};
+    rows.push(_mapStandardProcessedWORow_({
+      wo_id: wo.id,
+      wo_number: wo.wo_number || '',
+      wo_no: wo.wo_number || '',
+      wo_date: wo.wo_date || '',
+      wo_date_time: _formatWorkOrderDateTimeText_(wo.wo_date || ''),
+      so_number: soNo,
+      line_no: lineNo,
+      product_code: snapJob.productCode || snapJob.product_code || '',
+      product_name: job.product_name || snapJob.productName || snapJob.product_name || '',
+      category: job.category || snapJob.category || '',
+      product_type: snapJob.productType || snapJob.product_type || job.category || '',
+      qty: qty,
+      processed_qty: qty,
+      remaining_qty: 0,
+      unit: job.unit || snapJob.unit || '',
+      sales_rep: job.sales_rep || snapJob.salesRep || snapJob.sales_rep || '',
+      so_date: job.so_date || snapJob.soDate || snapJob.so_date || '',
+      client_name: job.client_name || snapJob.client || snapJob.client_name || '',
+      artwork_no: job.artwork_no || snapJob.artworkNo || snapJob.artwork_no || '',
+      expected_delivery: job.expected_delivery || snapJob.expected_delivery || '',
+      po_number: job.po_number || snapJob.po_number || '',
+      job_priority: job.job_priority || snapJob.job_priority || '',
+      product_remarks: job.product_remarks || snapJob.product_remarks || '',
+      so_remarks: job.so_remarks || snapJob.so_remarks || '',
+      job_reference: job.job_reference || snapJob.job_reference || '',
+      prepress_remark: job.prepress_remark || snapJob.prepress_remark || ''
+    }));
+  });
+
+  rows.sort(function(a, b) {
+    const aTs = Date.parse(String(a.woDate || '')) || 0;
+    const bTs = Date.parse(String(b.woDate || '')) || 0;
+    if (bTs !== aTs) return bTs - aTs;
+    return String(b.woNo || '').localeCompare(String(a.woNo || ''), undefined, { numeric: true, sensitivity: 'base' });
+  });
+  return rows.filter(function(row) {
+    return row.processedQty > 0 && !_isFlexoWorkOrderItem_(row);
+  });
+}
+
+function _listStandardProcessedWorkOrders_(request) {
+  try {
+    return _listStandardProcessedWOsFromView_(request);
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_standard_processed_work_orders')) throw err;
+    Logger.log('Standard processed WO view unavailable; falling back to direct WO tables: ' + err.message);
+    return _listStandardProcessedWOsFromTables_(request);
+  }
+}
+
 function _workOrderQueueRpcMissing_(err) {
   const msg = String((err && err.message) || err || '').toLowerCase();
   return msg.indexOf('workorder_candidates_queue') !== -1 && (
@@ -6288,6 +6503,11 @@ function listSOWithStatus(limit = 200, offset = 0) {
       fastResult = _listSOWithStatusLegacyAll_(request);
       fastResult.hasMore = false;
     }
+    try {
+      fastResult.processed = _listStandardProcessedWorkOrders_(request);
+    } catch (processedErr) {
+      Logger.log('Standard processed WO loader unavailable; keeping candidate-view processed rows: ' + processedErr.message);
+    }
     _putCachedJson_(cacheKey, fastResult, 60);
     return fastResult;
   }
@@ -6308,6 +6528,11 @@ function listSOWithStatus(limit = 200, offset = 0) {
       Logger.log('WO queue legacy loader unavailable, falling back to candidate view: ' + legacyErr.message);
       result = _listSOWithStatusFromCandidateView_(pageLimit, pageOffset);
     }
+  }
+  try {
+    result.processed = _listStandardProcessedWorkOrders_({});
+  } catch (processedErr) {
+    Logger.log('Standard processed WO loader unavailable for legacy request; keeping candidate-view processed rows: ' + processedErr.message);
   }
   _putCachedJson_(cacheKey, result, 60);
   return result;
@@ -9368,6 +9593,7 @@ const MODULES = [
   'PLANNING',
   'REPORTS',
   'COSTING',
+  'NPD',
   'CHECKLIST',
   'MASTERADMIN'
 ];
@@ -9434,6 +9660,89 @@ function adminSaveRolePermissions(payload, token){
   invalidateAffectedRoleUsers();
 
   return { ok:true };
+}
+
+function _adminNormalizeMachineRateKey_(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '');
+}
+
+function adminListMachineHourRates(token) {
+  _requireAdmin_(token);
+
+  return (supabaseSelect('machine_hour_rates', {
+    select: 'id,machine_key,machine_name,mhr,effective_from,effective_to,active,notes,updated_at,updated_by',
+    order: 'active.desc,machine_name.asc,effective_from.desc',
+    limit: 5000
+  }) || []).map(function(row) {
+    return {
+      id: row.id || '',
+      machineKey: row.machine_key || '',
+      machineName: row.machine_name || '',
+      mhr: Number(row.mhr || 0),
+      effectiveFrom: row.effective_from || '',
+      effectiveTo: row.effective_to || '',
+      active: row.active !== false,
+      notes: row.notes || '',
+      updatedAt: row.updated_at || '',
+      updatedBy: row.updated_by || ''
+    };
+  });
+}
+
+function adminSaveMachineHourRate(payload, token) {
+  const admin = _requireAdmin_(token);
+  const p = payload || {};
+  const id = String(p.id || '').trim();
+  const machineName = String(p.machineName || p.machine_name || '').trim();
+  const machineKey = _adminNormalizeMachineRateKey_(p.machineKey || p.machine_key || machineName);
+  const mhr = Number(p.mhr);
+  const effectiveFrom = String(p.effectiveFrom || p.effective_from || '').trim() ||
+    Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd');
+  const effectiveTo = String(p.effectiveTo || p.effective_to || '').trim();
+  const active = p.active === false ? false : true;
+
+  if (!machineName) throw new Error('Machine name is required');
+  if (!machineKey) throw new Error('Machine key is required');
+  if (!isFinite(mhr) || mhr < 0) throw new Error('MHR must be zero or higher');
+  if (effectiveTo && effectiveTo < effectiveFrom) throw new Error('Effective To cannot be before Effective From');
+
+  const row = {
+    machine_key: machineKey,
+    machine_name: machineName,
+    mhr: Math.round(mhr * 100) / 100,
+    effective_from: effectiveFrom,
+    effective_to: effectiveTo || null,
+    active: active,
+    notes: String(p.notes || '').trim() || null,
+    updated_at: new Date().toISOString(),
+    updated_by: String(admin.userId || admin.displayName || 'ADMIN')
+  };
+
+  if (id) {
+    supabaseUpdateMinimal('machine_hour_rates', { id: 'eq.' + id }, row);
+  } else {
+    row.created_at = new Date().toISOString();
+    supabaseInsertMinimal('machine_hour_rates', row);
+  }
+
+  return { ok: true };
+}
+
+function adminDeactivateMachineHourRate(id, token) {
+  const admin = _requireAdmin_(token);
+  const rateId = String(id || '').trim();
+  if (!rateId) throw new Error('MHR row is required');
+
+  supabaseUpdateMinimal('machine_hour_rates', { id: 'eq.' + rateId }, {
+    active: false,
+    updated_at: new Date().toISOString(),
+    updated_by: String(admin.userId || admin.displayName || 'ADMIN')
+  });
+
+  return { ok: true };
 }
 
 /******************************************************
@@ -12327,6 +12636,916 @@ function saveCostingRequest(payload) {
 }
 
 /* =========================
+   NPD / Sampling Workflow
+   ========================= */
+
+const NPD_SCHEMA_SQL_FILE = 'supabase_npd_sampling_module.sql';
+
+function _npdSchemaHint_(err) {
+  const msg = String((err && err.message) || err || '');
+  if (/npd_/i.test(msg) && /(does not exist|could not find|schema cache|column .* does not exist)/i.test(msg)) {
+    throw new Error('NPD sampling schema is missing in Supabase. Apply ' + NPD_SCHEMA_SQL_FILE + ' first.');
+  }
+  throw err;
+}
+
+function _npdRequireAccess_(token, action) {
+  return _requireModuleAccess_(token, 'NPD', action || 'can_view');
+}
+
+function _npdPermissions_(token, user) {
+  const sessionUser = user || getSessionUser(token);
+  const isAdmin = String(sessionUser && sessionUser.role || '').toUpperCase() === 'ADMIN';
+  function allowed(action) {
+    return isAdmin || checkPermission(token, 'NPD', action);
+  }
+  return {
+    canView: allowed('can_view'),
+    canCreate: allowed('can_create'),
+    canEdit: allowed('can_edit'),
+    canDelete: allowed('can_delete'),
+    canApprove: allowed('can_approve_business') || allowed('can_approve_accounts')
+  };
+}
+
+function _npdText_(value) {
+  return String(value == null ? '' : value).trim();
+}
+
+function _npdNum_(value, fallback) {
+  const n = Number(value);
+  return isFinite(n) ? n : (fallback || 0);
+}
+
+function _npdBool_(value) {
+  if (value === true || value === false) return value;
+  const text = _npdText_(value).toLowerCase();
+  return ['true', 'yes', 'y', '1', 'applicable'].indexOf(text) !== -1;
+}
+
+function _npdIsoNow_() {
+  return new Date().toISOString();
+}
+
+function _npdTodayYmd_() {
+  return Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd');
+}
+
+function _npdRpcScalar_(value) {
+  if (Array.isArray(value)) {
+    if (!value.length) return '';
+    const first = value[0];
+    if (first && typeof first === 'object') {
+      const keys = Object.keys(first);
+      return keys.length ? first[keys[0]] : '';
+    }
+    return first;
+  }
+  return value;
+}
+
+function _npdGenerateSamplingId_() {
+  return _npdText_(_npdRpcScalar_(supabaseRpc('generate_npd_sampling_id', {
+    p_prefix: 'NPD-SMP',
+    p_request_date: _npdTodayYmd_()
+  })));
+}
+
+function _npdGenerateSampleWoNo_() {
+  return _npdText_(_npdRpcScalar_(supabaseRpc('generate_npd_sample_wo_no', {
+    p_prefix: 'SMP-WO',
+    p_request_date: _npdTodayYmd_()
+  })));
+}
+
+function _npdNormalizeClient_(payload) {
+  const src = payload || {};
+  const clientId = _npdText_(src.clientId || src.client_id);
+  const clientCode = _npdText_(src.clientCode || src.client_code);
+  let client = null;
+
+  if (clientId) {
+    client = (supabaseSelect('clients', {
+      select: 'id,client_code,client_name',
+      filters: { id: 'eq.' + clientId },
+      limit: 1
+    }) || [])[0] || null;
+  } else if (clientCode) {
+    client = (supabaseSelect('clients', {
+      select: 'id,client_code,client_name',
+      filters: { client_code: 'eq.' + clientCode },
+      limit: 1
+    }) || [])[0] || null;
+  }
+
+  const manualName = _npdText_(src.manualClientName || src.manual_client_name);
+  const clientName = client ? _npdText_(client.client_name) : (_npdText_(src.clientName || src.client_name) || manualName);
+  if (!clientName) throw new Error('Client name is required.');
+
+  return {
+    client_id: client ? client.id : null,
+    client_code: client ? client.client_code : '',
+    client_name: clientName,
+    manual_client_name: client ? '' : (manualName || clientName)
+  };
+}
+
+function _npdValidatePaperSpecs_(ply, rows) {
+  const count = Number(ply || 0);
+  const paperRows = Array.isArray(rows) ? rows : [];
+  if (paperRows.length !== count) {
+    throw new Error('Paper specs must have exactly ' + count + ' row(s) for selected ply.');
+  }
+  return paperRows.map(function(row, index) {
+    const quality = _npdText_(row.quality);
+    const gsm = _npdNum_(row.gsm, 0);
+    if (!gsm || gsm <= 0) throw new Error('Paper spec line ' + (index + 1) + ': GSM is required.');
+    if (!quality) throw new Error('Paper spec line ' + (index + 1) + ': Quality is required.');
+    return {
+      line_no: index + 1,
+      gsm: gsm,
+      quality: quality,
+      flute: _npdText_(row.flute) || null,
+      remarks: _npdText_(row.remarks) || null
+    };
+  });
+}
+
+function _npdNormalizeVersionPayload_(payload) {
+  const src = payload || {};
+  const ply = Number(src.ply || 0);
+  if ([1, 3, 5, 7, 9].indexOf(ply) === -1) throw new Error('Ply must be 1, 3, 5, 7, or 9.');
+
+  const sampleRequired = _npdBool_(src.sampleRequired != null ? src.sampleRequired : src.sample_required);
+  const sampleQty = Math.max(0, Math.round(_npdNum_(src.sampleQty != null ? src.sampleQty : src.sample_qty, 0)));
+  if (sampleRequired && sampleQty <= 0) throw new Error('Number of samples is required when sample is required.');
+
+  const printingColors = Math.max(0, Math.round(_npdNum_(src.printingColors != null ? src.printingColors : src.printing_colors, 0)));
+  const printingType = _npdText_(src.printingType || src.printing_type);
+  if (printingColors > 0 && !printingType) throw new Error('Printing type is required when printing colors are entered.');
+
+  const laminationApplicable = _npdBool_(src.laminationApplicable != null ? src.laminationApplicable : src.lamination_applicable);
+  const coatingApplicable = _npdBool_(src.coatingApplicable != null ? src.coatingApplicable : src.coating_applicable);
+  const embossingApplicable = _npdBool_(src.embossingApplicable != null ? src.embossingApplicable : src.embossing_applicable);
+  const foilingApplicable = _npdBool_(src.foilingApplicable != null ? src.foilingApplicable : src.foiling_applicable);
+
+  const row = {
+    product_dimension_uom: _npdText_(src.productDimensionUom || src.product_dimension_uom || 'mm') || 'mm',
+    product_length: _npdNum_(src.productLength != null ? src.productLength : src.product_length, 0),
+    product_width: _npdNum_(src.productWidth != null ? src.productWidth : src.product_width, 0),
+    product_height: _npdNum_(src.productHeight != null ? src.productHeight : src.product_height, 0),
+    sheet_size_uom: 'inch',
+    sheet_length: _npdNum_(src.sheetLength != null ? src.sheetLength : src.sheet_length, 0),
+    sheet_width: _npdNum_(src.sheetWidth != null ? src.sheetWidth : src.sheet_width, 0),
+    ups: Math.round(_npdNum_(src.ups, 0)),
+    ply: ply,
+    printing_colors: printingColors,
+    printing_type: printingType || null,
+    lamination_applicable: laminationApplicable,
+    lamination_type: laminationApplicable ? _npdText_(src.laminationType || src.lamination_type) : null,
+    coating_applicable: coatingApplicable,
+    coating_type: coatingApplicable ? _npdText_(src.coatingType || src.coating_type) : null,
+    embossing_applicable: embossingApplicable,
+    embossing_block_uom: embossingApplicable ? _npdText_(src.embossingBlockUom || src.embossing_block_uom || 'mm') : null,
+    embossing_length: embossingApplicable ? _npdNum_(src.embossingLength != null ? src.embossingLength : src.embossing_length, 0) : null,
+    embossing_width: embossingApplicable ? _npdNum_(src.embossingWidth != null ? src.embossingWidth : src.embossing_width, 0) : null,
+    foiling_applicable: foilingApplicable,
+    foiling_block_uom: foilingApplicable ? _npdText_(src.foilingBlockUom || src.foiling_block_uom || 'mm') : null,
+    foiling_length: foilingApplicable ? _npdNum_(src.foilingLength != null ? src.foilingLength : src.foiling_length, 0) : null,
+    foiling_width: foilingApplicable ? _npdNum_(src.foilingWidth != null ? src.foilingWidth : src.foiling_width, 0) : null,
+    job_type: _npdText_(src.jobType || src.job_type),
+    binding_type: _npdText_(src.bindingType || src.binding_type),
+    sample_required: sampleRequired,
+    sample_qty: sampleQty
+  };
+
+  if (!row.product_length || !row.product_width || !row.product_height) throw new Error('Product dimensions are required.');
+  if (!row.sheet_length || !row.sheet_width) throw new Error('Sheet size is required.');
+  if (!row.ups || row.ups <= 0) throw new Error('UPS is required.');
+  if (!row.job_type) throw new Error('Job type is required.');
+  if (!row.binding_type) throw new Error('Stitching or Pasting is required.');
+  if (row.lamination_applicable && !row.lamination_type) throw new Error('Lamination type is required.');
+  if (row.coating_applicable && !row.coating_type) throw new Error('Coating type is required.');
+  if (row.embossing_applicable && (!row.embossing_length || !row.embossing_width)) throw new Error('Embossing block size is required.');
+  if (row.foiling_applicable && (!row.foiling_length || !row.foiling_width)) throw new Error('Foiling block size is required.');
+
+  row.spec_json = {
+    productDimensionUom: row.product_dimension_uom,
+    product: { length: row.product_length, width: row.product_width, height: row.product_height },
+    sheet: { uom: row.sheet_size_uom, length: row.sheet_length, width: row.sheet_width, ups: row.ups },
+    ply: row.ply,
+    printing: { colors: row.printing_colors, type: row.printing_type || '' },
+    lamination: { applicable: row.lamination_applicable, type: row.lamination_type || '' },
+    coating: { applicable: row.coating_applicable, type: row.coating_type || '' },
+    embossing: { applicable: row.embossing_applicable, uom: row.embossing_block_uom || '', length: row.embossing_length || 0, width: row.embossing_width || 0 },
+    foiling: { applicable: row.foiling_applicable, uom: row.foiling_block_uom || '', length: row.foiling_length || 0, width: row.foiling_width || 0 },
+    jobType: row.job_type,
+    bindingType: row.binding_type,
+    sampleRequired: row.sample_required,
+    sampleQty: row.sample_qty
+  };
+
+  return row;
+}
+
+function _npdInsertStatusHistory_(requestId, versionId, fromStatus, toStatus, action, remarks, snapshot, actor) {
+  supabaseInsertMinimal('npd_status_history', {
+    request_id: requestId,
+    version_id: versionId || null,
+    from_status: fromStatus || null,
+    to_status: toStatus || null,
+    action: action,
+    remarks: remarks || '',
+    snapshot_json: snapshot || {},
+    actor_user_id: actor || ''
+  });
+}
+
+function _npdMapRegisterRow_(row) {
+  return {
+    id: row.id,
+    samplingId: row.sampling_id || '',
+    status: row.status || '',
+    currentVersionNo: Number(row.current_version_no || 0),
+    currentVersionId: row.current_version_id || '',
+    clientId: row.client_id || '',
+    clientCode: row.client_code || '',
+    clientName: row.client_name || row.manual_client_name || '',
+    manualClientName: row.manual_client_name || '',
+    jobRef: row.job_ref || '',
+    salesUserId: row.sales_user_id || '',
+    sampleRequired: row.sample_required === true,
+    sampleQty: Number(row.sample_qty || 0),
+    latestCustomerResult: row.latest_customer_result || row.customer_result || '',
+    ply: Number(row.ply || 0),
+    productDimensionUom: row.product_dimension_uom || 'mm',
+    productLength: Number(row.product_length || 0),
+    productWidth: Number(row.product_width || 0),
+    productHeight: Number(row.product_height || 0),
+    sheetSizeUom: row.sheet_size_uom || 'inch',
+    sheetLength: Number(row.sheet_length || 0),
+    sheetWidth: Number(row.sheet_width || 0),
+    ups: Number(row.ups || 0),
+    printingColors: Number(row.printing_colors || 0),
+    printingType: row.printing_type || '',
+    jobType: row.job_type || '',
+    bindingType: row.binding_type || '',
+    costingNo: row.costing_no || '',
+    unitRate: Number(row.unit_rate || 0),
+    totalEstimatedValue: Number(row.total_estimated_value || 0),
+    sampleWoNo: row.sample_wo_no || '',
+    sampleWoStatus: row.sample_wo_status || '',
+    verificationResult: row.verification_result || '',
+    customerResult: row.customer_result || '',
+    createdAt: row.created_at || '',
+    createdBy: row.created_by || '',
+    updatedAt: row.updated_at || '',
+    updatedBy: row.updated_by || ''
+  };
+}
+
+function _npdListFromView_(viewName, filters, token) {
+  _npdRequireAccess_(token, 'can_view');
+  const req = filters || {};
+  const query = {
+    select: '*',
+    order: 'updated_at.desc',
+    limit: Math.min(500, Math.max(1, Number(req.limit || 200) || 200))
+  };
+  query.filters = {};
+  if (req.status) query.filters.status = 'eq.' + _npdText_(req.status);
+  if (req.samplingId) query.filters.sampling_id = 'ilike.%' + _npdText_(req.samplingId) + '%';
+  if (req.clientName) query.filters.client_name = 'ilike.%' + _npdText_(req.clientName) + '%';
+  if (req.jobRef) query.filters.job_ref = 'ilike.%' + _npdText_(req.jobRef) + '%';
+  if (!Object.keys(query.filters).length) delete query.filters;
+
+  try {
+    return (_supabaseSelectAll_(viewName, query, 1000, query.limit) || []).map(_npdMapRegisterRow_);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdBootstrap(token) {
+  const user = _npdRequireAccess_(token, 'can_view');
+  try {
+    const clients = (_clientSelectRows_({
+      filters: { active: 'eq.true' },
+      order: 'client_name.asc'
+    }) || []).map(function(row) {
+      return {
+        id: row.id || '',
+        clientCode: row.client_code || '',
+        clientName: row.client_name || ''
+      };
+    });
+    return {
+      user: user,
+      permissions: _npdPermissions_(token, user),
+      clients: clients,
+      requests: npdListRequests({ limit: 200 }, token),
+      costingQueue: npdListCostingQueue({ limit: 200 }, token),
+      sampleQueue: npdListSampleQueue({ limit: 200 }, token),
+      options: {
+        plies: [1, 3, 5, 7, 9],
+        productDimensionUoms: ['mm', 'cm', 'inch'],
+        sheetSizeUoms: ['inch'],
+        printingTypes: ['Offset', 'RS4'],
+        laminationTypes: ['Gloss', 'BOPP', 'Thermal', 'Matt', 'Metpet'],
+        coatingTypes: ['Aquas', 'Drip off', 'UV'],
+        jobTypes: ['New', 'Repeat', 'Repeat with Printing Change'],
+        paperQualities: [
+          'Greyback Duplex',
+          'Whiteback Duplex',
+          'Semi Kraft Paper',
+          'Virgin Kraft Paper',
+          'FBB Board',
+          'SBS Board',
+          'Taat Paper',
+          'Food Grade Kraft Brown',
+          'Food Grade White Paper',
+          'ITC Shaphire'
+        ],
+        flutes: ['E', 'B'],
+        bindingTypes: ['Stitching', 'Pasting'],
+        verificationResults: ['PASS', 'PASS_WITH_DEVIATION', 'FAIL'],
+        customerResults: ['APPROVED', 'REJECTED', 'RESUBMISSION_REQUIRED']
+      }
+    };
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdListRequests(filters, token) {
+  return _npdListFromView_('v_npd_request_register', filters || {}, token);
+}
+
+function npdListCostingQueue(filters, token) {
+  return _npdListFromView_('v_npd_costing_queue', filters || {}, token);
+}
+
+function npdListSampleQueue(filters, token) {
+  return _npdListFromView_('v_npd_sample_queue', filters || {}, token);
+}
+
+function npdCreateRequest(payload, token) {
+  const user = _npdRequireAccess_(token, 'can_create');
+  try {
+    const src = payload || {};
+    const client = _npdNormalizeClient_(src);
+    const version = _npdNormalizeVersionPayload_(src);
+    const paperRows = _npdValidatePaperSpecs_(version.ply, src.paperSpecs || src.paper_specs || []);
+    const jobRef = _npdText_(src.jobRef || src.job_ref);
+    if (!jobRef) throw new Error('Job reference is required.');
+
+    const samplingId = _npdGenerateSamplingId_();
+    const now = _npdIsoNow_();
+    const initialStatus = src.asDraft === true ? 'DRAFT' : 'SUBMITTED_BY_SALES';
+    const requestInsert = supabaseInsert('npd_requests', Object.assign({}, client, {
+      sampling_id: samplingId,
+      current_version_no: 1,
+      status: initialStatus,
+      job_ref: jobRef,
+      sales_user_id: user.userId || '',
+      sample_required: version.sample_required,
+      sample_qty: version.sample_qty,
+      created_by: user.userId || '',
+      updated_by: user.userId || ''
+    })) || [];
+    const requestRow = requestInsert[0];
+    if (!requestRow || !requestRow.id) throw new Error('Failed to create NPD request.');
+
+    version.request_id = requestRow.id;
+    version.version_no = 1;
+    version.version_status = initialStatus === 'DRAFT' ? 'DRAFT' : 'SUBMITTED';
+    version.created_by = user.userId || '';
+    version.updated_by = user.userId || '';
+    const versionInsert = supabaseInsert('npd_request_versions', version) || [];
+    const versionRow = versionInsert[0];
+    if (!versionRow || !versionRow.id) throw new Error('Failed to create NPD version.');
+
+    supabaseBulkInsertMinimal('npd_paper_specs', paperRows.map(function(row) {
+      return Object.assign({}, row, { version_id: versionRow.id });
+    }));
+
+    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + requestRow.id }, {
+      current_version_id: versionRow.id,
+      updated_by: user.userId || ''
+    });
+
+    _npdInsertStatusHistory_(requestRow.id, versionRow.id, null, initialStatus, 'CREATE_REQUEST', '', {
+      samplingId: samplingId,
+      versionNo: 1
+    }, user.userId || '');
+
+    return npdGetRequest(requestRow.id, token);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdGetRequest(requestIdOrSamplingId, token) {
+  _npdRequireAccess_(token, 'can_view');
+  try {
+    const key = _npdText_(requestIdOrSamplingId);
+    if (!key) throw new Error('NPD request id is required.');
+    const filterKey = key.indexOf('NPD-') === 0 ? 'sampling_id' : 'id';
+    const request = (supabaseSelect('npd_requests', {
+      select: '*',
+      filters: Object.assign({}, filterKey === 'sampling_id' ? { sampling_id: 'eq.' + key } : { id: 'eq.' + key }),
+      limit: 1
+    }) || [])[0];
+    if (!request) throw new Error('NPD request not found.');
+
+    const versions = supabaseSelect('npd_request_versions', {
+      select: '*',
+      filters: { request_id: 'eq.' + request.id },
+      order: 'version_no.desc'
+    }) || [];
+    const versionIds = versions.map(function(row) { return row.id; }).filter(Boolean);
+    const paperSpecs = versionIds.length ? _supabaseSelectByKeyInBatches_('npd_paper_specs', '*', 'version_id', versionIds, 'line_no.asc', 40) || [] : [];
+    const costings = versionIds.length ? _supabaseSelectByKeyInBatches_('npd_costing_evaluations', '*', 'version_id', versionIds, 'created_at.desc', 40) || [] : [];
+    const sampleWorkOrders = versionIds.length ? _supabaseSelectByKeyInBatches_('npd_sample_work_orders', '*', 'version_id', versionIds, 'created_at.desc', 40) || [] : [];
+    const verifications = versionIds.length ? _supabaseSelectByKeyInBatches_('npd_sample_verifications', '*', 'version_id', versionIds, 'verified_at.desc', 40) || [] : [];
+    const customerSubmissions = versionIds.length ? _supabaseSelectByKeyInBatches_('npd_customer_submissions', '*', 'version_id', versionIds, 'submitted_at.desc', 40) || [] : [];
+    const history = supabaseSelect('npd_status_history', {
+      select: '*',
+      filters: { request_id: 'eq.' + request.id },
+      order: 'created_at.desc'
+    }) || [];
+
+    return {
+      request: _npdMapRequestRow_(request),
+      versions: versions.map(function(version) {
+        const id = String(version.id || '');
+        return {
+          raw: version,
+          id: id,
+          requestId: version.request_id || '',
+          versionNo: Number(version.version_no || 0),
+          previousVersionId: version.previous_version_id || '',
+          versionStatus: version.version_status || '',
+          productDimensionUom: version.product_dimension_uom || 'mm',
+          productLength: Number(version.product_length || 0),
+          productWidth: Number(version.product_width || 0),
+          productHeight: Number(version.product_height || 0),
+          sheetSizeUom: version.sheet_size_uom || 'inch',
+          sheetLength: Number(version.sheet_length || 0),
+          sheetWidth: Number(version.sheet_width || 0),
+          ups: Number(version.ups || 0),
+          ply: Number(version.ply || 0),
+          printingColors: Number(version.printing_colors || 0),
+          printingType: version.printing_type || '',
+          laminationApplicable: version.lamination_applicable === true,
+          laminationType: version.lamination_type || '',
+          coatingApplicable: version.coating_applicable === true,
+          coatingType: version.coating_type || '',
+          embossingApplicable: version.embossing_applicable === true,
+          embossingBlockUom: version.embossing_block_uom || '',
+          embossingLength: Number(version.embossing_length || 0),
+          embossingWidth: Number(version.embossing_width || 0),
+          foilingApplicable: version.foiling_applicable === true,
+          foilingBlockUom: version.foiling_block_uom || '',
+          foilingLength: Number(version.foiling_length || 0),
+          foilingWidth: Number(version.foiling_width || 0),
+          jobType: version.job_type || '',
+          bindingType: version.binding_type || '',
+          sampleRequired: version.sample_required === true,
+          sampleQty: Number(version.sample_qty || 0),
+          spec: version.spec_json || {},
+          paperSpecs: paperSpecs.filter(function(row) { return String(row.version_id) === id; }),
+          costings: costings.filter(function(row) { return String(row.version_id) === id; }),
+          sampleWorkOrders: sampleWorkOrders.filter(function(row) { return String(row.version_id) === id; }),
+          verifications: verifications.filter(function(row) { return String(row.version_id) === id; }),
+          customerSubmissions: customerSubmissions.filter(function(row) { return String(row.version_id) === id; }),
+          createdAt: version.created_at || '',
+          createdBy: version.created_by || ''
+        };
+      }),
+      history: history
+    };
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function _npdMapRequestRow_(row) {
+  return {
+    id: row.id || '',
+    samplingId: row.sampling_id || '',
+    currentVersionNo: Number(row.current_version_no || 0),
+    currentVersionId: row.current_version_id || '',
+    status: row.status || '',
+    clientId: row.client_id || '',
+    clientCode: row.client_code || '',
+    clientName: row.client_name || '',
+    manualClientName: row.manual_client_name || '',
+    jobRef: row.job_ref || '',
+    salesUserId: row.sales_user_id || '',
+    sampleRequired: row.sample_required === true,
+    sampleQty: Number(row.sample_qty || 0),
+    latestCustomerResult: row.latest_customer_result || '',
+    createdAt: row.created_at || '',
+    createdBy: row.created_by || '',
+    updatedAt: row.updated_at || '',
+    updatedBy: row.updated_by || ''
+  };
+}
+
+function npdSubmitCosting(versionId, payload, token) {
+  const user = _npdRequireAccess_(token, 'can_edit');
+  try {
+    const version = _npdGetVersion_(versionId);
+    const request = _npdGetRequestById_(version.request_id);
+    const src = payload || {};
+    const rawMaterialValue = _npdNum_(src.rawMaterialValue || src.raw_material_value, 0);
+    const processValue = _npdNum_(src.processValue || src.process_value, 0);
+    const toolingValue = _npdNum_(src.toolingValue || src.tooling_value, 0);
+    const sampleCost = _npdNum_(src.sampleCost || src.sample_cost, 0);
+    const unitRate = _npdNum_(src.unitRate || src.unit_rate, 0);
+    const totalEstimatedValue = _npdNum_(src.totalEstimatedValue || src.total_estimated_value, rawMaterialValue + processValue + toolingValue + sampleCost);
+    const now = _npdIsoNow_();
+    supabaseInsertMinimal('npd_costing_evaluations', {
+      request_id: request.id,
+      version_id: version.id,
+      status: 'SUBMITTED',
+      costing_no: _npdText_(src.costingNo || src.costing_no) || null,
+      raw_material_value: rawMaterialValue,
+      process_value: processValue,
+      tooling_value: toolingValue,
+      sample_cost: sampleCost,
+      unit_rate: unitRate,
+      total_estimated_value: totalEstimatedValue,
+      remarks: _npdText_(src.remarks),
+      calc_json: src.calcJson || src.calc_json || {},
+      submitted_at: now,
+      submitted_by: user.userId || '',
+      created_by: user.userId || '',
+      updated_by: user.userId || ''
+    });
+    const nextStatus = version.sample_required ? 'SAMPLE_PLANNING' : 'CLOSED_NO_SAMPLE';
+    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + version.id }, {
+      version_status: 'COSTED',
+      updated_by: user.userId || ''
+    });
+    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+      status: nextStatus,
+      closed_at: nextStatus === 'CLOSED_NO_SAMPLE' ? now : null,
+      closed_by: nextStatus === 'CLOSED_NO_SAMPLE' ? (user.userId || '') : null,
+      updated_by: user.userId || ''
+    });
+    _npdInsertStatusHistory_(request.id, version.id, request.status, nextStatus, 'SUBMIT_COSTING', _npdText_(src.remarks), {
+      unitRate: unitRate,
+      totalEstimatedValue: totalEstimatedValue
+    }, user.userId || '');
+    return npdGetRequest(request.id, token);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdCreateSampleWorkOrder(versionId, payload, token) {
+  const user = _npdRequireAccess_(token, 'can_edit');
+  try {
+    const version = _npdGetVersion_(versionId);
+    const request = _npdGetRequestById_(version.request_id);
+    if (version.sample_required !== true) throw new Error('Sample is not required for this version.');
+    const sampleWoNo = _npdGenerateSampleWoNo_();
+    const plan = payload || {};
+    const plannedQty = Math.max(0, Math.round(_npdNum_(plan.plannedSampleQty || plan.planned_sample_qty || version.sample_qty, 0)));
+    supabaseInsertMinimal('npd_sample_work_orders', {
+      request_id: request.id,
+      version_id: version.id,
+      sample_wo_no: sampleWoNo,
+      status: 'DRAFT',
+      planned_sample_qty: plannedQty,
+      process_plan_json: plan.processPlanJson || plan.process_plan_json || plan,
+      created_by: user.userId || '',
+      updated_by: user.userId || ''
+    });
+    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+      status: 'SAMPLE_PLANNING',
+      updated_by: user.userId || ''
+    });
+    _npdInsertStatusHistory_(request.id, version.id, request.status, 'SAMPLE_PLANNING', 'CREATE_SAMPLE_WO', sampleWoNo, {
+      sampleWoNo: sampleWoNo,
+      plannedQty: plannedQty
+    }, user.userId || '');
+    return npdGetRequest(request.id, token);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdReleaseSampleWorkOrder(sampleWoId, token) {
+  const user = _npdRequireAccess_(token, 'can_edit');
+  try {
+    const wo = _npdGetSampleWorkOrder_(sampleWoId);
+    const request = _npdGetRequestById_(wo.request_id);
+    const now = _npdIsoNow_();
+    supabaseUpdateMinimal('npd_sample_work_orders', { id: 'eq.' + wo.id }, {
+      status: 'RELEASED',
+      released_at: now,
+      released_by: user.userId || '',
+      updated_by: user.userId || ''
+    });
+    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + wo.version_id }, {
+      version_status: 'SAMPLE_RELEASED',
+      updated_by: user.userId || ''
+    });
+    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+      status: 'SAMPLE_WO_RELEASED',
+      updated_by: user.userId || ''
+    });
+    _npdInsertStatusHistory_(request.id, wo.version_id, request.status, 'SAMPLE_WO_RELEASED', 'RELEASE_SAMPLE_WO', wo.sample_wo_no, {
+      sampleWoNo: wo.sample_wo_no
+    }, user.userId || '');
+    return npdGetRequest(request.id, token);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdSaveSampleProduction(sampleWoId, payload, token) {
+  const user = _npdRequireAccess_(token, 'can_edit');
+  try {
+    const wo = _npdGetSampleWorkOrder_(sampleWoId);
+    const request = _npdGetRequestById_(wo.request_id);
+    const src = payload || {};
+    supabaseUpdateMinimal('npd_sample_work_orders', { id: 'eq.' + wo.id }, {
+      status: 'PRODUCED',
+      produced_qty: Math.max(0, Math.round(_npdNum_(src.producedQty || src.produced_qty, 0))),
+      accepted_qty: Math.max(0, Math.round(_npdNum_(src.acceptedQty || src.accepted_qty, 0))),
+      rejected_qty: Math.max(0, Math.round(_npdNum_(src.rejectedQty || src.rejected_qty, 0))),
+      updated_by: user.userId || ''
+    });
+    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + wo.version_id }, {
+      version_status: 'SAMPLE_PRODUCED',
+      updated_by: user.userId || ''
+    });
+    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+      status: 'SAMPLE_PRODUCED',
+      updated_by: user.userId || ''
+    });
+    _npdInsertStatusHistory_(request.id, wo.version_id, request.status, 'SAMPLE_PRODUCED', 'SAVE_SAMPLE_PRODUCTION', _npdText_(src.remarks), src, user.userId || '');
+    return npdGetRequest(request.id, token);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdSaveSampleVerification(sampleWoId, payload, token) {
+  const user = _npdRequireAccess_(token, 'can_edit');
+  try {
+    const wo = _npdGetSampleWorkOrder_(sampleWoId);
+    const request = _npdGetRequestById_(wo.request_id);
+    const version = _npdGetVersion_(wo.version_id);
+    const src = payload || {};
+    const result = _npdText_(src.result).toUpperCase();
+    if (['PASS', 'PASS_WITH_DEVIATION', 'FAIL'].indexOf(result) === -1) throw new Error('Verification result is required.');
+    supabaseInsertMinimal('npd_sample_verifications', {
+      request_id: request.id,
+      version_id: version.id,
+      sample_wo_id: wo.id,
+      required_specs_json: version.spec_json || {},
+      actual_specs_json: src.actualSpecsJson || src.actual_specs_json || src,
+      result: result,
+      checked_qty: Math.max(0, Math.round(_npdNum_(src.checkedQty || src.checked_qty, 0))),
+      accepted_qty: Math.max(0, Math.round(_npdNum_(src.acceptedQty || src.accepted_qty, 0))),
+      rejected_qty: Math.max(0, Math.round(_npdNum_(src.rejectedQty || src.rejected_qty, 0))),
+      remarks: _npdText_(src.remarks),
+      verified_by: user.userId || '',
+      created_by: user.userId || ''
+    });
+    if (result !== 'FAIL') {
+      supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + version.id }, {
+        version_status: 'VERIFIED',
+        updated_by: user.userId || ''
+      });
+      supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+        status: 'SAMPLE_VERIFIED',
+        updated_by: user.userId || ''
+      });
+    }
+    _npdInsertStatusHistory_(request.id, version.id, request.status, result === 'FAIL' ? request.status : 'SAMPLE_VERIFIED', 'SAVE_SAMPLE_VERIFICATION', _npdText_(src.remarks), {
+      result: result
+    }, user.userId || '');
+    return npdGetRequest(request.id, token);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdSubmitSampleToCustomer(versionId, payload, token) {
+  const user = _npdRequireAccess_(token, 'can_edit');
+  try {
+    const version = _npdGetVersion_(versionId);
+    const request = _npdGetRequestById_(version.request_id);
+    const src = payload || {};
+    supabaseInsertMinimal('npd_customer_submissions', {
+      request_id: request.id,
+      version_id: version.id,
+      submitted_qty: Math.max(0, Math.round(_npdNum_(src.submittedQty || src.submitted_qty || version.sample_qty, 0))),
+      submitted_at: src.submittedAt || src.submitted_at || _npdIsoNow_(),
+      submitted_by: user.userId || '',
+      customer_result: 'PENDING',
+      feedback: _npdText_(src.remarks || src.feedback),
+      resubmission_required: false,
+      created_by: user.userId || ''
+    });
+    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+      status: 'SUBMITTED_TO_CUSTOMER',
+      latest_customer_result: 'PENDING',
+      updated_by: user.userId || ''
+    });
+    _npdInsertStatusHistory_(request.id, version.id, request.status, 'SUBMITTED_TO_CUSTOMER', 'SUBMIT_SAMPLE_TO_CUSTOMER', _npdText_(src.remarks || src.feedback), {
+      submittedQty: Math.max(0, Math.round(_npdNum_(src.submittedQty || src.submitted_qty || version.sample_qty, 0)))
+    }, user.userId || '');
+    return npdGetRequest(request.id, token);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdRecordCustomerDecision(versionId, payload, token) {
+  const user = _npdRequireAccess_(token, 'can_edit');
+  try {
+    const version = _npdGetVersion_(versionId);
+    const request = _npdGetRequestById_(version.request_id);
+    const src = payload || {};
+    const result = _npdText_(src.customerResult || src.customer_result).toUpperCase();
+    if (['APPROVED', 'REJECTED', 'RESUBMISSION_REQUIRED'].indexOf(result) === -1) {
+      throw new Error('Customer result is required.');
+    }
+    const feedback = _npdText_(src.feedback);
+    if ((result === 'REJECTED' || result === 'RESUBMISSION_REQUIRED') && !feedback) {
+      throw new Error('Customer feedback is required for rejection or resubmission.');
+    }
+    const nextStatus = result === 'APPROVED' ? 'CUSTOMER_APPROVED' : (result === 'REJECTED' ? 'CUSTOMER_REJECTED' : 'RESUBMISSION_REQUIRED');
+    const versionStatus = result === 'APPROVED' ? 'CUSTOMER_APPROVED' : 'CUSTOMER_REJECTED';
+    supabaseInsertMinimal('npd_customer_submissions', {
+      request_id: request.id,
+      version_id: version.id,
+      submitted_qty: Math.max(0, Math.round(_npdNum_(src.submittedQty || src.submitted_qty || version.sample_qty, 0))),
+      submitted_at: src.submittedAt || src.submitted_at || _npdIsoNow_(),
+      submitted_by: user.userId || '',
+      customer_result: result,
+      feedback: feedback,
+      resubmission_required: result !== 'APPROVED',
+      created_by: user.userId || ''
+    });
+    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + version.id }, {
+      version_status: versionStatus,
+      updated_by: user.userId || ''
+    });
+    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+      status: nextStatus,
+      latest_customer_result: result,
+      closed_at: result === 'APPROVED' ? _npdIsoNow_() : null,
+      closed_by: result === 'APPROVED' ? (user.userId || '') : null,
+      updated_by: user.userId || ''
+    });
+    _npdInsertStatusHistory_(request.id, version.id, request.status, nextStatus, 'RECORD_CUSTOMER_DECISION', feedback, {
+      customerResult: result
+    }, user.userId || '');
+    return npdGetRequest(request.id, token);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function npdCreateNextVersion(requestId, payload, token) {
+  const user = _npdRequireAccess_(token, 'can_create');
+  try {
+    const request = _npdGetRequestById_(requestId);
+    const current = _npdGetVersion_(request.current_version_id);
+    const currentFlat = _npdFlatPayloadFromVersionRow_(current);
+    currentFlat.paperSpecs = _npdGetPaperSpecsForVersion_(current.id);
+    const src = Object.assign({}, currentFlat, payload || {});
+    const version = _npdNormalizeVersionPayload_(src);
+    const paperRows = _npdValidatePaperSpecs_(version.ply, src.paperSpecs || src.paper_specs || _npdGetPaperSpecsForVersion_(current.id));
+    const nextVersionNo = Number(request.current_version_no || current.version_no || 1) + 1;
+
+    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + current.id }, {
+      version_status: 'SUPERSEDED',
+      updated_by: user.userId || ''
+    });
+
+    version.request_id = request.id;
+    version.version_no = nextVersionNo;
+    version.previous_version_id = current.id;
+    version.version_status = 'SUBMITTED';
+    version.created_by = user.userId || '';
+    version.updated_by = user.userId || '';
+    const inserted = supabaseInsert('npd_request_versions', version) || [];
+    const newVersion = inserted[0];
+    if (!newVersion || !newVersion.id) throw new Error('Failed to create next NPD version.');
+    supabaseBulkInsertMinimal('npd_paper_specs', paperRows.map(function(row) {
+      return Object.assign({}, row, { version_id: newVersion.id });
+    }));
+
+    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+      current_version_no: nextVersionNo,
+      current_version_id: newVersion.id,
+      status: 'SUBMITTED_BY_SALES',
+      sample_required: version.sample_required,
+      sample_qty: version.sample_qty,
+      updated_by: user.userId || ''
+    });
+    _npdInsertStatusHistory_(request.id, newVersion.id, request.status, 'SUBMITTED_BY_SALES', 'CREATE_NEXT_VERSION', _npdText_(src.feedback), {
+      previousVersionId: current.id,
+      versionNo: nextVersionNo
+    }, user.userId || '');
+    return npdGetRequest(request.id, token);
+  } catch (err) {
+    _npdSchemaHint_(err);
+  }
+}
+
+function _npdFlatPayloadFromVersionRow_(version) {
+  return {
+    productDimensionUom: version.product_dimension_uom || 'mm',
+    productLength: version.product_length,
+    productWidth: version.product_width,
+    productHeight: version.product_height,
+    sheetLength: version.sheet_length,
+    sheetWidth: version.sheet_width,
+    ups: version.ups,
+    ply: version.ply,
+    printingColors: version.printing_colors,
+    printingType: version.printing_type || '',
+    laminationApplicable: version.lamination_applicable === true,
+    laminationType: version.lamination_type || '',
+    coatingApplicable: version.coating_applicable === true,
+    coatingType: version.coating_type || '',
+    embossingApplicable: version.embossing_applicable === true,
+    embossingBlockUom: version.embossing_block_uom || 'mm',
+    embossingLength: version.embossing_length || '',
+    embossingWidth: version.embossing_width || '',
+    foilingApplicable: version.foiling_applicable === true,
+    foilingBlockUom: version.foiling_block_uom || 'mm',
+    foilingLength: version.foiling_length || '',
+    foilingWidth: version.foiling_width || '',
+    jobType: version.job_type || '',
+    bindingType: version.binding_type || '',
+    sampleRequired: version.sample_required === true,
+    sampleQty: version.sample_qty || 0
+  };
+}
+
+function _npdGetRequestById_(requestId) {
+  const id = _npdText_(requestId);
+  if (!id) throw new Error('NPD request id is required.');
+  const row = (supabaseSelect('npd_requests', {
+    select: '*',
+    filters: { id: 'eq.' + id },
+    limit: 1
+  }) || [])[0];
+  if (!row) throw new Error('NPD request not found.');
+  return row;
+}
+
+function _npdGetVersion_(versionId) {
+  const id = _npdText_(versionId);
+  if (!id) throw new Error('NPD version id is required.');
+  const row = (supabaseSelect('npd_request_versions', {
+    select: '*',
+    filters: { id: 'eq.' + id },
+    limit: 1
+  }) || [])[0];
+  if (!row) throw new Error('NPD version not found.');
+  return row;
+}
+
+function _npdGetSampleWorkOrder_(sampleWoId) {
+  const id = _npdText_(sampleWoId);
+  if (!id) throw new Error('Sample work order id is required.');
+  const row = (supabaseSelect('npd_sample_work_orders', {
+    select: '*',
+    filters: { id: 'eq.' + id },
+    limit: 1
+  }) || [])[0];
+  if (!row) throw new Error('Sample work order not found.');
+  return row;
+}
+
+function _npdGetPaperSpecsForVersion_(versionId) {
+  return (supabaseSelect('npd_paper_specs', {
+    select: 'line_no,gsm,quality,flute,remarks',
+    filters: { version_id: 'eq.' + versionId },
+    order: 'line_no.asc'
+  }) || []).map(function(row) {
+    return {
+      gsm: row.gsm,
+      quality: row.quality,
+      flute: row.flute || '',
+      remarks: row.remarks || ''
+    };
+  });
+}
+
+/* =========================
    Admin helpers
    ========================= */
 /* =========================
@@ -12456,6 +13675,7 @@ const ROUTES = {
   planning: 'Planning',
   reports: 'Reports',
   costing: 'Costing',
+  npd: 'NPD',
   checklist: 'Checklist',
 
   masteradmin: 'MasterAdmin',
@@ -13999,7 +15219,7 @@ function saveArtworkGroup(payload) {
   _validateArtworkGroupPayload_(payload);
   const lock = LockService.getScriptLock();
   const isNewArtwork = !String(payload.artworkNo || '').trim();
-  const preserveExistingJobs = payload && payload.preserveExistingJobs === true;
+  let preserveExistingJobs = payload && payload.preserveExistingJobs === true;
   let lockHeld = false;
 
   if (isNewArtwork) {
@@ -14054,7 +15274,7 @@ function saveArtworkGroup(payload) {
       : [];
 
     if (preserveExistingJobs && !currentRows.length) {
-      throw new Error('Existing artwork no not found for repeat order.');
+      preserveExistingJobs = false;
     }
 
     const deselectedIds = preserveExistingJobs
@@ -16324,12 +17544,12 @@ function normalizeStoredWOMaterialKey_(key) {
   );
 }
 
-function buildWOMaterialRequirementRows_(materials, issuedRows) {
+function buildWOMaterialRequirementRows_(materials, issuedRows, returnedRows) {
   const approxEqual = (a, b) => Math.abs(Number(a || 0) - Number(b || 0)) <= 0.01;
-  const issuedPools = (issuedRows || []).map(r => {
+  const buildPools = rows => (rows || []).map(r => {
     const parsed = parseStoredWOMaterialKey_(r.remarks);
     return {
-      remainingQty: Number(r.qty_out || 0),
+      remainingQty: Number(r.qty_out || r.qty_in || 0),
       parsed: parsed,
       exactKey: normalizeWOMaterialKey_(
         parsed.label,
@@ -16340,6 +17560,8 @@ function buildWOMaterialRequirementRows_(materials, issuedRows) {
       )
     };
   });
+  const issuedPools = buildPools(issuedRows);
+  const returnedPools = buildPools(returnedRows);
 
   return (materials || []).map(m => {
     const stored = parseStoredWOMaterialKey_(m.material_key);
@@ -16355,43 +17577,47 @@ function buildWOMaterialRequirementRows_(materials, issuedRows) {
       uom
     );
     const requiredQty = Number(m.required_qty || 0);
-    let issuedQty = 0;
+    const consumeFromPools = (pools, capQty) => {
+      let totalQty = 0;
+      const consume = (predicate, allowExcess) => {
+        pools.forEach(pool => {
+          if (pool.remainingQty <= 0) return;
+          if (!predicate(pool)) return;
+          const needQty = Math.max(capQty - totalQty, 0);
+          const take = allowExcess
+            ? pool.remainingQty
+            : Math.min(needQty, pool.remainingQty);
+          totalQty += take;
+          pool.remainingQty -= take;
+        });
+      };
 
-    const consume = (predicate, allowExcess) => {
-      issuedPools.forEach(pool => {
-        if (pool.remainingQty <= 0) return;
-        if (!predicate(pool)) return;
-        const needQty = Math.max(requiredQty - issuedQty, 0);
-        const take = allowExcess
-          ? pool.remainingQty
-          : Math.min(needQty, pool.remainingQty);
-        issuedQty += take;
-        pool.remainingQty -= take;
-      });
+      consume(pool => pool.exactKey === materialKey, false);
+      consume(pool =>
+        pool.parsed.label === label &&
+        (!pool.parsed.gsm || pool.parsed.gsm === String(m.gsm || '').trim()) &&
+        (!pool.parsed.deckle || approxEqual(pool.parsed.deckle, deckle)) &&
+        (!pool.parsed.cutSize || approxEqual(pool.parsed.cutSize, cutSize)) &&
+        (!pool.parsed.uom || pool.parsed.uom === uom),
+        false
+      );
+      consume(pool => pool.parsed.label === label, false);
+      consume(pool => pool.exactKey === materialKey, true);
+      consume(pool =>
+        pool.parsed.label === label &&
+        (!pool.parsed.gsm || pool.parsed.gsm === String(m.gsm || '').trim()) &&
+        (!pool.parsed.deckle || approxEqual(pool.parsed.deckle, deckle)) &&
+        (!pool.parsed.cutSize || approxEqual(pool.parsed.cutSize, cutSize)) &&
+        (!pool.parsed.uom || pool.parsed.uom === uom),
+        true
+      );
+      consume(pool => pool.parsed.label === label, true);
+      return totalQty;
     };
 
-    consume(pool => pool.exactKey === materialKey, false);
-    consume(pool =>
-      pool.parsed.label === label &&
-      (!pool.parsed.gsm || pool.parsed.gsm === String(m.gsm || '').trim()) &&
-      (!pool.parsed.deckle || approxEqual(pool.parsed.deckle, deckle)) &&
-      (!pool.parsed.cutSize || approxEqual(pool.parsed.cutSize, cutSize)) &&
-      (!pool.parsed.uom || pool.parsed.uom === uom),
-      false
-    );
-    consume(pool => pool.parsed.label === label, false);
-
-    // Preserve real over-issue quantities in the grouped WO view.
-    consume(pool => pool.exactKey === materialKey, true);
-    consume(pool =>
-      pool.parsed.label === label &&
-      (!pool.parsed.gsm || pool.parsed.gsm === String(m.gsm || '').trim()) &&
-      (!pool.parsed.deckle || approxEqual(pool.parsed.deckle, deckle)) &&
-      (!pool.parsed.cutSize || approxEqual(pool.parsed.cutSize, cutSize)) &&
-      (!pool.parsed.uom || pool.parsed.uom === uom),
-      true
-    );
-    consume(pool => pool.parsed.label === label, true);
+    const issuedQty = consumeFromPools(issuedPools, requiredQty);
+    const returnedQty = consumeFromPools(returnedPools, issuedQty);
+    const netIssuedQty = Math.max(issuedQty - returnedQty, 0);
 
     return {
       materialKey,
@@ -16402,7 +17628,10 @@ function buildWOMaterialRequirementRows_(materials, issuedRows) {
       uom: uom,
       requiredQty: requiredQty,
       issuedQty: issuedQty,
-      remainingQty: Math.max(requiredQty - issuedQty, 0)
+      returnedQty: returnedQty,
+      netIssuedQty: netIssuedQty,
+      remainingQty: Math.max(requiredQty - netIssuedQty, 0),
+      excessQty: Math.max(netIssuedQty - requiredQty, 0)
     };
   });
 }
@@ -17032,14 +18261,16 @@ function invListItemsJSON(opts = {}) {
 }
 
 function invListIssueJSON(opts = {}) {
-  const filters = _invBuildTxnDateFilters_(opts, 'ISSUE');
+  const filters = _invBuildTxnDateFilters_(opts, '');
   const requestLimit = _invResolveTxnRequestLimit_(opts, 1000, 50000);
   const rows = _invSelectTxnRegisterRows_('inv_issue_register_v', `
       id,
       created_at,
+      ref_type,
       ref_no,
       item_code,
       item_name,
+      qty_in,
       qty_out,
       rate,
       value,
@@ -17048,21 +18279,27 @@ function invListIssueJSON(opts = {}) {
       batch_no
     `, filters, requestLimit);
 
-  const allocationMap = invGetAllocationSummaryMap_(rows.map(r => r.id));
-  const reversalMap = invGetReversalSummaryMap_(rows.map(r => r.id));
+  const issueRows = rows.filter(function(row) {
+    return ['ISSUE', 'WO-RETURN'].indexOf(String(row.ref_type || '').trim().toUpperCase()) !== -1;
+  });
+  const allocationMap = invGetAllocationSummaryMap_(issueRows.map(r => r.id));
+  const reversalMap = invGetReversalSummaryMap_(issueRows.map(r => r.id));
 
   return {
     ok: true,
-    rows: rows.map(r => ({
+    rows: issueRows.map(r => ({
       issueNo: r.id,
       date: r.created_at,
       itemCode: r.item_code || '',
       itemName: r.item_name || '',
       workOrderNo: r.ref_no || '',
       department: r.department || '',
+      transactionType: String(r.ref_type || '').trim().toUpperCase(),
       batchNo: allocationMap[r.id]?.batchNo || r.batch_no || '',
       batchDisplay: allocationMap[r.id]?.batchDisplay || r.batch_no || '',
-      qty: Number(r.qty_out || 0),
+      qty: Number(r.qty_out || r.qty_in || 0),
+      qtyIn: Number(r.qty_in || 0),
+      qtyOut: Number(r.qty_out || 0),
       rate: Number(r.rate || 0),
       value: Math.abs(Number(r.value || 0)),
       location: r.location || '',
@@ -18570,6 +19807,7 @@ function invListPurchaseReceiptsJSON(opts = {}) {
         rate: Number(r.rate || 0),
         value: Number(r.value || 0),
         invoiceNo: note.INV || '',
+        vendorName: note.VENDOR || '',
         batchNo: r.batch_no || '',
         location: r.location || '',
         reversed: reversalMap[String(r.id || '')]?.reversed === true,
@@ -19376,7 +20614,10 @@ function invBuildWorkOrdersForIssueFromPreparedRows_(preparedRows) {
       uom: row.uom || '',
       requiredQty: Number(row.required_qty ?? row.requiredQty ?? 0),
       issuedQty: Number(row.issued_qty ?? row.issuedQty ?? 0),
-      remainingQty: Number(row.remaining_qty ?? row.remainingQty ?? 0)
+      returnedQty: Number(row.returned_qty ?? row.returnedQty ?? 0),
+      netIssuedQty: Number(row.net_issued_qty ?? row.netIssuedQty ?? row.issued_qty ?? row.issuedQty ?? 0),
+      remainingQty: Number(row.remaining_qty ?? row.remainingQty ?? 0),
+      excessQty: Number(row.excess_qty ?? row.excessQty ?? 0)
     });
   });
 
@@ -19453,6 +20694,8 @@ function _invBuildNormalizedWOIssuePreparedRow_(row, snapshotJson) {
   next.uom = currentUom || String(row.uom || '').trim();
   next.required_qty = Number(row.required_qty ?? row.requiredQty ?? 0);
   next.issued_qty = Number(row.issued_qty ?? row.issuedQty ?? 0);
+  next.returned_qty = Number(row.returned_qty ?? row.returnedQty ?? 0);
+  next.net_issued_qty = Number(row.net_issued_qty ?? row.netIssuedQty ?? Math.max(next.issued_qty - next.returned_qty, 0));
 
   if (fallback && isFlexo) {
     if (Number(fallback.requiredQty || 0) > 0) next.required_qty = Number(fallback.requiredQty || 0);
@@ -19473,6 +20716,8 @@ function _invBuildNormalizedWOIssuePreparedRow_(row, snapshotJson) {
   if (normalizedMaterialKey && normalizedMaterialKey !== originalMaterialKey) {
     next.material_key = normalizedMaterialKey;
   }
+  next.remaining_qty = Number(row.remaining_qty ?? row.remainingQty ?? Math.max(next.required_qty - next.net_issued_qty, 0));
+  next.excess_qty = Number(row.excess_qty ?? row.excessQty ?? Math.max(next.net_issued_qty - next.required_qty, 0));
 
   return next;
 }
@@ -19512,7 +20757,7 @@ function _invComputePreparedWOIssueRowIssuedQty_(row, issuedRows, snapshotJson) 
     if (targetCut && parsed.cutSize && !approxEqual(parsed.cutSize, targetCut)) return sum;
 
     const sourceUom = _invNormalizeIssueUom_(parsed.uom || '');
-    const qtyOut = Number(ledgerRow.qty_out || 0);
+    const qtyOut = Number(ledgerRow.qty_out || ledgerRow.qty_in || 0);
     if (!(qtyOut > 0)) return sum;
 
     if (targetUom === 'RM') {
@@ -19558,6 +20803,7 @@ function _invNormalizePreparedWOIssueRows_(preparedRows) {
   });
 
   const issueRows = [];
+  const returnRows = [];
   const issueChunks = _supabaseChunkValuesByFilterLength_(woNumbers, 1200, 40);
   issueChunks.forEach(function(chunk) {
     const batch = supabaseSelect('inv_ledger', {
@@ -19569,17 +20815,34 @@ function _invNormalizePreparedWOIssueRows_(preparedRows) {
       order: 'id.asc'
     }) || [];
     issueRows.push.apply(issueRows, batch);
+    const returnBatch = supabaseSelect('inv_ledger', {
+      select: 'id,ref_no,remarks,qty_in',
+      filters: {
+        ref_type: 'eq.WO-RETURN',
+        ref_no: _supabaseInFilter_(chunk)
+      },
+      order: 'id.asc'
+    }) || [];
+    returnRows.push.apply(returnRows, returnBatch);
   });
-  const reversalMap = invGetReversalSummaryMap_(issueRows.map(function(row) {
+  const reversalMap = invGetReversalSummaryMap_(issueRows.concat(returnRows).map(function(row) {
     return row.id;
   }));
   const issueRowsByWoNo = {};
+  const returnRowsByWoNo = {};
   issueRows.forEach(function(row) {
     if (reversalMap[String(row.id || '')]?.reversed === true) return;
     const woNo = String(row.ref_no || '').trim();
     if (!woNo) return;
     if (!issueRowsByWoNo[woNo]) issueRowsByWoNo[woNo] = [];
     issueRowsByWoNo[woNo].push(row);
+  });
+  returnRows.forEach(function(row) {
+    if (reversalMap[String(row.id || '')]?.reversed === true) return;
+    const woNo = String(row.ref_no || '').trim();
+    if (!woNo) return;
+    if (!returnRowsByWoNo[woNo]) returnRowsByWoNo[woNo] = [];
+    returnRowsByWoNo[woNo].push(row);
   });
 
   return rows.map(function(row) {
@@ -19592,10 +20855,20 @@ function _invNormalizePreparedWOIssueRows_(preparedRows) {
         issueRowsByWoNo[woNo] || [],
         snapshot
       );
-      normalized.remaining_qty = Math.max(
-        Number(normalized.required_qty || 0) - Number(normalized.issued_qty || 0),
+      normalized.returned_qty = _invComputePreparedWOIssueRowIssuedQty_(
+        normalized,
+        returnRowsByWoNo[woNo] || [],
+        snapshot
+      );
+      normalized.net_issued_qty = Math.max(
+        Number(normalized.issued_qty || 0) - Number(normalized.returned_qty || 0),
         0
       );
+      normalized.remaining_qty = Math.max(
+        Number(normalized.required_qty || 0) - Number(normalized.net_issued_qty || 0),
+        0
+      );
+      normalized.excess_qty = Math.max(Number(normalized.net_issued_qty || 0) - Number(normalized.required_qty || 0), 0);
       normalized.line_status = normalized.remaining_qty > 0.0001 ? 'PENDING' : 'ISSUED';
     }
     return normalized;
@@ -19666,7 +20939,10 @@ function invListWorkOrdersForIssueSummaryFast_(opts) {
         materialStatus: String(row.material_status || row.materialStatus || 'PENDING').trim().toUpperCase() || 'PENDING',
         requiredQty: Number(row.required_qty || row.requiredQty || 0),
         issuedQty: Number(row.issued_qty || row.issuedQty || 0),
+        returnedQty: Number(row.returned_qty || row.returnedQty || 0),
+        netIssuedQty: Number(row.net_issued_qty || row.netIssuedQty || 0),
         remainingQty: Number(row.remaining_qty || row.remainingQty || 0),
+        excessQty: Number(row.excess_qty || row.excessQty || 0),
         lineCount: Number(row.line_count || row.lineCount || 0),
         detailLoaded: false,
         requirements: []
@@ -19840,6 +21116,7 @@ function _invBuildWorkOrdersForIssueFallbackRows_(woNos) {
   });
 
   let issuedRows = [];
+  let returnedRows = [];
   const issueChunks = _supabaseChunkValuesByFilterLength_(woNumbers, 1200, 30);
   issueChunks.forEach(function(chunk) {
     const batch = _supabaseSelectAll_('inv_ledger', {
@@ -19850,12 +21127,23 @@ function _invBuildWorkOrdersForIssueFallbackRows_(woNos) {
       }
     }, 1000, 50000) || [];
     issuedRows = issuedRows.concat(batch);
+    const returnBatch = _supabaseSelectAll_('inv_ledger', {
+      select: 'id,ref_no,remarks,qty_in',
+      filters: {
+        ref_type: 'eq.WO-RETURN',
+        ref_no: _supabaseInFilter_(chunk)
+      }
+    }, 1000, 50000) || [];
+    returnedRows = returnedRows.concat(returnBatch);
   });
 
-  const issueReversalMap = invGetReversalSummaryMap_(issuedRows.map(function(row) {
+  const issueReversalMap = invGetReversalSummaryMap_(issuedRows.concat(returnedRows).map(function(row) {
     return row.id;
   }));
   issuedRows = issuedRows.filter(function(row) {
+    return issueReversalMap[String(row.id || '')]?.reversed !== true;
+  });
+  returnedRows = returnedRows.filter(function(row) {
     return issueReversalMap[String(row.id || '')]?.reversed !== true;
   });
 
@@ -19865,6 +21153,13 @@ function _invBuildWorkOrdersForIssueFallbackRows_(woNos) {
     if (!key) return;
     if (!issuedRowsByWoNo[key]) issuedRowsByWoNo[key] = [];
     issuedRowsByWoNo[key].push(row);
+  });
+  const returnedRowsByWoNo = {};
+  returnedRows.forEach(function(row) {
+    const key = String(row.ref_no || '').trim();
+    if (!key) return;
+    if (!returnedRowsByWoNo[key]) returnedRowsByWoNo[key] = [];
+    returnedRowsByWoNo[key].push(row);
   });
 
   const rows = [];
@@ -19881,9 +21176,10 @@ function _invBuildWorkOrdersForIssueFallbackRows_(woNos) {
     woMaterials = _invGroupWOMaterialRowsForIssue_(woMaterials);
 
     const issuedForWo = issuedRowsByWoNo[woNo] || [];
-    const requirementRows = buildWOMaterialRequirementRows_(woMaterials, issuedForWo);
+    const returnedForWo = returnedRowsByWoNo[woNo] || [];
+    const requirementRows = buildWOMaterialRequirementRows_(woMaterials, issuedForWo, returnedForWo);
 
-    if (!requirementRows.length && !issuedForWo.length) return;
+    if (!requirementRows.length && !issuedForWo.length && !returnedForWo.length) return;
 
     const hasPending = requirementRows.some(function(row) {
       return Number(row.remainingQty || 0) > 0.0001;
@@ -19964,6 +21260,51 @@ function invListWorkOrdersForIssue(opts) {
   };
 }
 
+function invListWOIssueVarianceJSON(opts) {
+  const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
+  const rows = supabaseRpc('inv_wo_issue_variance_export_ui', {
+    p_search: request.search || null,
+    p_limit: request.limit,
+    p_offset: request.offset
+  }) || [];
+  const out = (Array.isArray(rows) ? rows : (rows.rows || [])).map(function(row) {
+    return {
+      woNo: String(row.wo_no || row.woNo || '').trim(),
+      jobCardNo: row.job_card_no || row.jobCardNo || '',
+      salesOrders: row.sales_orders || row.salesOrders || '',
+      client: row.client || '',
+      product: row.product || '',
+      artworkNo: row.artwork_no || row.artworkNo || '',
+      department: row.department || '',
+      materialKey: row.material_key || row.materialKey || '',
+      material: row.material || '',
+      gsm: row.gsm || '',
+      deckleMm: Number(row.deckle_mm || row.deckleMm || 0),
+      cutMm: Number(row.cut_mm || row.cutMm || 0),
+      uom: row.uom || '',
+      requiredQty: Number(row.required_qty || row.requiredQty || 0),
+      issuedQty: Number(row.issued_qty || row.issuedQty || 0),
+      returnedQty: Number(row.returned_qty || row.returnedQty || 0),
+      netIssuedQty: Number(row.net_issued_qty || row.netIssuedQty || 0),
+      pendingQty: Number(row.pending_qty || row.pendingQty || 0),
+      excessQty: Number(row.excess_qty || row.excessQty || 0),
+      status: row.status || '',
+      issueBatches: row.issue_batches || row.issueBatches || '',
+      returnBatches: row.return_batches || row.returnBatches || '',
+      lastIssueDate: row.last_issue_date || row.lastIssueDate || '',
+      lastReturnDate: row.last_return_date || row.lastReturnDate || ''
+    };
+  });
+  return {
+    ok: true,
+    rows: out,
+    meta: {
+      limit: request.limit,
+      offset: request.offset
+    }
+  };
+}
+
 function invGetWorkOrderForIssue(woNo) {
   const key = String(woNo || '').trim();
   if (!key) throw new Error('Work order no required');
@@ -19974,7 +21315,7 @@ function invGetWorkOrderForIssue(woNo) {
   }
 
   const rows = supabaseSelect('inv_wo_issue_requirement_v', {
-    select: 'wo_number,issue_department,line_status,material_key,item_label,gsm,deckle_mm,cut_mm,uom,required_qty,issued_qty,remaining_qty',
+    select: 'wo_number,issue_department,line_status,material_key,item_label,gsm,deckle_mm,cut_mm,uom,required_qty,issued_qty,returned_qty,net_issued_qty,remaining_qty,excess_qty',
     filters: { wo_number: 'eq.' + key },
     order: 'item_label.asc,material_key.asc',
     limit: 500
@@ -20053,6 +21394,143 @@ remarks: isDirect
   }
 
   return { ok: true };
+}
+
+function _invFindWOMaterialRequirement_(woNo, materialKey) {
+  const key = String(woNo || '').trim();
+  const matKey = String(materialKey || '').trim();
+  if (!key || !matKey) return null;
+  const res = invGetWorkOrderForIssue(key);
+  const reqs = Array.isArray(res?.row?.requirements) ? res.row.requirements : [];
+  return reqs.find(function(row) {
+    return String(row.materialKey || '').trim() === matKey;
+  }) || null;
+}
+
+function _invGetWOReturnRate_(payload, item) {
+  const woNo = String(payload.workOrderNo || '').trim();
+  const materialKey = String(payload.materialKey || '').trim();
+  const location = String(payload.location || DEFAULT_LOCATION).trim() || DEFAULT_LOCATION;
+  const rows = supabaseSelect('inv_ledger', {
+    select: 'id,qty_out,rate',
+    filters: {
+      ref_type: 'eq.ISSUE',
+      ref_no: 'eq.' + woNo,
+      remarks: 'eq.' + materialKey,
+      item_id: 'eq.' + item.id,
+      location: 'eq.' + location
+    },
+    limit: 5000
+  }) || [];
+  const reversalMap = invGetReversalSummaryMap_(rows.map(function(row) { return row.id; }));
+  let qty = 0;
+  let value = 0;
+  rows.forEach(function(row) {
+    if (reversalMap[String(row.id || '')]?.reversed === true) return;
+    const rowQty = Number(row.qty_out || 0);
+    if (!(rowQty > 0)) return;
+    qty += rowQty;
+    value += rowQty * Number(row.rate || 0);
+  });
+  if (qty > 0) return Number((value / qty).toFixed(6));
+  return Number(invGetCurrentAvgRate(item.item_code || payload.itemCode, location) || 0);
+}
+
+function _invGetWOMaterialItemNetIssued_(payload, item) {
+  const woNo = String(payload.workOrderNo || '').trim();
+  const materialKey = String(payload.materialKey || '').trim();
+  const location = String(payload.location || DEFAULT_LOCATION).trim() || DEFAULT_LOCATION;
+  const rows = supabaseSelect('inv_ledger', {
+    select: 'id,ref_type,qty_in,qty_out',
+    filters: {
+      ref_type: _supabaseInFilter_(['ISSUE', 'WO-RETURN']),
+      ref_no: 'eq.' + woNo,
+      remarks: 'eq.' + materialKey,
+      item_id: 'eq.' + item.id,
+      location: 'eq.' + location
+    },
+    limit: 5000
+  }) || [];
+  const reversalMap = invGetReversalSummaryMap_(rows.map(function(row) { return row.id; }));
+  return rows.reduce(function(sum, row) {
+    if (reversalMap[String(row.id || '')]?.reversed === true) return sum;
+    const type = String(row.ref_type || '').trim().toUpperCase();
+    if (type === 'ISSUE') return sum + Number(row.qty_out || 0);
+    if (type === 'WO-RETURN') return sum - Number(row.qty_in || 0);
+    return sum;
+  }, 0);
+}
+
+function invPostWOReturn(payload) {
+  const p = payload || {};
+  const woNo = String(p.workOrderNo || '').trim();
+  const materialKey = String(p.materialKey || '').trim();
+  const itemCode = String(p.itemCode || '').trim();
+  const qty = Number(p.qty || p.returnQty || 0);
+  const location = String(p.location || DEFAULT_LOCATION).trim() || DEFAULT_LOCATION;
+  const department = String(p.department || '').trim();
+  const batchNo = String(p.batchNo || '').trim();
+
+  if (!woNo) throw new Error('Work order no required');
+  if (!materialKey) throw new Error('Material key required for WO return');
+  if (!itemCode) throw new Error('Select Store Item');
+  if (!(qty > 0)) throw new Error('Enter valid return quantity');
+
+  const requirement = _invFindWOMaterialRequirement_(woNo, materialKey);
+  if (!requirement) throw new Error('WO material requirement not found. Refresh and try again.');
+  const netIssuedQty = Number((requirement.netIssuedQty ?? (Number(requirement.issuedQty || 0) - Number(requirement.returnedQty || 0))) || 0);
+  if (qty > netIssuedQty + 0.0001) {
+    throw new Error('Return quantity cannot exceed net issued quantity (' + netIssuedQty.toFixed(2) + ')');
+  }
+
+  const item = ensureInventoryItemExists_(itemCode, {
+    requireActive: true,
+    allowAutoCreate: false
+  });
+  const itemNetIssuedQty = _invGetWOMaterialItemNetIssued_(p, item);
+  if (!(itemNetIssuedQty > 0.0001)) {
+    throw new Error('Selected store item has no net issued quantity for this WO material.');
+  }
+  if (qty > itemNetIssuedQty + 0.0001) {
+    throw new Error('Return quantity cannot exceed this item net issued quantity (' + itemNetIssuedQty.toFixed(2) + ')');
+  }
+  const rate = _invGetWOReturnRate_(p, item);
+  const returnRemarks = [
+    String(p.remarks || 'WO leftover return').trim(),
+    'Material:' + materialKey
+  ].filter(Boolean).join(' | ');
+  const lot = invCreateLot_({
+    itemCode: item.item_code || itemCode,
+    qty: qty,
+    rate: rate,
+    batchNo: batchNo,
+    sourceType: 'WO-RETURN',
+    sourceRef: woNo,
+    receiptDate: new Date().toISOString(),
+    location: location,
+    department: department,
+    remarks: returnRemarks
+  });
+  const ledger = invAppendLedger_({
+    refType: 'WO-RETURN',
+    refNo: woNo,
+    item: item,
+    itemCode: item.item_code || itemCode,
+    qtyIn: qty,
+    rate: rate,
+    batchNo: lot.batchNo,
+    location: location,
+    department: department,
+    remarks: materialKey
+  });
+
+  if (p.skipStockRefresh !== true) {
+    refreshStockMV_();
+  } else {
+    PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
+  }
+
+  return { ok: true, returnNo: ledger?.id || '', batchNo: lot.batchNo || '' };
 }
 
 function invPostIssueBulk(input) {
@@ -23618,6 +25096,7 @@ function billingHealthCheck(token) {
       billingGetBootstrap: true,
       billingGetDataset: true,
       billingListInvoices: true,
+      billingExportDocumentRegisterExcel: true,
       billingGetInvoiceEditor: true,
       createInvoice: true,
       updateInvoiceDraft: true,
@@ -24940,6 +26419,340 @@ function billingListInvoices(params, token) {
   };
 }
 
+function _billingRegisterSummaryText_(row) {
+  const r = row || {};
+  return [
+    (Number(r.lineCount || 0) ? Number(r.lineCount || 0) + ' line' : '0 line'),
+    'Qty ' + _billingRound2_(r.totalQty || 0).toFixed(2),
+    r.productPreview || ''
+  ].filter(Boolean).join(' | ');
+}
+
+function _billingRegisterRowPassesColumnFilters_(row, columnFilters) {
+  const f = columnFilters || {};
+  const get = function(key) {
+    return String(f[key] || '').trim().toLowerCase();
+  };
+  const r = row || {};
+  const summary = _billingRegisterSummaryText_(r).toLowerCase();
+  const customer = [r.clientName || '', r.clientCode || ''].join(' ').toLowerCase();
+  const total = [
+    _billingRound2_(r.grandTotal || 0).toFixed(2),
+    _billingRound2_(r.taxTotal || 0).toFixed(2)
+  ].join(' ').toLowerCase();
+  const checks = {
+    date: String(r.invoiceDate || '').toLowerCase(),
+    invoice: String(r.invoiceNo || '').toLowerCase(),
+    docType: String(r.documentType || 'INVOICE').toLowerCase(),
+    customer: customer,
+    basis: String(r.billingMode || '').toLowerCase(),
+    summary: summary,
+    status: String(r.status || '').toLowerCase(),
+    total: total,
+    remarks: String(r.remarks || '').toLowerCase()
+  };
+  return Object.keys(checks).every(function(key) {
+    const filterValue = get(key);
+    return !filterValue || checks[key].indexOf(filterValue) !== -1;
+  });
+}
+
+function _billingSelectInvoiceLinesForExport_(invoiceIds) {
+  const ids = (invoiceIds || []).filter(Boolean);
+  if (!ids.length) return [];
+  const selects = [
+    'id,invoice_id,so_id,so_line_id,so_number,line_no,product_code,product_name,hsn,unit,qty,rate,gst_pct,taxable_amount,line_amount,cgst_pct,sgst_pct,igst_pct,cgst_amt,sgst_amt,igst_amt,line_total,source_mode,dispatch_qty_snapshot,ordered_qty_snapshot,billed_qty_snapshot,division',
+    'id,invoice_id,so_id,so_line_id,so_number,line_no,product_code,product_name,hsn,unit,qty,rate,gst_pct,taxable_amount,line_amount,cgst_amt,sgst_amt,igst_amt,line_total,source_mode,dispatch_qty_snapshot,ordered_qty_snapshot,billed_qty_snapshot,division',
+    'id,invoice_id,so_number,line_no,product_code,product_name,hsn,unit,qty,rate,gst_pct,taxable_amount,line_amount,line_total,source_mode,division',
+    'id,invoice_id,so_number,line_no,product_code,product_name,qty,rate,line_amount,line_total,source_mode'
+  ];
+  let lastErr = null;
+  for (var i = 0; i < selects.length; i++) {
+    try {
+      return _supabaseSelectByKeyInBatches_(
+        'invoice_lines',
+        selects[i],
+        'invoice_id',
+        ids,
+        'invoice_id.asc,line_no.asc,product_name.asc',
+        35
+      ) || [];
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (lastErr) throw lastErr;
+  return [];
+}
+
+function _billingBuildDivisionSummaryForExport_(lineRows, documentMap) {
+  const byDivision = {};
+  const totals = {
+    division: 'TOTAL',
+    documentLines: 0,
+    documents: {},
+    invoices: {},
+    challans: {},
+    qty: 0,
+    taxableAmount: 0,
+    taxAmount: 0,
+    lineTotal: 0,
+    lastDocumentDate: ''
+  };
+  (lineRows || []).forEach(function(line) {
+    const doc = documentMap[String(line.invoice_id || '')] || {};
+    const division = String(line.division || '').trim() || 'Unassigned';
+    if (!byDivision[division]) {
+      byDivision[division] = {
+        division: division,
+        documentLines: 0,
+        documents: {},
+        invoices: {},
+        challans: {},
+        qty: 0,
+        taxableAmount: 0,
+        taxAmount: 0,
+        lineTotal: 0,
+        lastDocumentDate: ''
+      };
+    }
+    const acc = byDivision[division];
+    const docNo = String(doc.invoiceNo || line.invoice_id || '').trim();
+    const docType = String(doc.documentType || 'INVOICE').toUpperCase();
+    const docDate = String(doc.invoiceDate || '').trim();
+    const taxable = _billingRound2_(line.taxable_amount != null ? line.taxable_amount : line.line_amount);
+    const lineTotal = _billingRound2_(line.line_total != null ? line.line_total : taxable);
+    const tax = _billingRound2_(_billingToNumber_(line.cgst_amt) + _billingToNumber_(line.sgst_amt) + _billingToNumber_(line.igst_amt));
+
+    [acc, totals].forEach(function(bucket) {
+      bucket.documentLines += 1;
+      bucket.qty = _billingRound2_(bucket.qty + _billingToNumber_(line.qty));
+      bucket.taxableAmount = _billingRound2_(bucket.taxableAmount + taxable);
+      bucket.taxAmount = _billingRound2_(bucket.taxAmount + tax);
+      bucket.lineTotal = _billingRound2_(bucket.lineTotal + lineTotal);
+      if (docNo) {
+        bucket.documents[docNo] = true;
+        if (docType === 'CHALLAN') bucket.challans[docNo] = true;
+        else bucket.invoices[docNo] = true;
+      }
+      if (docDate && (!bucket.lastDocumentDate || docDate > bucket.lastDocumentDate)) bucket.lastDocumentDate = docDate;
+    });
+  });
+  const rows = Object.keys(byDivision).sort().map(function(key) {
+    const row = byDivision[key];
+    return {
+      division: row.division,
+      documentLines: row.documentLines,
+      documents: Object.keys(row.documents).length,
+      invoices: Object.keys(row.invoices).length,
+      challans: Object.keys(row.challans).length,
+      qty: row.qty,
+      taxableAmount: row.taxableAmount,
+      taxAmount: row.taxAmount,
+      lineTotal: row.lineTotal,
+      lastDocumentDate: row.lastDocumentDate
+    };
+  });
+  if (rows.length) {
+    rows.push({
+      division: totals.division,
+      documentLines: totals.documentLines,
+      documents: Object.keys(totals.documents).length,
+      invoices: Object.keys(totals.invoices).length,
+      challans: Object.keys(totals.challans).length,
+      qty: totals.qty,
+      taxableAmount: totals.taxableAmount,
+      taxAmount: totals.taxAmount,
+      lineTotal: totals.lineTotal,
+      lastDocumentDate: totals.lastDocumentDate
+    });
+  }
+  return rows;
+}
+
+function billingExportDocumentRegisterExcel(params, token) {
+  _billingRequireSession_(token);
+  const p = _billingNormalizeRegisterParams_(params || {});
+  const columnFilters = (params && params.columnFilters) || {};
+  const register = billingListInvoices(p, token);
+  const documents = ((register && register.rows) || []).filter(function(row) {
+    return _billingRegisterRowPassesColumnFilters_(row, columnFilters);
+  });
+  const documentMap = {};
+  documents.forEach(function(row) {
+    documentMap[String(row.id || '')] = row;
+  });
+  const lines = _billingSelectInvoiceLinesForExport_(documents.map(function(row) { return row.id; })).filter(function(line) {
+    return !!documentMap[String(line.invoice_id || '')];
+  }).sort(function(a, b) {
+    const da = documentMap[String(a.invoice_id || '')] || {};
+    const db = documentMap[String(b.invoice_id || '')] || {};
+    const dateA = String(da.invoiceDate || '');
+    const dateB = String(db.invoiceDate || '');
+    if (dateA !== dateB) return dateA < dateB ? 1 : -1;
+    const noA = String(da.invoiceNo || '');
+    const noB = String(db.invoiceNo || '');
+    if (noA !== noB) return noA < noB ? 1 : -1;
+    return Number(a.line_no || 0) - Number(b.line_no || 0);
+  });
+
+  const generatedAt = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'dd-MMM-yyyy HH:mm');
+  const rangeText = 'Date range: ' + (p.dateFrom || 'All') + ' to ' + (p.dateTo || 'All') +
+    ' | Status: ' + (p.status || 'ALL') +
+    (p.q ? ' | Search: ' + p.q : '');
+  const fileName = [
+    'billing-document-register',
+    p.dateFrom || 'all',
+    p.dateTo || 'all'
+  ].join('-') + '.xlsx';
+
+  const documentColumns = [
+    { label:'Document Date', type:'date' },
+    { label:'Document No' },
+    { label:'Doc Type' },
+    { label:'Status' },
+    { label:'Customer Code' },
+    { label:'Customer Name' },
+    { label:'Billing Basis' },
+    { label:'Line Count', type:'number' },
+    { label:'Total Qty', type:'number' },
+    { label:'Subtotal', type:'money' },
+    { label:'Tax Total', type:'money' },
+    { label:'Grand Total', type:'money' },
+    { label:'Remarks' },
+    { label:'Posted At' }
+  ];
+  const itemColumns = [
+    { label:'Document Date', type:'date' },
+    { label:'Document No' },
+    { label:'Doc Type' },
+    { label:'Status' },
+    { label:'Customer Code' },
+    { label:'Customer Name' },
+    { label:'Billing Basis' },
+    { label:'Division' },
+    { label:'SO No' },
+    { label:'SO Line', type:'number' },
+    { label:'Product Code' },
+    { label:'Product / Item' },
+    { label:'HSN' },
+    { label:'Unit' },
+    { label:'Ordered Qty', type:'number' },
+    { label:'Dispatch Qty Snapshot', type:'number' },
+    { label:'Prior Billed Snapshot', type:'number' },
+    { label:'Billed Qty', type:'number' },
+    { label:'Rate', type:'money' },
+    { label:'GST %', type:'number' },
+    { label:'Taxable Amount', type:'money' },
+    { label:'CGST', type:'money' },
+    { label:'SGST', type:'money' },
+    { label:'IGST', type:'money' },
+    { label:'Line Total', type:'money' },
+    { label:'Remarks' },
+    { label:'Posted At' }
+  ];
+  const divisionColumns = [
+    { label:'Division' },
+    { label:'Doc Lines', type:'number' },
+    { label:'Documents', type:'number' },
+    { label:'Invoices', type:'number' },
+    { label:'Challans', type:'number' },
+    { label:'Qty', type:'number' },
+    { label:'Taxable Amount', type:'money' },
+    { label:'Tax Amount', type:'money' },
+    { label:'Document Value', type:'money' },
+    { label:'Last Document Date', type:'date' }
+  ];
+
+  return _reportsExportWorkbookXlsx_({
+    fileName: fileName,
+    sheets: [{
+      name: 'Document Register',
+      title: 'Billing Document Register',
+      subtitle: rangeText,
+      generatedAt: generatedAt,
+      columns: documentColumns,
+      rows: documents.map(function(row) {
+        return [
+          row.invoiceDate || '',
+          row.invoiceNo || '',
+          row.documentType || '',
+          row.status || '',
+          row.clientCode || '',
+          row.clientName || '',
+          row.billingMode || '',
+          Number(row.lineCount || 0),
+          _billingRound2_(row.totalQty || 0),
+          _billingRound2_(row.subtotal || 0),
+          _billingRound2_(row.taxTotal || 0),
+          _billingRound2_(row.grandTotal || 0),
+          row.remarks || '',
+          row.postedAt || ''
+        ];
+      })
+    }, {
+      name: 'Item Wise Details',
+      title: 'Billing Item Wise Details',
+      subtitle: rangeText,
+      generatedAt: generatedAt,
+      columns: itemColumns,
+      rows: lines.map(function(line) {
+        const doc = documentMap[String(line.invoice_id || '')] || {};
+        const taxable = _billingRound2_(line.taxable_amount != null ? line.taxable_amount : line.line_amount);
+        return [
+          doc.invoiceDate || '',
+          doc.invoiceNo || '',
+          doc.documentType || '',
+          doc.status || '',
+          doc.clientCode || '',
+          doc.clientName || '',
+          doc.billingMode || line.source_mode || '',
+          line.division || 'Unassigned',
+          line.so_number || '',
+          Number(line.line_no || 0),
+          line.product_code || '',
+          line.product_name || '',
+          line.hsn || '',
+          line.unit || '',
+          _billingRound2_(line.ordered_qty_snapshot || 0),
+          _billingRound2_(line.dispatch_qty_snapshot || 0),
+          _billingRound2_(line.billed_qty_snapshot || 0),
+          _billingRound2_(line.qty || 0),
+          _billingRound2_(line.rate || 0),
+          _billingRound2_(line.gst_pct || 0),
+          taxable,
+          _billingRound2_(line.cgst_amt || 0),
+          _billingRound2_(line.sgst_amt || 0),
+          _billingRound2_(line.igst_amt || 0),
+          _billingRound2_(line.line_total != null ? line.line_total : taxable),
+          doc.remarks || '',
+          doc.postedAt || ''
+        ];
+      })
+    }, {
+      name: 'Division Summary',
+      title: 'Billing Division Summary',
+      subtitle: rangeText,
+      generatedAt: generatedAt,
+      columns: divisionColumns,
+      rows: _billingBuildDivisionSummaryForExport_(lines, documentMap).map(function(row) {
+        return [
+          row.division,
+          row.documentLines,
+          row.documents,
+          row.invoices,
+          row.challans,
+          row.qty,
+          row.taxableAmount,
+          row.taxAmount,
+          row.lineTotal,
+          row.lastDocumentDate
+        ];
+      })
+    }]
+  });
+}
+
 function _billingCollectSyntheticManualSalesOrders_(lines) {
   const manualSoIds = [...new Set((Array.isArray(lines) ? lines : []).map(function(row) {
     return String(row && row.so_id || '').trim();
@@ -26188,8 +28001,8 @@ function _prodResolveShiftDateTimes_(entryDate, startTime, endTime) {
   const dateValue = String(entryDate || '').trim();
   const startValue = String(startTime || '').trim();
   const endValue = String(endTime || '').trim();
-  const startDateTime = new Date(dateValue + 'T' + startValue + ':00');
-  const endDateTime = new Date(dateValue + 'T' + endValue + ':00');
+  const startDateTime = new Date(dateValue + 'T' + startValue + ':00+05:30');
+  const endDateTime = new Date(dateValue + 'T' + endValue + ':00+05:30');
   if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
     throw new Error('Enter valid date and time values');
   }
@@ -26200,6 +28013,55 @@ function _prodResolveShiftDateTimes_(entryDate, startTime, endTime) {
     startDateTime: startDateTime,
     endDateTime: endDateTime
   };
+}
+
+function _prodKolkataLocalToIso_(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const hasZone = /(Z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const normalized = hasZone
+    ? raw
+    : (/^\d{4}-\d{2}-\d{2}$/.test(raw)
+      ? raw + 'T00:00:00+05:30'
+      : raw.replace(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::\d{2}(?:\.\d{1,3})?)?$/, '$1T$2:00+05:30'));
+  const dt = new Date(normalized);
+  if (isNaN(dt.getTime())) throw new Error('Enter valid production date and time');
+  return dt.toISOString();
+}
+
+function _prodRunHoursFromDateTimes_(startDateTime, endDateTime) {
+  const startMs = startDateTime instanceof Date ? startDateTime.getTime() : new Date(startDateTime || '').getTime();
+  const endMs = endDateTime instanceof Date ? endDateTime.getTime() : new Date(endDateTime || '').getTime();
+  if (isNaN(startMs) || isNaN(endMs) || endMs <= startMs) return 0;
+  return Math.round(((endMs - startMs) / 3600000) * 10000) / 10000;
+}
+
+function _prodOptionalEntryTimeColsMissing_(err) {
+  const msg = String(err && err.message || '');
+  return msg.indexOf('production_entries.start_datetime') !== -1 ||
+    msg.indexOf('production_entries.end_datetime') !== -1 ||
+    msg.indexOf('production_entries.run_hours') !== -1 ||
+    msg.indexOf('production_entries.downtime_minutes') !== -1 ||
+    msg.indexOf("'start_datetime' column of 'production_entries'") !== -1 ||
+    msg.indexOf("'end_datetime' column of 'production_entries'") !== -1 ||
+    msg.indexOf("'run_hours' column of 'production_entries'") !== -1 ||
+    msg.indexOf("'downtime_minutes' column of 'production_entries'") !== -1 ||
+    msg.indexOf('column "start_datetime" of relation "production_entries" does not exist') !== -1 ||
+    msg.indexOf('column "end_datetime" of relation "production_entries" does not exist') !== -1 ||
+    msg.indexOf('column "run_hours" of relation "production_entries" does not exist') !== -1 ||
+    msg.indexOf('column "downtime_minutes" of relation "production_entries" does not exist') !== -1;
+}
+
+function _prodStripOptionalEntryCols_(row) {
+  const copy = Object.assign({}, row || {});
+  delete copy.so_number;
+  delete copy.line_no;
+  delete copy.job_reference;
+  delete copy.start_datetime;
+  delete copy.end_datetime;
+  delete copy.run_hours;
+  delete copy.downtime_minutes;
+  return copy;
 }
 
 function _prodEntryMatchesRowIdentity_(entry, rowIdentity) {
@@ -27525,7 +29387,7 @@ function _prodGetDetailedEntryRowsForRoutingIds_(routingIds) {
   try {
     return _selectInBatches_(
       'production_entries',
-      'id,wo_id,routing_id,so_number,line_no,job_reference,entry_datetime,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
+      'id,wo_id,routing_id,so_number,line_no,job_reference,entry_datetime,start_datetime,end_datetime,run_hours,downtime_minutes,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
       'routing_id',
       ids,
       'entry_datetime.desc'
@@ -27546,7 +29408,7 @@ function _prodGetDetailedEntryRowById_(entryId) {
   if (!id) return null;
   try {
     return (supabaseSelect('production_entries', {
-      select: 'id,wo_id,routing_id,so_number,line_no,job_reference,entry_datetime,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
+      select: 'id,wo_id,routing_id,so_number,line_no,job_reference,entry_datetime,start_datetime,end_datetime,run_hours,downtime_minutes,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
       filters: { id: 'eq.' + id },
       limit: 1
     }) || [])[0] || null;
@@ -28034,12 +29896,16 @@ function saveProductionBulk(entries, token) {
 
     const goodQty = Math.max(produced - rejected, 0);
     const entryTime = payload.endDate
-      ? new Date(payload.endDate).toISOString()
+      ? _prodKolkataLocalToIso_(payload.endDate)
       : (payload.entryDate
-        ? new Date(payload.entryDate).toISOString()
+        ? _prodKolkataLocalToIso_(payload.entryDate)
         : (payload.startDate
-          ? new Date(payload.startDate).toISOString()
+          ? _prodKolkataLocalToIso_(payload.startDate)
           : new Date().toISOString()));
+    const startTime = payload.startDate ? _prodKolkataLocalToIso_(payload.startDate) : null;
+    const endTime = payload.endDate ? _prodKolkataLocalToIso_(payload.endDate) : entryTime;
+    const runHours = _prodRunHoursFromDateTimes_(startTime, endTime);
+    const downtimeMinutes = Math.max(Number(payload.downtimeMinutes || 0) || 0, 0);
     combinedProducedTotals[String(routing.id)] = (combinedProducedTotals[String(routing.id)] || 0) + produced;
     combinedTotals[String(routing.id)] = (combinedTotals[String(routing.id)] || 0) + goodQty;
     if (stageInfo.rowKind === 'JOB' && stageInfo.jobKey) {
@@ -28071,6 +29937,10 @@ function saveProductionBulk(entries, token) {
       line_no: payload.lineNo == null || payload.lineNo === '' ? null : String(payload.lineNo),
       job_reference: payload.jobReference || null,
       entry_datetime: entryTime,
+      start_datetime: startTime,
+      end_datetime: endTime,
+      run_hours: runHours > 0 ? runHours : null,
+      downtime_minutes: downtimeMinutes,
       machine: payload.machine || '',
       operator_name: payload.operator || '',
       produced_qty: produced,
@@ -28139,17 +30009,14 @@ function saveProductionBulk(entries, token) {
         msg.indexOf('column "so_number" of relation "production_entries" does not exist') !== -1 ||
         msg.indexOf('column "line_no" of relation "production_entries" does not exist') !== -1 ||
         msg.indexOf('column "job_reference" of relation "production_entries" does not exist') !== -1;
-      if (!missingJobIdentityCols) throw err;
+      const missingOptionalEntryTimeCols = _prodOptionalEntryTimeColsMissing_(err);
+      if (!missingJobIdentityCols && !missingOptionalEntryTimeCols) throw err;
 
       // Keep production posting working on environments that have not applied the
-      // optional job-split migration yet.
+      // optional job-split / actual-hours migrations yet.
       if (corr2PlyDetailRefs.length) throw err;
       _supabaseBulkInsertMinimalInChunks_('production_entries', inserts.map(function(row) {
-        const copy = Object.assign({}, row);
-        delete copy.so_number;
-        delete copy.line_no;
-        delete copy.job_reference;
-        return copy;
+        return _prodStripOptionalEntryCols_(row);
       }), 40, 300000);
     }
     _prodBumpQueueVersion_();
@@ -28193,9 +30060,10 @@ function _prodGetCorr2PlyDetailsByEntryIds_(entryIds) {
 function _prodBuildAdminEntryView_(entry, detailRows) {
   const row = _prodHydrateEntryIdentityFromNotes_(entry || {});
   const parsed = _prodParseEntryNotes_(row);
-  const startValue = parsed.startDateTime || row.entry_datetime || '';
-  const endValue = parsed.endDateTime || row.entry_datetime || '';
+  const startValue = row.start_datetime || parsed.startDateTime || row.entry_datetime || '';
+  const endValue = row.end_datetime || parsed.endDateTime || row.entry_datetime || '';
   const details = Array.isArray(detailRows) ? detailRows : [];
+  const runHours = Number(row.run_hours || 0) || _prodRunHoursFromDateTimes_(startValue, endValue);
   return {
     id: row.id || '',
     woId: row.wo_id || '',
@@ -28211,7 +30079,8 @@ function _prodBuildAdminEntryView_(entry, detailRows) {
     producedQty: Number(row.produced_qty || 0),
     rejectedQty: Number(row.rejected_qty || 0),
     okQty: _getProductionEntryGoodQty_(row),
-    downtimeMinutes: Number(parsed.downtimeMinutes || 0),
+    runHours: runHours,
+    downtimeMinutes: row.downtime_minutes == null ? Number(parsed.downtimeMinutes || 0) : Number(row.downtime_minutes || 0),
     downtimeReason: parsed.downtimeReason || '',
     entryDateTime: row.entry_datetime || '',
     createdBy: row.created_by || '',
@@ -28239,6 +30108,10 @@ function _prodBuildEntryAuditPayload_(entry) {
     line_no: parsed.lineNo || '',
     job_reference: parsed.jobReference || '',
     entry_datetime: row.entry_datetime || '',
+    start_datetime: row.start_datetime || parsed.startDateTime || '',
+    end_datetime: row.end_datetime || parsed.endDateTime || '',
+    run_hours: Number(row.run_hours || 0) || _prodRunHoursFromDateTimes_(row.start_datetime || parsed.startDateTime || '', row.end_datetime || parsed.endDateTime || ''),
+    downtime_minutes: row.downtime_minutes == null ? Number(parsed.downtimeMinutes || 0) : Number(row.downtime_minutes || 0),
     machine: row.machine || '',
     operator_name: row.operator_name || '',
     produced_qty: Number(row.produced_qty || 0),
@@ -28527,21 +30400,43 @@ function prodAdminUpdateEntry(payload, token) {
     downtimeReason: downtimeReason
   };
   const goodQty = Math.max(producedQty - rejectedQty, 0);
+  const runHours = _prodRunHoursFromDateTimes_(startDateTime, endDateTime);
   const updatedNotes = _prodBuildEntryNotes_(updatedPayload);
-  supabaseUpdateMinimal('production_entries', {
-    id: 'eq.' + id
-  }, {
+  const updateRow = {
     entry_datetime: endDateTime.toISOString(),
+    start_datetime: startDateTime.toISOString(),
+    end_datetime: endDateTime.toISOString(),
+    run_hours: runHours > 0 ? runHours : null,
+    downtime_minutes: downtimeMinutes,
     machine: machine,
     operator_name: operator,
     produced_qty: producedQty,
     rejected_qty: rejectedQty,
     ok_qty: goodQty,
     downtime_reason: updatedNotes
-  });
+  };
+  try {
+    supabaseUpdateMinimal('production_entries', {
+      id: 'eq.' + id
+    }, updateRow);
+  } catch (err) {
+    if (!_prodOptionalEntryTimeColsMissing_(err)) throw err;
+    const fallbackRow = Object.assign({}, updateRow);
+    delete fallbackRow.start_datetime;
+    delete fallbackRow.end_datetime;
+    delete fallbackRow.run_hours;
+    delete fallbackRow.downtime_minutes;
+    supabaseUpdateMinimal('production_entries', {
+      id: 'eq.' + id
+    }, fallbackRow);
+  }
   _prodUpdateCorr2PlyDetailsForEntry_(id, producedQty, rejectedQty);
   const updated = _prodGetDetailedEntryRowById_(id) || Object.assign({}, existing, {
     entry_datetime: endDateTime.toISOString(),
+    start_datetime: startDateTime.toISOString(),
+    end_datetime: endDateTime.toISOString(),
+    run_hours: runHours,
+    downtime_minutes: downtimeMinutes,
     machine: machine,
     operator_name: operator,
     produced_qty: producedQty,
@@ -28799,6 +30694,7 @@ this.invPostPurchaseReceiptBulk = invPostPurchaseReceiptBulk;
 this.invPostDirectReceipt = invPostDirectReceipt;
 this.invPostIssue = invPostIssue;
 this.invPostIssueBulk = invPostIssueBulk;
+this.invPostWOReturn = invPostWOReturn;
 this.invGetWorkOrderForIssue = invGetWorkOrderForIssue;
 this.invPostRTS = invPostRTS;
 this.invPostRFP = invPostRFP;
@@ -28807,6 +30703,7 @@ this.invPreviewRateCorrection = invPreviewRateCorrection;
 this.invApplyRateCorrection = invApplyRateCorrection;
 
 this.invListIssueJSON = invListIssueJSON;
+this.invListWOIssueVarianceJSON = invListWOIssueVarianceJSON;
 this.invListRTSJSON = invListRTSJSON;
 this.invListRFPJSON = invListRFPJSON;
 this.invListAdjustmentsJSON = invListAdjustmentsJSON;
@@ -28830,6 +30727,7 @@ this.billingGetDataset = billingGetDataset;
 this.billingGetOpenJobsForInvoice = billingGetOpenJobsForInvoice;
 this.billingGetDraftDocumentNo = billingGetDraftDocumentNo;
 this.billingListInvoices = billingListInvoices;
+this.billingExportDocumentRegisterExcel = billingExportDocumentRegisterExcel;
 this.billingGetInvoiceEditor = billingGetInvoiceEditor;
 this.createInvoice = createInvoice;
 this.updateInvoiceDraft = updateInvoiceDraft;
@@ -28839,6 +30737,22 @@ this.deletePostedInvoiceAdmin = deletePostedInvoiceAdmin;
 this.reopenPostedInvoiceAdmin = reopenPostedInvoiceAdmin;
 this.previewInvoicePDF = previewInvoicePDF;
 this.billingGetInvoicePrintData = billingGetInvoicePrintData;
+
+// ===== NPD / SAMPLING =====
+this.npdBootstrap = npdBootstrap;
+this.npdListRequests = npdListRequests;
+this.npdListCostingQueue = npdListCostingQueue;
+this.npdListSampleQueue = npdListSampleQueue;
+this.npdGetRequest = npdGetRequest;
+this.npdCreateRequest = npdCreateRequest;
+this.npdSubmitCosting = npdSubmitCosting;
+this.npdCreateSampleWorkOrder = npdCreateSampleWorkOrder;
+this.npdReleaseSampleWorkOrder = npdReleaseSampleWorkOrder;
+this.npdSaveSampleProduction = npdSaveSampleProduction;
+this.npdSaveSampleVerification = npdSaveSampleVerification;
+this.npdSubmitSampleToCustomer = npdSubmitSampleToCustomer;
+this.npdRecordCustomerDecision = npdRecordCustomerDecision;
+this.npdCreateNextVersion = npdCreateNextVersion;
 
 // ===== REPORTS / MIS =====
 function _reportsSafeNumber_(value) {
@@ -29221,6 +31135,9 @@ this.adminUpdateUser = adminUpdateUser;
 this.adminResetUserPassword = adminResetUserPassword;
 this.adminListPermissions = adminListPermissions;
 this.adminSaveRolePermissions = adminSaveRolePermissions;
+this.adminListMachineHourRates = adminListMachineHourRates;
+this.adminSaveMachineHourRate = adminSaveMachineHourRate;
+this.adminDeactivateMachineHourRate = adminDeactivateMachineHourRate;
 this.checklistGetMyTasks = checklistGetMyTasks;
 this.checklistMarkDone = checklistMarkDone;
 this.checklistGetBlockingStatus = checklistGetBlockingStatus;
@@ -30181,14 +32098,157 @@ function _reportsSectionWipAgeing_(token, params) {
   };
 }
 
+function _reportsProcessCostKey_(soLineId, jobKey) {
+  return String(soLineId || '') + '||' + String(jobKey || '');
+}
+
+function _reportsProcessCostStageKey_(soLineId, jobKey, routingId) {
+  return _reportsProcessCostKey_(soLineId, jobKey) + '||' + String(routingId || '');
+}
+
+function _reportsJobProcessCostRows_(filters) {
+  return _reportsSelectAll_('v_report_job_process_cost_lines', {
+    filters: _reportsApplyDateFilterToQuery_(filters, 'so_date'),
+    order: 'so_date.desc,so_number.desc,line_no.asc,job_reference.asc,production_date.asc,stage_sequence.asc'
+  }).map(function(row) {
+    return {
+      soLineId: row.so_line_id || '',
+      soNumber: row.so_number || '',
+      lineNo: row.line_no == null ? '' : String(row.line_no),
+      soDate: row.so_date || '',
+      billingStatus: row.billing_status || 'PENDING',
+      clientName: row.client_name || row.client_code || '',
+      division: row.division || '',
+      productCode: row.product_code || '',
+      productName: row.product_name || '',
+      category: row.category || '',
+      jobKey: row.job_key || '',
+      jobReference: row.job_reference || '',
+      routingId: row.routing_id || '',
+      productionStage: row.production_stage || '',
+      productionMachine: row.production_machine || '',
+      machineKey: row.machine_key || '',
+      productionDate: row.production_date || '',
+      processHours: _reportsSafeNumber_(row.process_hours),
+      actualProcessHours: _reportsSafeNumber_(row.actual_process_hours),
+      allocatedProcessHours: _reportsSafeNumber_(row.allocated_process_hours),
+      processHoursSource: row.hours_source || '',
+      mhr: _reportsSafeNumber_(row.mhr),
+      processCost: _reportsSafeNumber_(row.process_cost),
+      mhrMissing: row.mhr_missing === true,
+      processCostStatus: row.mhr_missing === true ? 'MHR_MISSING' : (_reportsSafeNumber_(row.process_cost) > 0 ? 'COSTED' : 'NO_COST'),
+      productionEntryCount: _reportsSafeNumber_(row.production_entry_count),
+      actualHourEntryCount: _reportsSafeNumber_(row.actual_hour_entry_count),
+      goodQty: _reportsSafeNumber_(row.good_qty),
+      producedQty: _reportsSafeNumber_(row.produced_qty),
+      rejectedQty: _reportsSafeNumber_(row.rejected_qty),
+      machineDayNetHours: _reportsSafeNumber_(row.machine_day_net_hours),
+      machineDayGoodQty: _reportsSafeNumber_(row.machine_day_good_qty)
+    };
+  }).filter(function(row) {
+    const pendingPass = filters.pendingOnly ? String(row.billingStatus || '').toUpperCase() !== 'CLOSED' : true;
+    return pendingPass &&
+      _reportsDatePasses_(row.soDate, filters) &&
+      _reportsTextPasses_(row, filters, [
+        'soNumber',
+        'lineNo',
+        'billingStatus',
+        'clientName',
+        'division',
+        'productCode',
+        'productName',
+        'category',
+        'jobReference',
+        'productionStage',
+        'productionMachine',
+        'machineKey',
+        'processHoursSource',
+        'processCostStatus'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'billingStatus',
+        'division',
+        'productionStage',
+        'productionMachine',
+        'processHoursSource',
+        'processCostStatus'
+      ]);
+  });
+}
+
+function _reportsBuildProcessCostMaps_(rows) {
+  const byJob = {};
+  const byStage = {};
+
+  function ensure(map, key) {
+    if (!map[key]) {
+      map[key] = {
+        processHours: 0,
+        processCost: 0,
+        mhrMissingCount: 0,
+        entryCount: 0,
+        actualHourEntryCount: 0,
+        machines: {},
+        machineKeys: {},
+        hourSources: {}
+      };
+    }
+    return map[key];
+  }
+
+  (rows || []).forEach(function(row) {
+    const jobKey = _reportsProcessCostKey_(row.soLineId, row.jobKey);
+    const stageKey = _reportsProcessCostStageKey_(row.soLineId, row.jobKey, row.routingId);
+    [ensure(byJob, jobKey), ensure(byStage, stageKey)].forEach(function(bucket) {
+      bucket.processHours += _reportsSafeNumber_(row.processHours);
+      bucket.processCost += _reportsSafeNumber_(row.processCost);
+      bucket.entryCount += _reportsSafeNumber_(row.productionEntryCount);
+      bucket.actualHourEntryCount += _reportsSafeNumber_(row.actualHourEntryCount);
+      if (row.mhrMissing) bucket.mhrMissingCount++;
+      if (row.productionMachine) bucket.machines[row.productionMachine] = true;
+      if (row.machineKey) bucket.machineKeys[row.machineKey] = true;
+      if (row.processHoursSource) bucket.hourSources[row.processHoursSource] = true;
+    });
+  });
+
+  function finalizeMap(map) {
+    Object.keys(map).forEach(function(key) {
+      const bucket = map[key];
+      bucket.processHours = _reportsRoundNumber_(bucket.processHours, 4);
+      bucket.processCost = _reportsRoundNumber_(bucket.processCost, 2);
+      bucket.machineList = Object.keys(bucket.machines).sort().join(', ');
+      bucket.machineKeyList = Object.keys(bucket.machineKeys).sort().join(', ');
+      bucket.processHoursSource = Object.keys(bucket.hourSources).sort().join(', ');
+      bucket.processCostStatus = bucket.mhrMissingCount > 0 ? 'MHR_MISSING' : (bucket.processCost > 0 ? 'COSTED' : 'NO_COST');
+    });
+  }
+
+  finalizeMap(byJob);
+  finalizeMap(byStage);
+
+  return { byJob: byJob, byStage: byStage };
+}
+
 function _reportsSectionJobProfitability_(token, params) {
   _reportsRequireSession_(token);
   const filters = _reportsNormalizeFilters_(params);
+  const processCostRows = _reportsJobProcessCostRows_(filters);
+  const processCostMaps = _reportsBuildProcessCostMaps_(processCostRows);
   const rows = _reportsSelectAll_('v_report_job_profitability_phase1', {
     filters: _reportsApplyDateFilterToQuery_(filters, 'so_date'),
     order: 'so_date.desc,so_number.desc,line_no.asc,job_reference.asc'
   }).map(function(row) {
+    const cost = processCostMaps.byJob[_reportsProcessCostKey_(row.so_line_id || '', row.job_key || '')] || {};
+    const processHours = _reportsSafeNumber_(cost.processHours);
+    const processCost = _reportsSafeNumber_(cost.processCost);
+    const actualCostTillDate = _reportsSafeNumber_(row.actual_cost_till_date);
+    const completeCostTillDate = _reportsRoundNumber_(actualCostTillDate + processCost, 2);
+    const producedGoodsValue = _reportsSafeNumber_(row.produced_goods_value);
+    const orderValue = _reportsSafeNumber_(row.order_value);
+    const billedValue = _reportsSafeNumber_(row.billed_value);
     return {
+      soLineId: row.so_line_id || '',
+      jobKey: row.job_key || '',
       soNumber: row.so_number || '',
       lineNo: row.line_no == null ? '' : String(row.line_no),
       soDate: row.so_date || '',
@@ -30219,19 +32279,31 @@ function _reportsSectionJobProfitability_(token, params) {
       plateCost: _reportsSafeNumber_(row.plate_cost),
       dieCost: _reportsSafeNumber_(row.die_cost),
       toolingCost: _reportsSafeNumber_(row.tooling_cost),
-      actualCostTillDate: _reportsSafeNumber_(row.actual_cost_till_date),
+      actualCostTillDate: actualCostTillDate,
+      processHours: processHours,
+      processCost: processCost,
+      processCostStatus: cost.processCostStatus || 'NO_COST',
+      processHoursSource: cost.processHoursSource || '',
+      processCostMachines: cost.machineList || '',
+      completeCostTillDate: completeCostTillDate,
       latestProductionStage: row.latest_production_stage || '',
       latestProductionMachine: row.latest_production_machine || '',
       latestStageOkQty: _reportsSafeNumber_(row.latest_stage_ok_qty),
       latestStageProducedPct: _reportsSafeNumber_(row.latest_stage_produced_pct),
       latestProductionAt: row.latest_production_at || '',
-      producedGoodsValue: _reportsSafeNumber_(row.produced_goods_value),
+      producedGoodsValue: producedGoodsValue,
       profitOnProducedValue: _reportsSafeNumber_(row.profit_on_produced_value),
       profitPctOnProducedValue: _reportsSafeNumber_(row.profit_pct_on_produced_value),
       profitOnOrderValue: _reportsSafeNumber_(row.profit_on_order_value),
       profitPctOnOrderValue: _reportsSafeNumber_(row.profit_pct_on_order_value),
       profitOnBilledValue: _reportsSafeNumber_(row.profit_on_billed_value),
       profitPctOnBilledValue: _reportsSafeNumber_(row.profit_pct_on_billed_value),
+      profitOnProducedComplete: _reportsRoundNumber_(producedGoodsValue - completeCostTillDate, 2),
+      profitPctOnProducedComplete: producedGoodsValue > 0 ? _reportsRoundNumber_(((producedGoodsValue - completeCostTillDate) / producedGoodsValue) * 100, 2) : 0,
+      profitOnOrderComplete: _reportsRoundNumber_(orderValue - completeCostTillDate, 2),
+      profitPctOnOrderComplete: orderValue > 0 ? _reportsRoundNumber_(((orderValue - completeCostTillDate) / orderValue) * 100, 2) : 0,
+      profitOnBilledComplete: _reportsRoundNumber_(billedValue - completeCostTillDate, 2),
+      profitPctOnBilledComplete: billedValue > 0 ? _reportsRoundNumber_(((billedValue - completeCostTillDate) / billedValue) * 100, 2) : 0,
       invoiceNos: row.invoice_nos || '',
       firstInvoiceDate: row.first_invoice_date || '',
       lastInvoiceDate: row.last_invoice_date || '',
@@ -30258,13 +32330,17 @@ function _reportsSectionJobProfitability_(token, params) {
         'woNumbers',
         'latestProductionStage',
         'latestProductionMachine',
+        'processCostStatus',
+        'processHoursSource',
+        'processCostMachines',
         'invoiceNos'
       ]) &&
       _reportsStatusPasses_(row, filters, [
         'soLineStatus',
         'billingStatus',
         'division',
-        'jobType'
+        'jobType',
+        'processCostStatus'
       ]);
   });
 
@@ -30272,7 +32348,11 @@ function _reportsSectionJobProfitability_(token, params) {
     filters: _reportsApplyDateFilterToQuery_(filters, 'so_date'),
     order: 'so_date.desc,so_number.desc,line_no.asc,job_reference.asc,stage_sequence.asc,last_production_at.desc'
   }).map(function(row) {
+    const stageCost = processCostMaps.byStage[_reportsProcessCostStageKey_(row.so_line_id || '', row.job_key || '', row.routing_id || '')] || {};
     return {
+      soLineId: row.so_line_id || '',
+      jobKey: row.job_key || '',
+      routingId: row.routing_id || '',
       soNumber: row.so_number || '',
       lineNo: row.line_no == null ? '' : String(row.line_no),
       soDate: row.so_date || '',
@@ -30300,6 +32380,11 @@ function _reportsSectionJobProfitability_(token, params) {
       rejectedQty: _reportsSafeNumber_(row.rejected_qty),
       producedGoodsValue: _reportsSafeNumber_(row.produced_goods_value),
       actualCostTillDate: _reportsSafeNumber_(row.actual_cost_till_date),
+      processHours: _reportsSafeNumber_(stageCost.processHours),
+      processCost: _reportsSafeNumber_(stageCost.processCost),
+      processCostStatus: stageCost.processCostStatus || 'NO_COST',
+      processHoursSource: stageCost.processHoursSource || '',
+      processCostMachines: stageCost.machineList || '',
       profitOnStageValue: _reportsSafeNumber_(row.profit_on_stage_value),
       profitPctOnStageValue: _reportsSafeNumber_(row.profit_pct_on_stage_value),
       firstProductionAt: row.first_production_at || '',
@@ -30325,6 +32410,9 @@ function _reportsSectionJobProfitability_(token, params) {
         'woNumbers',
         'productionStage',
         'productionMachine',
+        'processCostStatus',
+        'processHoursSource',
+        'processCostMachines',
         'stagePosition'
       ]) &&
       _reportsStatusPasses_(row, filters, [
@@ -30333,6 +32421,7 @@ function _reportsSectionJobProfitability_(token, params) {
         'division',
         'productionStage',
         'productionMachine',
+        'processCostStatus',
         'stagePosition'
       ]);
   });
@@ -30348,14 +32437,16 @@ function _reportsSectionJobProfitability_(token, params) {
       producedGoodsValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.producedGoodsValue); }, 0) * 100) / 100,
       stageProducedGoodsValue: Math.round(productionStageRows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.producedGoodsValue); }, 0) * 100) / 100,
       orderValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.orderValue); }, 0) * 100) / 100,
-      actualCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.actualCostTillDate); }, 0) * 100) / 100,
-      profitOnProducedValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.profitOnProducedValue); }, 0) * 100) / 100
+      phase1Cost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.actualCostTillDate); }, 0) * 100) / 100,
+      processCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.processCost); }, 0) * 100) / 100,
+      completeCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.completeCostTillDate); }, 0) * 100) / 100,
+      profitOnProducedValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.profitOnProducedComplete); }, 0) * 100) / 100
     },
     tables: [{
       key: 'jobprofitability',
       title: 'Job Profitability Report',
-      subtitle: 'Phase 1 cost includes RM issued value plus plate and die cost. Produced value uses latest production stage OK qty at SO line sales rate.',
-      minWidth: 4850,
+      subtitle: 'Complete cost includes RM issued value, plate/die tooling cost, and MHR-based process cost. Process cost requires active machine hour rates.',
+      minWidth: 5700,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -30387,7 +32478,13 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'plateCost', label:'Plate Cost', type:'money' },
         { key:'dieCost', label:'Die Cost', type:'money' },
         { key:'toolingCost', label:'Tooling Cost', type:'money' },
-        { key:'actualCostTillDate', label:'Actual Cost Till Date', type:'money' },
+        { key:'actualCostTillDate', label:'Phase 1 Cost', type:'money' },
+        { key:'processHours', label:'Process Hrs', type:'number' },
+        { key:'processCost', label:'Process Cost', type:'money' },
+        { key:'processCostStatus', label:'Process Cost Status', type:'status' },
+        { key:'processHoursSource', label:'Hours Source', type:'status' },
+        { key:'processCostMachines', label:'Process Machines' },
+        { key:'completeCostTillDate', label:'Complete Cost Till Date', type:'money' },
         { key:'latestProductionStage', label:'Latest Production Stage' },
         { key:'latestProductionMachine', label:'Latest Machine' },
         { key:'latestStageOkQty', label:'Latest Stage OK Qty', type:'number' },
@@ -30400,6 +32497,12 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'profitPctOnOrderValue', label:'Profit % on SO Value', type:'number' },
         { key:'profitOnBilledValue', label:'Profit on Billed Value', type:'money' },
         { key:'profitPctOnBilledValue', label:'Profit % on Billed Value', type:'number' },
+        { key:'profitOnProducedComplete', label:'Complete Profit on Produced', type:'money' },
+        { key:'profitPctOnProducedComplete', label:'Complete Profit % on Produced', type:'number' },
+        { key:'profitOnOrderComplete', label:'Complete Profit on SO', type:'money' },
+        { key:'profitPctOnOrderComplete', label:'Complete Profit % on SO', type:'number' },
+        { key:'profitOnBilledComplete', label:'Complete Profit on Billed', type:'money' },
+        { key:'profitPctOnBilledComplete', label:'Complete Profit % on Billed', type:'number' },
         { key:'invoiceNos', label:'Invoice Nos' },
         { key:'firstInvoiceDate', label:'First Invoice Date', type:'date' },
         { key:'lastInvoiceDate', label:'Last Invoice Date', type:'date' },
@@ -30409,8 +32512,8 @@ function _reportsSectionJobProfitability_(token, params) {
     }, {
       key: 'jobProductionStages',
       title: 'Production Stage-wise Produced Goods Value',
-      subtitle: 'One row per job and production stage. Use this for printed, laminated, die-cut, and other stage-wise produced value review; LATEST marks the current furthest produced stage.',
-      minWidth: 3500,
+      subtitle: 'One row per job and production stage. Includes MHR-based process hours and cost where machine rates are available.',
+      minWidth: 3950,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -30437,13 +32540,53 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'producedQty', label:'Produced Qty', type:'number' },
         { key:'rejectedQty', label:'Rejected Qty', type:'number' },
         { key:'producedGoodsValue', label:'Stage Produced Value', type:'money' },
-        { key:'actualCostTillDate', label:'Actual Cost Till Date', type:'money' },
+        { key:'actualCostTillDate', label:'Phase 1 Cost', type:'money' },
+        { key:'processHours', label:'Process Hrs', type:'number' },
+        { key:'processCost', label:'Process Cost', type:'money' },
+        { key:'processCostStatus', label:'Process Cost Status', type:'status' },
+        { key:'processHoursSource', label:'Hours Source', type:'status' },
+        { key:'processCostMachines', label:'Process Machines' },
         { key:'profitOnStageValue', label:'Profit on Stage Value', type:'money' },
         { key:'profitPctOnStageValue', label:'Profit % on Stage Value', type:'number' },
         { key:'firstProductionAt', label:'First Production', type:'datetime' },
         { key:'lastProductionAt', label:'Last Production', type:'datetime' }
       ],
       rows: productionStageRows
+    }, {
+      key: 'jobProcessCostLines',
+      title: 'Process Cost Lines',
+      subtitle: 'Actual production-entry net hours are used when all entries have start/end time; otherwise the machine/date allocation fallback is used. MHR_MISSING rows need a machine hour rate in Admin Console.',
+      minWidth: 4050,
+      columns: [
+        { key:'soNumber', label:'SO No' },
+        { key:'lineNo', label:'Line' },
+        { key:'soDate', label:'SO Date', type:'date' },
+        { key:'clientName', label:'Client' },
+        { key:'division', label:'Division' },
+        { key:'productCode', label:'Product Code' },
+        { key:'productName', label:'Product' },
+        { key:'category', label:'Category' },
+        { key:'jobReference', label:'Job Ref' },
+        { key:'productionDate', label:'Production Date', type:'date' },
+        { key:'productionStage', label:'Production Stage' },
+        { key:'productionMachine', label:'Machine' },
+        { key:'machineKey', label:'Machine Key' },
+        { key:'productionEntryCount', label:'Entries', type:'number' },
+        { key:'goodQty', label:'Good Qty', type:'number' },
+        { key:'producedQty', label:'Produced Qty', type:'number' },
+        { key:'rejectedQty', label:'Rejected Qty', type:'number' },
+        { key:'machineDayNetHours', label:'Machine Day Net Hrs', type:'number' },
+        { key:'machineDayGoodQty', label:'Machine Day Good Qty', type:'number' },
+        { key:'actualProcessHours', label:'Actual Net Hrs', type:'number' },
+        { key:'allocatedProcessHours', label:'Allocated Net Hrs', type:'number' },
+        { key:'actualHourEntryCount', label:'Actual Hour Entries', type:'number' },
+        { key:'processHoursSource', label:'Hours Source', type:'status' },
+        { key:'processHours', label:'Process Hrs Used', type:'number' },
+        { key:'mhr', label:'MHR', type:'money' },
+        { key:'processCost', label:'Process Cost', type:'money' },
+        { key:'processCostStatus', label:'Cost Status', type:'status' }
+      ],
+      rows: processCostRows
     }]
   };
 }
@@ -31908,65 +34051,165 @@ function _reportsSectionDelay_(token, params) {
 function _reportsSectionProduction_(token, params) {
   _reportsRequireSession_(token);
   const filters = _reportsNormalizeFilters_(params);
-  const rows = _reportsTrySelect_('v_report_production_bottleneck', {
-    filters: _reportsApplyDateFilterToQuery_(filters, 'expected_delivery'),
-    order: 'balance_qty.desc,wo_date.asc',
-    limit: 1000
-  });
-  const finalRows = rows.length ? rows.map(function(row) {
+  const dateFilters = Object.assign({}, filters, { pendingOnly: false });
+  if (!dateFilters.fromDate && !dateFilters.toDate) {
+    dateFilters.toDate = _reportsTodayDateKey_();
+    dateFilters.fromDate = _reportsShiftDateKey_(dateFilters.toDate, -1);
+  }
+  const rows = _reportsSelectAll_('v_report_production_entry_logs', {
+    filters: _reportsApplyDateFilterToQuery_(dateFilters, 'production_date'),
+    order: 'production_date.desc,machine.asc,wo_number.asc,entry_local_ts.desc'
+  }).map(function(row) {
     return {
+      productionEntryId: row.production_entry_id || '',
+      productionDate: row.production_date || '',
+      entryLocalTs: row.entry_local_ts || '',
+      startLocalTs: row.start_local_ts || '',
+      endLocalTs: row.end_local_ts || '',
+      machine: row.machine || '',
+      productionEntryMachine: row.production_entry_machine || '',
+      operatorName: row.operator_name || '',
       woNumber: row.wo_number || '',
-      processName: row.process_name || '',
+      woDate: row.wo_date || '',
+      woStatus: row.wo_status || '',
+      soNumber: row.so_number || '',
+      lineNo: row.line_no || '',
+      jobReference: row.job_reference || '',
       clientName: row.client_name || '',
-      productNames: row.product_names || '',
-      plannedMachine: row.planned_machine || '',
-      balanceQty: _reportsSafeNumber_(row.balance_qty),
-      status: row.status || '',
+      productName: row.product_name || '',
+      artworkNo: row.artwork_no || '',
+      category: row.category || '',
       expectedDelivery: row.expected_delivery || '',
-      ageingDays: _reportsDateDiffDays_(row.wo_date || row.expected_delivery || '')
-    };
-  }) : (prodGetStageQueue({ showPendingAll: true }, token).rows || []).map(function(row) {
-    return {
-      woNumber: row.workOrderNo || '',
-      processName: row.processName || '',
-      clientName: row.clientName || '',
-      productNames: row.productName || '',
-      plannedMachine: row.plannedMachine || '',
-      balanceQty: _reportsSafeNumber_(row.balanceQty),
-      status: row.status || '',
-      expectedDelivery: row.expectedDelivery || '',
-      ageingDays: _reportsDateDiffDays_(row.woDate || row.expectedDelivery || '')
+      processName: row.process_name || '',
+      department: row.department || '',
+      plannedMachine: row.planned_machine || '',
+      plannedQty: _reportsSafeNumber_(row.planned_qty),
+      completedQty: _reportsSafeNumber_(row.completed_qty),
+      routingStatus: row.routing_status || '',
+      orderQty: _reportsSafeNumber_(row.order_qty),
+      orderUnit: row.order_unit || '',
+      producedQty: _reportsSafeNumber_(row.produced_qty),
+      rejectedQty: _reportsSafeNumber_(row.rejected_qty),
+      okQty: _reportsSafeNumber_(row.ok_qty),
+      goodQty: _reportsSafeNumber_(row.good_qty),
+      downtimeMinutes: _reportsSafeNumber_(row.downtime_minutes),
+      downtimeHours: _reportsSafeNumber_(row.downtime_hours),
+      runHours: _reportsSafeNumber_(row.run_hours),
+      netRunHours: _reportsSafeNumber_(row.net_run_hours),
+      hoursSource: row.hours_source || '',
+      downtimeLabel: row.downtime_label || '',
+      downtimeReasonRaw: row.downtime_reason_raw || '',
+      createdBy: row.created_by || '',
+      createdAt: row.created_at || ''
     };
   }).filter(function(row) {
-    const pendingPass = filters.pendingOnly ? String(row.status || '').toUpperCase() !== 'COMPLETED' : true;
-    return pendingPass &&
-      _reportsDatePasses_(row.expectedDelivery, filters) &&
-      _reportsTextPasses_(row, filters, ['woNumber','processName','clientName','productNames','plannedMachine']) &&
-      _reportsStatusPasses_(row, filters, ['status','processName']);
+    return _reportsDatePasses_(row.productionDate, dateFilters) &&
+      _reportsTextPasses_(row, filters, [
+        'productionDate',
+        'entryLocalTs',
+        'startLocalTs',
+        'endLocalTs',
+        'machine',
+        'productionEntryMachine',
+        'operatorName',
+        'woNumber',
+        'soNumber',
+        'lineNo',
+        'jobReference',
+        'clientName',
+        'productName',
+        'artworkNo',
+        'category',
+        'processName',
+        'department',
+        'plannedMachine',
+        'routingStatus',
+        'downtimeLabel',
+        'hoursSource',
+        'downtimeReasonRaw',
+        'createdBy'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'machine',
+        'operatorName',
+        'processName',
+        'department',
+        'plannedMachine',
+        'routingStatus',
+        'woStatus',
+        'hoursSource',
+        'downtimeLabel',
+        'createdBy'
+      ]);
+  });
+  const machineMap = {};
+  const woMap = {};
+  rows.forEach(function(row) {
+    if (row.machine) machineMap[row.machine] = true;
+    if (row.woNumber) woMap[row.woNumber] = true;
   });
 
   return {
     ok: true,
-    title: 'Production Bottleneck',
+    title: 'Production Entry Logs',
     metrics: {
-      totalRows: finalRows.length,
-      holdRows: finalRows.filter(function(r){ return String(r.status || '').toUpperCase() === 'HOLD'; }).length,
-      inProgressRows: finalRows.filter(function(r){ return String(r.status || '').toUpperCase() === 'IN_PROGRESS'; }).length,
-      pendingQty: finalRows.reduce(function(sum, r){ return sum + _reportsSafeNumber_(r.balanceQty); }, 0)
+      totalEntries: rows.length,
+      machines: Object.keys(machineMap).length,
+      workOrders: Object.keys(woMap).length,
+      producedQty: rows.reduce(function(sum, r){ return sum + _reportsSafeNumber_(r.producedQty); }, 0),
+      goodQty: rows.reduce(function(sum, r){ return sum + _reportsSafeNumber_(r.goodQty); }, 0),
+      runHours: rows.reduce(function(sum, r){ return sum + _reportsSafeNumber_(r.runHours); }, 0),
+      netRunHours: rows.reduce(function(sum, r){ return sum + _reportsSafeNumber_(r.netRunHours); }, 0),
+      downtimeHours: rows.reduce(function(sum, r){ return sum + _reportsSafeNumber_(r.downtimeHours); }, 0)
     },
     tables: [{
-      key: 'production',
-      title: 'Production Stage Backlog',
-      subtitle: 'Open production rows ordered by pending quantity.',
+      key: 'production-entry-logs',
+      title: 'Production Entry Logs',
+      subtitle: 'Date-wise production entry rows by machine, work order, SO line, process, operator, quantities, run hours, and downtime.',
+      minWidth: 3950,
       columns: [
+        { key:'productionDate', label:'Production Date', type:'date' },
+        { key:'entryLocalTs', label:'Entry Time', type:'datetime' },
+        { key:'startLocalTs', label:'Start Time', type:'datetime' },
+        { key:'endLocalTs', label:'End Time', type:'datetime' },
+        { key:'machine', label:'Machine' },
+        { key:'operatorName', label:'Operator' },
         { key:'woNumber', label:'WO No' },
-        { key:'processName', label:'Process' },
+        { key:'woDate', label:'WO Date', type:'date' },
+        { key:'soNumber', label:'SO No' },
+        { key:'lineNo', label:'Line' },
+        { key:'jobReference', label:'Job Ref' },
         { key:'clientName', label:'Client' },
-        { key:'plannedMachine', label:'Machine' },
-        { key:'balanceQty', label:'Balance Qty', type:'number' },
-        { key:'status', label:'Status', type:'status' }
+        { key:'productName', label:'Product' },
+        { key:'artworkNo', label:'Artwork' },
+        { key:'category', label:'Category' },
+        { key:'expectedDelivery', label:'Expected Delivery', type:'date' },
+        { key:'processName', label:'Process' },
+        { key:'department', label:'Department' },
+        { key:'plannedMachine', label:'Planned Machine' },
+        { key:'productionEntryMachine', label:'Entry Machine' },
+        { key:'plannedQty', label:'Planned Qty', type:'number' },
+        { key:'completedQty', label:'Completed Qty', type:'number' },
+        { key:'routingStatus', label:'Routing Status', type:'status' },
+        { key:'orderQty', label:'Order Qty', type:'number' },
+        { key:'orderUnit', label:'Order Unit' },
+        { key:'producedQty', label:'Produced Qty', type:'number' },
+        { key:'rejectedQty', label:'Rejected Qty', type:'number' },
+        { key:'okQty', label:'OK Qty', type:'number' },
+        { key:'goodQty', label:'Good Qty', type:'number' },
+        { key:'runHours', label:'Run Hrs', type:'number' },
+        { key:'netRunHours', label:'Net Run Hrs', type:'number' },
+        { key:'hoursSource', label:'Hours Source', type:'status' },
+        { key:'downtimeMinutes', label:'Downtime Min', type:'number' },
+        { key:'downtimeHours', label:'Downtime Hrs', type:'number' },
+        { key:'downtimeLabel', label:'Downtime Reason' },
+        { key:'downtimeReasonRaw', label:'Downtime Raw' },
+        { key:'woStatus', label:'WO Status', type:'status' },
+        { key:'createdBy', label:'Created By' },
+        { key:'createdAt', label:'Created At', type:'datetime' },
+        { key:'productionEntryId', label:'Entry ID' }
       ],
-      rows: _reportsTake_(finalRows, 60)
+      rows: rows
     }]
   };
 }
@@ -32414,6 +34657,87 @@ function _reportsProductionNOPRows_(filters, fromDate, toDate) {
   });
 }
 
+function _reportsProductionNOPEntryLineRows_(filters, fromDate, toDate) {
+  const rows = _reportsSelectAll_('v_report_production_nop_entry_lines', {
+    filters: _reportsDateRangeFilters_(fromDate, toDate, 'production_date'),
+    order: 'production_date.desc,machine.asc,entry_local_ts.asc,wo_number.asc'
+  }).map(function(row) {
+    return {
+      productionEntryId: row.production_entry_id || '',
+      productionDate: row.production_date || '',
+      entryLocalTs: row.entry_local_ts || '',
+      machine: row.machine || '',
+      machineKey: row.machine_key || '',
+      targetUnit: row.target_unit || '',
+      targetHourlyOutput: _reportsSafeNumber_(row.target_hourly_output),
+      standardMakeReadyMinutes: _reportsSafeNumber_(row.standard_make_ready_minutes),
+      operatorName: row.operator_name || '',
+      woNumber: row.wo_number || '',
+      soNumber: row.so_number || '',
+      lineNo: row.line_no || '',
+      jobReference: row.job_reference || '',
+      clientName: row.client_name || '',
+      productName: row.product_name || '',
+      artworkNo: row.artwork_no || '',
+      category: row.category || '',
+      expectedDelivery: row.expected_delivery || '',
+      processName: row.process_name || '',
+      department: row.department || '',
+      plannedMachine: row.planned_machine || '',
+      productionEntryMachine: row.production_entry_machine || '',
+      rawMachine: row.raw_machine || '',
+      plannedQty: _reportsSafeNumber_(row.planned_qty),
+      completedQty: _reportsSafeNumber_(row.completed_qty),
+      routingStatus: row.routing_status || '',
+      orderQty: _reportsSafeNumber_(row.order_qty),
+      orderUnit: row.order_unit || '',
+      producedQty: _reportsSafeNumber_(row.produced_qty),
+      rejectedQty: _reportsSafeNumber_(row.rejected_qty),
+      okQty: _reportsSafeNumber_(row.ok_qty),
+      nopProductionQty: _reportsSafeNumber_(row.nop_production_qty),
+      downtimeMinutes: _reportsSafeNumber_(row.downtime_minutes),
+      downtimeHours: _reportsSafeNumber_(row.downtime_hours),
+      downtimeLabel: row.downtime_label || '',
+      downtimeReasonRaw: row.downtime_reason_raw || ''
+    };
+  });
+
+  return rows.filter(function(row) {
+    return _reportsTextPasses_(row, filters, [
+        'productionDate',
+        'entryLocalTs',
+        'machine',
+        'operatorName',
+        'woNumber',
+        'soNumber',
+        'lineNo',
+        'jobReference',
+        'clientName',
+        'productName',
+        'artworkNo',
+        'category',
+        'processName',
+        'department',
+        'plannedMachine',
+        'productionEntryMachine',
+        'rawMachine',
+        'routingStatus',
+        'downtimeLabel',
+        'downtimeReasonRaw'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'machine',
+        'operatorName',
+        'processName',
+        'department',
+        'plannedMachine',
+        'routingStatus',
+        'downtimeLabel',
+        'downtimeReasonRaw'
+      ]);
+  });
+}
+
 function _reportsProductionNOPMachineStandards_() {
   return [
     { key:'SM74', machine:'Heidelberg SM74', target:4125 },
@@ -32424,6 +34748,8 @@ function _reportsProductionNOPMachineStandards_() {
     { key:'DIE1', machine:'Die Cutting 01', target:880 },
     { key:'DIE2', machine:'Die Cutting 02', target:880 },
     { key:'DIE3', machine:'Die Cutting 03', target:880 },
+    { key:'DIE4', machine:'Die Cutting 04', target:880 },
+    { key:'DIE5', machine:'Die Cutting 05', target:880 },
     { key:'2PLY', machine:'2 Ply Making Machine', target:2000 },
     { key:'ROTARY', machine:'Rotary Cutting', target:650 },
     { key:'AUTOWINDOW', machine:'Auto Window Pasting', target:1500 },
@@ -32597,6 +34923,60 @@ function _reportsProductionNOPDetailRows_(rows, selectedDate, weekStartDate) {
   });
 }
 
+function _reportsProductionNOPEntryLineDetailRows_(rows, selectedDate, weekStartDate) {
+  return (rows || []).map(function(row) {
+    const productionDate = String(row.productionDate || '');
+    const inWeek = productionDate >= String(weekStartDate || '') && productionDate <= String(selectedDate || '');
+    const periodScope = productionDate === String(selectedDate || '')
+      ? 'On Date / WTD / MTD'
+      : (inWeek ? 'WTD / MTD' : 'MTD');
+    return {
+      periodScope: periodScope,
+      productionDate: row.productionDate,
+      entryLocalTs: row.entryLocalTs,
+      machine: row.machine,
+      machineKey: row.machineKey,
+      targetUnit: row.targetUnit,
+      targetHourlyOutput: _reportsRoundNumber_(row.targetHourlyOutput, 2),
+      operatorName: row.operatorName,
+      woNumber: row.woNumber,
+      soNumber: row.soNumber,
+      lineNo: row.lineNo,
+      jobReference: row.jobReference,
+      clientName: row.clientName,
+      productName: row.productName,
+      artworkNo: row.artworkNo,
+      category: row.category,
+      expectedDelivery: row.expectedDelivery,
+      processName: row.processName,
+      department: row.department,
+      plannedMachine: row.plannedMachine,
+      productionEntryMachine: row.productionEntryMachine,
+      rawMachine: row.rawMachine,
+      plannedQty: _reportsRoundNumber_(row.plannedQty, 2),
+      completedQty: _reportsRoundNumber_(row.completedQty, 2),
+      routingStatus: row.routingStatus,
+      orderQty: _reportsRoundNumber_(row.orderQty, 2),
+      orderUnit: row.orderUnit,
+      producedQty: _reportsRoundNumber_(row.producedQty, 2),
+      rejectedQty: _reportsRoundNumber_(row.rejectedQty, 2),
+      okQty: _reportsRoundNumber_(row.okQty, 2),
+      nopProductionQty: _reportsRoundNumber_(row.nopProductionQty, 2),
+      downtimeMinutes: _reportsRoundNumber_(row.downtimeMinutes, 2),
+      downtimeHours: _reportsRoundNumber_(row.downtimeHours, 2),
+      downtimeLabel: row.downtimeLabel,
+      downtimeReasonRaw: row.downtimeReasonRaw,
+      productionEntryId: row.productionEntryId
+    };
+  }).sort(function(a, b) {
+    return String(b.productionDate || '').localeCompare(String(a.productionDate || '')) ||
+      String(a.machine || '').localeCompare(String(b.machine || '')) ||
+      String(a.entryLocalTs || '').localeCompare(String(b.entryLocalTs || '')) ||
+      String(a.woNumber || '').localeCompare(String(b.woNumber || '')) ||
+      String(a.soNumber || '').localeCompare(String(b.soNumber || ''));
+  });
+}
+
 function _reportsSectionProductionNOP_(token, params) {
   _reportsRequireSession_(token);
   const filters = _reportsNormalizeFilters_(params);
@@ -32606,8 +34986,10 @@ function _reportsSectionProductionNOP_(token, params) {
   const onDateRows = _reportsProductionNOPRows_(filters, selectedToDate, selectedToDate);
   const weekSourceRows = _reportsProductionNOPRows_(filters, weekStart, selectedToDate);
   const mtdSourceRows = _reportsProductionNOPRows_(filters, monthStart, selectedToDate);
+  const mtdEntryLineSourceRows = _reportsProductionNOPEntryLineRows_(filters, monthStart, selectedToDate);
   const summaryRows = _reportsProductionNOPSummaryRows_(onDateRows, weekSourceRows, mtdSourceRows, filters);
   const detailRows = _reportsProductionNOPDetailRows_(mtdSourceRows, selectedToDate, weekStart);
+  const entryLineRows = _reportsProductionNOPEntryLineDetailRows_(mtdEntryLineSourceRows, selectedToDate, weekStart);
   const belowTargetRows = summaryRows.filter(function(row) {
     return row.onDateDeviationPct < 0 || row.weekDeviationPct < 0 || row.mtdDeviationPct < 0;
   }).length;
@@ -32650,6 +35032,50 @@ function _reportsSectionProductionNOP_(token, params) {
           { key:'mtdDeviationPct', label:'Deviation%', type:'deviationPct' }
         ],
         rows: summaryRows
+      },
+      {
+        key: 'nop-line-wise-details',
+        title: 'Line Wise NOP Entry Details',
+        subtitle: 'Production-entry rows for the selected MTD window. NOP Qty is the quantity included in the machine/date production total used by the summary.',
+        minWidth: 4100,
+        columns: [
+          { key:'periodScope', label:'Scope' },
+          { key:'productionDate', label:'Production Date', type:'date' },
+          { key:'entryLocalTs', label:'Entry Time', type:'datetime' },
+          { key:'machine', label:'Report Machine' },
+          { key:'targetUnit', label:'Target Unit' },
+          { key:'targetHourlyOutput', label:'Target NOP', type:'number' },
+          { key:'operatorName', label:'Operator' },
+          { key:'woNumber', label:'WO No' },
+          { key:'soNumber', label:'SO No' },
+          { key:'lineNo', label:'Line' },
+          { key:'jobReference', label:'Job Ref' },
+          { key:'clientName', label:'Client' },
+          { key:'productName', label:'Product' },
+          { key:'artworkNo', label:'Artwork' },
+          { key:'category', label:'Category' },
+          { key:'expectedDelivery', label:'Expected Delivery', type:'date' },
+          { key:'processName', label:'Process' },
+          { key:'department', label:'Department' },
+          { key:'plannedMachine', label:'Planned Machine' },
+          { key:'productionEntryMachine', label:'Entry Machine' },
+          { key:'rawMachine', label:'Machine Input' },
+          { key:'plannedQty', label:'Planned Qty', type:'number' },
+          { key:'completedQty', label:'Completed Qty', type:'number' },
+          { key:'routingStatus', label:'Routing Status', type:'status' },
+          { key:'orderQty', label:'Order Qty', type:'number' },
+          { key:'orderUnit', label:'Order Unit' },
+          { key:'producedQty', label:'Produced Qty', type:'number' },
+          { key:'rejectedQty', label:'Rejected Qty', type:'number' },
+          { key:'okQty', label:'OK Qty', type:'number' },
+          { key:'nopProductionQty', label:'NOP Qty', type:'number' },
+          { key:'downtimeMinutes', label:'Downtime Min', type:'number' },
+          { key:'downtimeHours', label:'Downtime Hrs', type:'number' },
+          { key:'downtimeLabel', label:'Downtime Reason' },
+          { key:'downtimeReasonRaw', label:'Downtime Raw' },
+          { key:'productionEntryId', label:'Entry ID' }
+        ],
+        rows: entryLineRows
       },
       {
         key: 'nop-daily-calculation-details',

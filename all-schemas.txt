@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 3TTUMutx7iK9wdQcGA06U1SKYrSgYMpnp9jMGIXAXReSjOSAsLnEwcsPIfttG54
+\restrict bQXDXIVOaE6C6sKe5f5nKYzfSyH1pNbrKl5apeSz2MZOKwpff1rBZqlFQG55YyY
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.3
@@ -1973,6 +1973,82 @@ $$;
 
 
 --
+-- Name: generate_npd_sample_wo_no(text, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.generate_npd_sample_wo_no(p_prefix text DEFAULT 'SMP-WO'::text, p_request_date date DEFAULT CURRENT_DATE) RETURNS text
+    LANGUAGE plpgsql
+    AS $$
+declare
+  v_prefix text := coalesce(nullif(trim(p_prefix), ''), 'SMP-WO');
+  v_date date := coalesce(p_request_date, current_date);
+  v_fy_start integer;
+  v_fy text;
+  v_next integer;
+begin
+  if extract(month from v_date) >= 4 then
+    v_fy_start := extract(year from v_date)::integer;
+  else
+    v_fy_start := extract(year from v_date)::integer - 1;
+  end if;
+
+  v_fy := right(v_fy_start::text, 2) || '-' || right((v_fy_start + 1)::text, 2);
+
+  insert into public.npd_sequences(prefix, fy, last_no)
+  values (v_prefix, v_fy, 0)
+  on conflict (prefix, fy) do nothing;
+
+  update public.npd_sequences
+     set last_no = last_no + 1,
+         updated_at = now()
+   where prefix = v_prefix
+     and fy = v_fy
+   returning last_no into v_next;
+
+  return v_prefix || lpad(v_next::text, 4, '0') || '_' || v_fy;
+end;
+$$;
+
+
+--
+-- Name: generate_npd_sampling_id(text, date); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.generate_npd_sampling_id(p_prefix text DEFAULT 'NPD-SMP'::text, p_request_date date DEFAULT CURRENT_DATE) RETURNS text
+    LANGUAGE plpgsql
+    AS $$
+declare
+  v_prefix text := coalesce(nullif(trim(p_prefix), ''), 'NPD-SMP');
+  v_date date := coalesce(p_request_date, current_date);
+  v_fy_start integer;
+  v_fy text;
+  v_next integer;
+begin
+  if extract(month from v_date) >= 4 then
+    v_fy_start := extract(year from v_date)::integer;
+  else
+    v_fy_start := extract(year from v_date)::integer - 1;
+  end if;
+
+  v_fy := right(v_fy_start::text, 2) || '-' || right((v_fy_start + 1)::text, 2);
+
+  insert into public.npd_sequences(prefix, fy, last_no)
+  values (v_prefix, v_fy, 0)
+  on conflict (prefix, fy) do nothing;
+
+  update public.npd_sequences
+     set last_no = last_no + 1,
+         updated_at = now()
+   where prefix = v_prefix
+     and fy = v_fy
+   returning last_no into v_next;
+
+  return v_prefix || lpad(v_next::text, 4, '0') || '_' || v_fy;
+end;
+$$;
+
+
+--
 -- Name: generate_so_number(text, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2327,10 +2403,60 @@ $$;
 
 
 --
+-- Name: inv_wo_issue_variance_export_ui(text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.inv_wo_issue_variance_export_ui(p_search text DEFAULT NULL::text, p_limit integer DEFAULT 50000, p_offset integer DEFAULT 0) RETURNS TABLE(wo_no text, job_card_no text, sales_orders text, client text, product text, artwork_no text, department text, material_key text, material text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, pending_qty numeric, excess_qty numeric, status text, issue_batches text, return_batches text, last_issue_date timestamp with time zone, last_return_date timestamp with time zone)
+    LANGUAGE sql STABLE
+    AS $$
+  select
+    v.wo_no,
+    v.job_card_no,
+    v.sales_orders,
+    v.client,
+    v.product,
+    v.artwork_no,
+    v.department,
+    v.material_key,
+    v.material,
+    v.gsm,
+    v.deckle_mm,
+    v.cut_mm,
+    v.uom,
+    v.required_qty,
+    v.issued_qty,
+    v.returned_qty,
+    v.net_issued_qty,
+    v.pending_qty,
+    v.excess_qty,
+    v.status,
+    v.issue_batches,
+    v.return_batches,
+    v.last_issue_date,
+    v.last_return_date
+  from public.inv_wo_issue_variance_export_v v
+  where (
+    p_search is null
+    or trim(p_search) = ''
+    or v.wo_no ilike '%' || trim(p_search) || '%'
+    or v.job_card_no ilike '%' || trim(p_search) || '%'
+    or v.sales_orders ilike '%' || trim(p_search) || '%'
+    or v.client ilike '%' || trim(p_search) || '%'
+    or v.product ilike '%' || trim(p_search) || '%'
+    or v.artwork_no ilike '%' || trim(p_search) || '%'
+    or v.material ilike '%' || trim(p_search) || '%'
+  )
+  order by v.wo_no desc, v.material asc, v.material_key asc
+  limit greatest(coalesce(p_limit, 50000), 1)
+  offset greatest(coalesce(p_offset, 0), 0);
+$$;
+
+
+--
 -- Name: inv_work_order_issue_detail_ui(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.inv_work_order_issue_detail_ui(p_wo_no text) RETURNS TABLE(wo_number text, issue_department text, line_status text, material_key text, item_label text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, remaining_qty numeric)
+CREATE FUNCTION public.inv_work_order_issue_detail_ui(p_wo_no text) RETURNS TABLE(wo_number text, issue_department text, line_status text, material_key text, item_label text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, remaining_qty numeric, excess_qty numeric)
     LANGUAGE sql STABLE
     AS $$
   select
@@ -2345,7 +2471,10 @@ CREATE FUNCTION public.inv_work_order_issue_detail_ui(p_wo_no text) RETURNS TABL
     r.uom::text,
     r.required_qty,
     r.issued_qty,
-    r.remaining_qty
+    r.returned_qty,
+    r.net_issued_qty,
+    r.remaining_qty,
+    r.excess_qty
   from public.inv_wo_issue_requirement_fast_v r
   where r.wo_number = trim(p_wo_no)
   order by r.item_label asc, r.material_key asc;
@@ -2356,7 +2485,7 @@ $$;
 -- Name: inv_work_orders_for_issue_summary_ui(text, text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.inv_work_orders_for_issue_summary_ui(p_status text DEFAULT NULL::text, p_search text DEFAULT NULL::text, p_limit integer DEFAULT 50000, p_offset integer DEFAULT 0) RETURNS TABLE(wo_no text, issue_department text, material_status text, required_qty numeric, issued_qty numeric, remaining_qty numeric, line_count integer)
+CREATE FUNCTION public.inv_work_orders_for_issue_summary_ui(p_status text DEFAULT NULL::text, p_search text DEFAULT NULL::text, p_limit integer DEFAULT 50000, p_offset integer DEFAULT 0) RETURNS TABLE(wo_no text, issue_department text, material_status text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, remaining_qty numeric, excess_qty numeric, line_count integer)
     LANGUAGE sql STABLE
     AS $$
   select
@@ -2365,7 +2494,10 @@ CREATE FUNCTION public.inv_work_orders_for_issue_summary_ui(p_status text DEFAUL
     s.material_status::text,
     s.required_qty,
     s.issued_qty,
+    s.returned_qty,
+    s.net_issued_qty,
     s.remaining_qty,
+    s.excess_qty,
     s.line_count::integer
   from public.inv_wo_issue_status_fast_v s
   where (p_status is null or trim(p_status) = '' or upper(s.material_status) = upper(trim(p_status)))
@@ -2397,7 +2529,7 @@ $$;
 -- Name: inv_work_orders_for_issue_ui(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.inv_work_orders_for_issue_ui() RETURNS TABLE(wo_no text, issue_department text, material_status text, material_key text, item_label text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, remaining_qty numeric)
+CREATE FUNCTION public.inv_work_orders_for_issue_ui() RETURNS TABLE(wo_no text, issue_department text, material_status text, material_key text, item_label text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, remaining_qty numeric)
     LANGUAGE sql STABLE
     AS $$
   select
@@ -2412,6 +2544,8 @@ CREATE FUNCTION public.inv_work_orders_for_issue_ui() RETURNS TABLE(wo_no text, 
     r.uom::text,
     r.required_qty,
     r.issued_qty,
+    r.returned_qty,
+    r.net_issued_qty,
     r.remaining_qty
   from public.inv_wo_issue_requirement_v r
   join public.inv_wo_issue_status_v s on s.wo_number = r.wo_number
@@ -6541,7 +6675,7 @@ CREATE VIEW public.inv_issue_register_v AS
     batch_no,
     remarks
    FROM public.v_inventory_transaction_register
-  WHERE (ref_type = 'ISSUE'::text);
+  WHERE (ref_type = ANY (ARRAY['ISSUE'::text, 'WO-RETURN'::text]));
 
 
 --
@@ -6659,7 +6793,7 @@ CREATE TABLE public.inv_rate_corrections (
 -- Name: inv_receipt_register_v; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.inv_receipt_register_v WITH (security_invoker='on') AS
+CREATE VIEW public.inv_receipt_register_v AS
  SELECT id,
     item_id,
     created_at,
@@ -7347,6 +7481,30 @@ CREATE VIEW public.inv_wo_issue_requirement_fast_v AS
                     WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['SHEET'::text, 'SHEETS'::text])) THEN 'SHEET'::text
                     ELSE upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text))
                 END
+        ), returned_rows AS (
+         SELECT il.ref_no AS wo_number,
+            upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text)) AS item_label_key,
+            COALESCE(split_part(il.remarks, '|'::text, 2), ''::text) AS gsm_key,
+            COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric) AS deckle_key,
+            COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric) AS cut_key,
+                CASE
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['RM'::text, 'R.M.'::text, 'RUNNING METER'::text, 'RUNNING METERS'::text])) THEN 'RM'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])) THEN 'KG'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['SHEET'::text, 'SHEETS'::text])) THEN 'SHEET'::text
+                    ELSE upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text))
+                END AS uom_key,
+            sum(COALESCE(il.qty_in, (0)::numeric)) AS returned_qty
+           FROM public.inv_ledger il
+          WHERE ((upper(COALESCE(il.ref_type, ''::text)) = 'WO-RETURN'::text) AND (COALESCE(il.qty_in, (0)::numeric) > (0)::numeric) AND (COALESCE(il.remarks, ''::text) <> ''::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.inv_ledger rev
+                  WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
+          GROUP BY il.ref_no, (upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text))), COALESCE(split_part(il.remarks, '|'::text, 2), ''::text), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric),
+                CASE
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['RM'::text, 'R.M.'::text, 'RUNNING METER'::text, 'RUNNING METERS'::text])) THEN 'RM'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])) THEN 'KG'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['SHEET'::text, 'SHEETS'::text])) THEN 'SHEET'::text
+                    ELSE upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text))
+                END
         )
  SELECT src.wo_id,
     src.wo_number,
@@ -7360,13 +7518,17 @@ CREATE VIEW public.inv_wo_issue_requirement_fast_v AS
     src.uom,
     src.required_qty,
     COALESCE(sum(ir.issued_qty), (0)::numeric) AS issued_qty,
-    GREATEST((src.required_qty - COALESCE(sum(ir.issued_qty), (0)::numeric)), (0)::numeric) AS remaining_qty,
+    GREATEST((src.required_qty - GREATEST((COALESCE(sum(ir.issued_qty), (0)::numeric) - COALESCE(sum(rr.returned_qty), (0)::numeric)), (0)::numeric)), (0)::numeric) AS remaining_qty,
         CASE
-            WHEN (GREATEST((src.required_qty - COALESCE(sum(ir.issued_qty), (0)::numeric)), (0)::numeric) > 0.0001) THEN 'PENDING'::text
+            WHEN (GREATEST((src.required_qty - GREATEST((COALESCE(sum(ir.issued_qty), (0)::numeric) - COALESCE(sum(rr.returned_qty), (0)::numeric)), (0)::numeric)), (0)::numeric) > 0.0001) THEN 'PENDING'::text
             ELSE 'ISSUED'::text
-        END AS line_status
-   FROM (public.inv_wo_issue_material_source_v src
+        END AS line_status,
+    COALESCE(sum(rr.returned_qty), (0)::numeric) AS returned_qty,
+    GREATEST((COALESCE(sum(ir.issued_qty), (0)::numeric) - COALESCE(sum(rr.returned_qty), (0)::numeric)), (0)::numeric) AS net_issued_qty,
+    GREATEST((GREATEST((COALESCE(sum(ir.issued_qty), (0)::numeric) - COALESCE(sum(rr.returned_qty), (0)::numeric)), (0)::numeric) - src.required_qty), (0)::numeric) AS excess_qty
+   FROM ((public.inv_wo_issue_material_source_v src
      LEFT JOIN issued_rows ir ON (((ir.wo_number = src.wo_number) AND (ir.item_label_key = upper(COALESCE(src.item_label, ''::text))) AND ((COALESCE(src.gsm, ''::text) = ''::text) OR (ir.gsm_key = ''::text) OR (ir.gsm_key = COALESCE(src.gsm, ''::text))) AND ((COALESCE(src.deckle_mm, (0)::numeric) = (0)::numeric) OR (ir.deckle_key = (0)::numeric) OR (abs((ir.deckle_key - COALESCE(src.deckle_mm, (0)::numeric))) <= 0.01)) AND ((COALESCE(src.cut_mm, (0)::numeric) = (0)::numeric) OR (ir.cut_key = (0)::numeric) OR (abs((ir.cut_key - COALESCE(src.cut_mm, (0)::numeric))) <= 0.01)) AND ((ir.uom_key = upper(COALESCE(src.uom, ''::text))) OR ((src.issue_department = 'Flexo'::text) AND (src.uom = 'RM'::text) AND (ir.uom_key = ANY (ARRAY['RM'::text, 'KG'::text])))))))
+     LEFT JOIN returned_rows rr ON (((rr.wo_number = src.wo_number) AND (rr.item_label_key = upper(COALESCE(src.item_label, ''::text))) AND ((COALESCE(src.gsm, ''::text) = ''::text) OR (rr.gsm_key = ''::text) OR (rr.gsm_key = COALESCE(src.gsm, ''::text))) AND ((COALESCE(src.deckle_mm, (0)::numeric) = (0)::numeric) OR (rr.deckle_key = (0)::numeric) OR (abs((rr.deckle_key - COALESCE(src.deckle_mm, (0)::numeric))) <= 0.01)) AND ((COALESCE(src.cut_mm, (0)::numeric) = (0)::numeric) OR (rr.cut_key = (0)::numeric) OR (abs((rr.cut_key - COALESCE(src.cut_mm, (0)::numeric))) <= 0.01)) AND ((rr.uom_key = upper(COALESCE(src.uom, ''::text))) OR ((src.issue_department = 'Flexo'::text) AND (src.uom = 'RM'::text) AND (rr.uom_key = ANY (ARRAY['RM'::text, 'KG'::text])))))))
   GROUP BY src.wo_id, src.wo_number, src.status, src.issue_department, src.material_key, src.item_label, src.gsm, src.deckle_mm, src.cut_mm, src.uom, src.required_qty;
 
 
@@ -7392,6 +7554,15 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
             sum(COALESCE(il.qty_out, (0)::numeric)) AS issued_qty
            FROM public.inv_ledger il
           WHERE ((upper(COALESCE(il.ref_type, ''::text)) = 'ISSUE'::text) AND (COALESCE(il.qty_out, (0)::numeric) > (0)::numeric) AND (COALESCE(il.remarks, ''::text) <> ''::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.inv_ledger rev
+                  WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
+          GROUP BY il.ref_no, il.remarks
+        ), returned_rows AS (
+         SELECT il.ref_no AS wo_number,
+            il.remarks AS material_key,
+            sum(COALESCE(il.qty_in, (0)::numeric)) AS returned_qty
+           FROM public.inv_ledger il
+          WHERE ((upper(COALESCE(il.ref_type, ''::text)) = 'WO-RETURN'::text) AND (COALESCE(il.qty_in, (0)::numeric) > (0)::numeric) AND (COALESCE(il.remarks, ''::text) <> ''::text) AND (NOT (EXISTS ( SELECT 1
                    FROM public.inv_ledger rev
                   WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
           GROUP BY il.ref_no, il.remarks
@@ -7432,10 +7603,12 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
                     WHEN ((upper(wb.raw_department) ~~ '%FLEXO%'::text) AND (wb.flexo_running_meter > (0)::numeric) AND (((upper(COALESCE(NULLIF(mr.item_name, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 1), ''::text), ''::text)) = COALESCE(wb.flexo_item_code, '##'::text)) OR (upper(COALESCE(NULLIF(mr.item_name, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 1), ''::text), ''::text)) = COALESCE(wb.flexo_item_name, '##'::text))) OR (upper(COALESCE(NULLIF(mr.uom, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 5), ''::text))) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])))) THEN wb.flexo_running_meter
                     ELSE COALESCE(mr.required_qty, (0)::numeric)
                 END AS required_qty,
-            COALESCE(ir.issued_qty, (0)::numeric) AS issued_qty
-           FROM ((wo_base wb
+            COALESCE(ir.issued_qty, (0)::numeric) AS issued_qty,
+            COALESCE(rr.returned_qty, (0)::numeric) AS returned_qty
+           FROM (((wo_base wb
              JOIN material_rows mr ON ((mr.wo_id = wb.id)))
              LEFT JOIN issued_rows ir ON (((ir.wo_number = wb.wo_number) AND (ir.material_key = mr.material_key))))
+             LEFT JOIN returned_rows rr ON (((rr.wo_number = wb.wo_number) AND (rr.material_key = mr.material_key))))
         )
  SELECT wo_id,
     wo_number,
@@ -7449,11 +7622,14 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
     uom,
     required_qty,
     issued_qty,
-    GREATEST((required_qty - issued_qty), (0)::numeric) AS remaining_qty,
+    GREATEST((required_qty - GREATEST((issued_qty - returned_qty), (0)::numeric)), (0)::numeric) AS remaining_qty,
         CASE
-            WHEN (GREATEST((required_qty - issued_qty), (0)::numeric) > 0.0001) THEN 'PENDING'::text
+            WHEN (GREATEST((required_qty - GREATEST((issued_qty - returned_qty), (0)::numeric)), (0)::numeric) > 0.0001) THEN 'PENDING'::text
             ELSE 'ISSUED'::text
-        END AS line_status
+        END AS line_status,
+    returned_qty,
+    GREATEST((issued_qty - returned_qty), (0)::numeric) AS net_issued_qty,
+    GREATEST((GREATEST((issued_qty - returned_qty), (0)::numeric) - required_qty), (0)::numeric) AS excess_qty
    FROM prepared;
 
 
@@ -7477,7 +7653,10 @@ CREATE VIEW public.inv_wo_issue_status_fast_v AS
                 END AS material_status,
             sum(inv_wo_issue_requirement_fast_v.required_qty) AS required_qty,
             sum(inv_wo_issue_requirement_fast_v.issued_qty) AS issued_qty,
+            sum(inv_wo_issue_requirement_fast_v.returned_qty) AS returned_qty,
+            sum(inv_wo_issue_requirement_fast_v.net_issued_qty) AS net_issued_qty,
             sum(inv_wo_issue_requirement_fast_v.remaining_qty) AS remaining_qty,
+            sum(inv_wo_issue_requirement_fast_v.excess_qty) AS excess_qty,
             count(*) AS line_count
            FROM public.inv_wo_issue_requirement_fast_v
           GROUP BY inv_wo_issue_requirement_fast_v.wo_number
@@ -7497,7 +7676,10 @@ CREATE VIEW public.inv_wo_issue_status_fast_v AS
     COALESCE(rs.required_qty, (0)::numeric) AS required_qty,
     COALESCE(rs.issued_qty, (0)::numeric) AS issued_qty,
     COALESCE(rs.remaining_qty, (0)::numeric) AS remaining_qty,
-    COALESCE(rs.line_count, (0)::bigint) AS line_count
+    COALESCE(rs.line_count, (0)::bigint) AS line_count,
+    COALESCE(rs.returned_qty, (0)::numeric) AS returned_qty,
+    COALESCE(rs.net_issued_qty, (0)::numeric) AS net_issued_qty,
+    COALESCE(rs.excess_qty, (0)::numeric) AS excess_qty
    FROM (wo_base wb
      LEFT JOIN req_status rs ON ((rs.wo_number = wb.wo_number)));
 
@@ -7515,9 +7697,108 @@ CREATE VIEW public.inv_wo_issue_status_v AS
         END AS material_status,
     sum(required_qty) AS required_qty,
     sum(issued_qty) AS issued_qty,
-    sum(remaining_qty) AS remaining_qty
+    sum(remaining_qty) AS remaining_qty,
+    sum(returned_qty) AS returned_qty,
+    sum(net_issued_qty) AS net_issued_qty,
+    sum(excess_qty) AS excess_qty
    FROM public.inv_wo_issue_requirement_v
   GROUP BY wo_number;
+
+
+--
+-- Name: work_order_jobs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.work_order_jobs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    wo_id uuid,
+    so_number text,
+    line_no integer,
+    product_name text,
+    qty numeric,
+    unit text,
+    ups numeric,
+    artwork_no text,
+    client_name text,
+    expected_delivery date,
+    po_number text,
+    job_priority text,
+    product_remarks text,
+    so_remarks text,
+    job_reference text,
+    prepress_remark text,
+    category text,
+    sales_rep text,
+    so_date date,
+    group_ups numeric
+);
+
+
+--
+-- Name: inv_wo_issue_variance_export_v; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.inv_wo_issue_variance_export_v AS
+ WITH job_rollup AS (
+         SELECT woj.wo_id,
+            string_agg(DISTINCT NULLIF(TRIM(BOTH FROM woj.job_reference), ''::text), ' / '::text) AS job_card_no,
+            string_agg(DISTINCT NULLIF(TRIM(BOTH FROM woj.so_number), ''::text), ' / '::text) AS sales_orders,
+            string_agg(DISTINCT NULLIF(TRIM(BOTH FROM woj.client_name), ''::text), ' / '::text) AS client,
+            string_agg(DISTINCT NULLIF(TRIM(BOTH FROM woj.product_name), ''::text), ' / '::text) AS product,
+            string_agg(DISTINCT NULLIF(TRIM(BOTH FROM woj.artwork_no), ''::text), ' / '::text) AS artwork_no
+           FROM public.work_order_jobs woj
+          GROUP BY woj.wo_id
+        ), ledger_rows AS (
+         SELECT upper(COALESCE(il.ref_type, ''::text)) AS ref_type,
+            il.ref_no AS wo_number,
+            il.remarks AS material_key,
+            il.batch_no,
+            il.created_at
+           FROM public.inv_ledger il
+          WHERE ((upper(COALESCE(il.ref_type, ''::text)) = ANY (ARRAY['ISSUE'::text, 'WO-RETURN'::text])) AND (COALESCE(il.remarks, ''::text) <> ''::text) AND ((COALESCE(il.qty_out, (0)::numeric) > (0)::numeric) OR (COALESCE(il.qty_in, (0)::numeric) > (0)::numeric)) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.inv_ledger rev
+                  WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
+        ), ledger_rollup AS (
+         SELECT lr.wo_number,
+            lr.material_key,
+            string_agg(DISTINCT NULLIF(TRIM(BOTH FROM lr.batch_no), ''::text), ', '::text) FILTER (WHERE (lr.ref_type = 'ISSUE'::text)) AS issue_batches,
+            string_agg(DISTINCT NULLIF(TRIM(BOTH FROM lr.batch_no), ''::text), ', '::text) FILTER (WHERE (lr.ref_type = 'WO-RETURN'::text)) AS return_batches,
+            max(lr.created_at) FILTER (WHERE (lr.ref_type = 'ISSUE'::text)) AS last_issue_date,
+            max(lr.created_at) FILTER (WHERE (lr.ref_type = 'WO-RETURN'::text)) AS last_return_date
+           FROM ledger_rows lr
+          GROUP BY lr.wo_number, lr.material_key
+        )
+ SELECT r.wo_number AS wo_no,
+    COALESCE(j.job_card_no, ''::text) AS job_card_no,
+    COALESCE(j.sales_orders, ''::text) AS sales_orders,
+    COALESCE(j.client, ''::text) AS client,
+    COALESCE(j.product, ''::text) AS product,
+    COALESCE(j.artwork_no, ''::text) AS artwork_no,
+    r.issue_department AS department,
+    r.material_key,
+    r.item_label AS material,
+    r.gsm,
+    r.deckle_mm,
+    r.cut_mm,
+    r.uom,
+    r.required_qty,
+    r.issued_qty,
+    r.returned_qty,
+    r.net_issued_qty,
+    r.remaining_qty AS pending_qty,
+    r.excess_qty,
+        CASE
+            WHEN (COALESCE(r.excess_qty, (0)::numeric) > 0.0001) THEN 'EXCESS'::text
+            WHEN (COALESCE(r.remaining_qty, (0)::numeric) > 0.0001) THEN 'PENDING'::text
+            ELSE 'OK'::text
+        END AS status,
+    COALESCE(l.issue_batches, ''::text) AS issue_batches,
+    COALESCE(l.return_batches, ''::text) AS return_batches,
+    l.last_issue_date,
+    l.last_return_date
+   FROM ((public.inv_wo_issue_requirement_fast_v r
+     LEFT JOIN job_rollup j ON ((j.wo_id = r.wo_id)))
+     LEFT JOIN ledger_rollup l ON (((l.wo_number = r.wo_number) AND (l.material_key = r.material_key))));
 
 
 --
@@ -7775,6 +8056,268 @@ CREATE TABLE public.items (
 
 
 --
+-- Name: machine_hour_rates; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.machine_hour_rates (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    machine_key text NOT NULL,
+    machine_name text NOT NULL,
+    mhr numeric(14,2) DEFAULT 0 NOT NULL,
+    effective_from date DEFAULT CURRENT_DATE NOT NULL,
+    effective_to date,
+    active boolean DEFAULT true NOT NULL,
+    notes text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text
+);
+
+
+--
+-- Name: npd_costing_evaluations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.npd_costing_evaluations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    request_id uuid NOT NULL,
+    version_id uuid NOT NULL,
+    status text DEFAULT 'SUBMITTED'::text NOT NULL,
+    costing_no text,
+    raw_material_value numeric(18,4) DEFAULT 0 NOT NULL,
+    process_value numeric(18,4) DEFAULT 0 NOT NULL,
+    tooling_value numeric(18,4) DEFAULT 0 NOT NULL,
+    sample_cost numeric(18,4) DEFAULT 0 NOT NULL,
+    unit_rate numeric(18,4) DEFAULT 0 NOT NULL,
+    total_estimated_value numeric(18,4) DEFAULT 0 NOT NULL,
+    remarks text,
+    calc_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    submitted_at timestamp with time zone,
+    submitted_by text,
+    approved_at timestamp with time zone,
+    approved_by text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text,
+    CONSTRAINT npd_costing_evaluations_amount_chk CHECK (((raw_material_value >= (0)::numeric) AND (process_value >= (0)::numeric) AND (tooling_value >= (0)::numeric) AND (sample_cost >= (0)::numeric) AND (unit_rate >= (0)::numeric) AND (total_estimated_value >= (0)::numeric))),
+    CONSTRAINT npd_costing_evaluations_status_chk CHECK ((status = ANY (ARRAY['DRAFT'::text, 'SUBMITTED'::text, 'APPROVED'::text, 'REJECTED'::text])))
+);
+
+
+--
+-- Name: npd_customer_submissions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.npd_customer_submissions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    request_id uuid NOT NULL,
+    version_id uuid NOT NULL,
+    submitted_qty integer DEFAULT 0 NOT NULL,
+    submitted_at timestamp with time zone DEFAULT now() NOT NULL,
+    submitted_by text,
+    customer_result text NOT NULL,
+    feedback text,
+    resubmission_required boolean DEFAULT false NOT NULL,
+    next_version_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by text,
+    CONSTRAINT npd_customer_submissions_qty_chk CHECK ((submitted_qty >= 0)),
+    CONSTRAINT npd_customer_submissions_result_chk CHECK ((customer_result = ANY (ARRAY['PENDING'::text, 'APPROVED'::text, 'REJECTED'::text, 'RESUBMISSION_REQUIRED'::text])))
+);
+
+
+--
+-- Name: npd_paper_specs; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.npd_paper_specs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    version_id uuid NOT NULL,
+    line_no integer NOT NULL,
+    gsm numeric(12,2) NOT NULL,
+    quality text NOT NULL,
+    flute text,
+    remarks text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT npd_paper_specs_flute_chk CHECK (((flute IS NULL) OR (flute = ANY (ARRAY['E'::text, 'B'::text])))),
+    CONSTRAINT npd_paper_specs_gsm_chk CHECK ((gsm > (0)::numeric)),
+    CONSTRAINT npd_paper_specs_line_chk CHECK ((line_no > 0)),
+    CONSTRAINT npd_paper_specs_quality_chk CHECK ((quality = ANY (ARRAY['Greyback Duplex'::text, 'Whiteback Duplex'::text, 'Semi Kraft Paper'::text, 'Virgin Kraft Paper'::text, 'FBB Board'::text, 'SBS Board'::text, 'Taat Paper'::text, 'Food Grade Kraft Brown'::text, 'Food Grade White Paper'::text, 'ITC Shaphire'::text])))
+);
+
+
+--
+-- Name: npd_request_versions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.npd_request_versions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    request_id uuid NOT NULL,
+    version_no integer NOT NULL,
+    previous_version_id uuid,
+    version_status text DEFAULT 'SUBMITTED'::text NOT NULL,
+    product_dimension_uom text DEFAULT 'mm'::text NOT NULL,
+    product_length numeric(14,4) NOT NULL,
+    product_width numeric(14,4) NOT NULL,
+    product_height numeric(14,4) NOT NULL,
+    sheet_size_uom text DEFAULT 'inch'::text NOT NULL,
+    sheet_length numeric(14,4) NOT NULL,
+    sheet_width numeric(14,4) NOT NULL,
+    ups integer NOT NULL,
+    ply integer NOT NULL,
+    printing_colors integer DEFAULT 0 NOT NULL,
+    printing_type text,
+    lamination_applicable boolean DEFAULT false NOT NULL,
+    lamination_type text,
+    coating_applicable boolean DEFAULT false NOT NULL,
+    coating_type text,
+    embossing_applicable boolean DEFAULT false NOT NULL,
+    embossing_block_uom text,
+    embossing_length numeric(14,4),
+    embossing_width numeric(14,4),
+    foiling_applicable boolean DEFAULT false NOT NULL,
+    foiling_block_uom text,
+    foiling_length numeric(14,4),
+    foiling_width numeric(14,4),
+    job_type text NOT NULL,
+    binding_type text NOT NULL,
+    sample_required boolean DEFAULT false NOT NULL,
+    sample_qty integer DEFAULT 0 NOT NULL,
+    spec_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text,
+    CONSTRAINT npd_request_versions_binding_type_chk CHECK ((binding_type = ANY (ARRAY['Stitching'::text, 'Pasting'::text]))),
+    CONSTRAINT npd_request_versions_coating_type_chk CHECK (((coating_type IS NULL) OR (coating_type = ANY (ARRAY['Aquas'::text, 'Drip off'::text, 'UV'::text])))),
+    CONSTRAINT npd_request_versions_dim_uom_chk CHECK ((product_dimension_uom = ANY (ARRAY['mm'::text, 'cm'::text, 'inch'::text]))),
+    CONSTRAINT npd_request_versions_dims_chk CHECK (((product_length > (0)::numeric) AND (product_width > (0)::numeric) AND (product_height > (0)::numeric) AND (sheet_length > (0)::numeric) AND (sheet_width > (0)::numeric) AND (ups > 0))),
+    CONSTRAINT npd_request_versions_job_type_chk CHECK ((job_type = ANY (ARRAY['New'::text, 'Repeat'::text, 'Repeat with Printing Change'::text]))),
+    CONSTRAINT npd_request_versions_lamination_type_chk CHECK (((lamination_type IS NULL) OR (lamination_type = ANY (ARRAY['Gloss'::text, 'BOPP'::text, 'Thermal'::text, 'Matt'::text, 'Metpet'::text])))),
+    CONSTRAINT npd_request_versions_ply_chk CHECK ((ply = ANY (ARRAY[1, 3, 5, 7, 9]))),
+    CONSTRAINT npd_request_versions_printing_type_chk CHECK (((printing_type IS NULL) OR (printing_type = ANY (ARRAY['Offset'::text, 'RS4'::text])))),
+    CONSTRAINT npd_request_versions_qty_chk CHECK ((sample_qty >= 0)),
+    CONSTRAINT npd_request_versions_sheet_uom_chk CHECK ((sheet_size_uom = 'inch'::text)),
+    CONSTRAINT npd_request_versions_version_status_chk CHECK ((version_status = ANY (ARRAY['DRAFT'::text, 'SUBMITTED'::text, 'COSTING_IN_PROGRESS'::text, 'COSTED'::text, 'SAMPLE_RELEASED'::text, 'SAMPLE_PRODUCED'::text, 'VERIFIED'::text, 'CUSTOMER_APPROVED'::text, 'CUSTOMER_REJECTED'::text, 'SUPERSEDED'::text, 'CANCELLED'::text])))
+);
+
+
+--
+-- Name: npd_requests; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.npd_requests (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sampling_id text NOT NULL,
+    current_version_no integer DEFAULT 1 NOT NULL,
+    current_version_id uuid,
+    status text DEFAULT 'DRAFT'::text NOT NULL,
+    client_id uuid,
+    client_code text,
+    client_name text NOT NULL,
+    manual_client_name text,
+    job_ref text NOT NULL,
+    sales_user_id text,
+    sample_required boolean DEFAULT false NOT NULL,
+    sample_qty integer DEFAULT 0 NOT NULL,
+    latest_customer_result text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text,
+    closed_at timestamp with time zone,
+    closed_by text,
+    CONSTRAINT npd_requests_client_name_chk CHECK ((length(TRIM(BOTH FROM client_name)) > 0)),
+    CONSTRAINT npd_requests_job_ref_chk CHECK ((length(TRIM(BOTH FROM job_ref)) > 0)),
+    CONSTRAINT npd_requests_sample_qty_chk CHECK ((sample_qty >= 0)),
+    CONSTRAINT npd_requests_status_chk CHECK ((status = ANY (ARRAY['DRAFT'::text, 'SUBMITTED_BY_SALES'::text, 'COSTING_IN_PROGRESS'::text, 'COSTING_SUBMITTED'::text, 'CLOSED_NO_SAMPLE'::text, 'SAMPLE_PLANNING'::text, 'SAMPLE_WO_RELEASED'::text, 'SAMPLE_PRODUCED'::text, 'SAMPLE_VERIFIED'::text, 'SUBMITTED_TO_CUSTOMER'::text, 'CUSTOMER_APPROVED'::text, 'CUSTOMER_REJECTED'::text, 'RESUBMISSION_REQUIRED'::text, 'REINITIATED'::text, 'CANCELLED'::text])))
+);
+
+
+--
+-- Name: npd_sample_verifications; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.npd_sample_verifications (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    request_id uuid NOT NULL,
+    version_id uuid NOT NULL,
+    sample_wo_id uuid,
+    required_specs_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    actual_specs_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    result text NOT NULL,
+    checked_qty integer DEFAULT 0 NOT NULL,
+    accepted_qty integer DEFAULT 0 NOT NULL,
+    rejected_qty integer DEFAULT 0 NOT NULL,
+    remarks text,
+    verified_at timestamp with time zone DEFAULT now() NOT NULL,
+    verified_by text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by text,
+    CONSTRAINT npd_sample_verifications_qty_chk CHECK (((checked_qty >= 0) AND (accepted_qty >= 0) AND (rejected_qty >= 0))),
+    CONSTRAINT npd_sample_verifications_result_chk CHECK ((result = ANY (ARRAY['PASS'::text, 'PASS_WITH_DEVIATION'::text, 'FAIL'::text])))
+);
+
+
+--
+-- Name: npd_sample_work_orders; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.npd_sample_work_orders (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    request_id uuid NOT NULL,
+    version_id uuid NOT NULL,
+    sample_wo_no text NOT NULL,
+    status text DEFAULT 'DRAFT'::text NOT NULL,
+    planned_sample_qty integer DEFAULT 0 NOT NULL,
+    produced_qty integer DEFAULT 0 NOT NULL,
+    accepted_qty integer DEFAULT 0 NOT NULL,
+    rejected_qty integer DEFAULT 0 NOT NULL,
+    process_plan_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    released_at timestamp with time zone,
+    released_by text,
+    linked_wo_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text,
+    CONSTRAINT npd_sample_work_orders_qty_chk CHECK (((planned_sample_qty >= 0) AND (produced_qty >= 0) AND (accepted_qty >= 0) AND (rejected_qty >= 0))),
+    CONSTRAINT npd_sample_work_orders_status_chk CHECK ((status = ANY (ARRAY['DRAFT'::text, 'RELEASED'::text, 'PRODUCED'::text, 'CHECKED'::text, 'CANCELLED'::text])))
+);
+
+
+--
+-- Name: npd_sequences; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.npd_sequences (
+    prefix text NOT NULL,
+    fy text NOT NULL,
+    last_no integer DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: npd_status_history; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.npd_status_history (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    request_id uuid NOT NULL,
+    version_id uuid,
+    from_status text,
+    to_status text,
+    action text NOT NULL,
+    remarks text,
+    snapshot_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    actor_user_id text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: packing_entry_audit_log; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7862,7 +8405,11 @@ CREATE TABLE public.production_entries (
     created_at timestamp with time zone DEFAULT now(),
     so_number text,
     line_no text,
-    job_reference text
+    job_reference text,
+    start_datetime timestamp with time zone,
+    end_datetime timestamp with time zone,
+    run_hours numeric(12,4),
+    downtime_minutes numeric(12,2)
 );
 
 
@@ -9456,35 +10003,6 @@ CREATE VIEW public.v_dispatch_board WITH (security_invoker='on') AS
 
 
 --
--- Name: work_order_jobs; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.work_order_jobs (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    wo_id uuid,
-    so_number text,
-    line_no integer,
-    product_name text,
-    qty numeric,
-    unit text,
-    ups numeric,
-    artwork_no text,
-    client_name text,
-    expected_delivery date,
-    po_number text,
-    job_priority text,
-    product_remarks text,
-    so_remarks text,
-    job_reference text,
-    prepress_remark text,
-    category text,
-    sales_rep text,
-    so_date date,
-    group_ups numeric
-);
-
-
---
 -- Name: work_order_routing; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -10026,6 +10544,245 @@ CREATE VIEW public.v_flexo_work_order_jobs AS
 --
 
 COMMENT ON VIEW public.v_flexo_work_order_jobs IS 'Fast Flexo Work Order queue: pending, approval status, remaining qty, and processed WO metadata in one view for GAS.';
+
+
+--
+-- Name: v_npd_request_register; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_npd_request_register AS
+ SELECT r.id,
+    r.sampling_id,
+    r.status,
+    r.current_version_no,
+    r.current_version_id,
+    r.client_id,
+    r.client_code,
+    r.client_name,
+    r.manual_client_name,
+    r.job_ref,
+    r.sales_user_id,
+    r.sample_required,
+    r.sample_qty,
+    r.latest_customer_result,
+    v.product_dimension_uom,
+    v.product_length,
+    v.product_width,
+    v.product_height,
+    v.sheet_size_uom,
+    v.sheet_length,
+    v.sheet_width,
+    v.ups,
+    v.ply,
+    v.printing_colors,
+    v.printing_type,
+    v.job_type,
+    v.binding_type,
+    c.costing_no,
+    c.unit_rate,
+    c.total_estimated_value,
+    swo.sample_wo_no,
+    swo.status AS sample_wo_status,
+    ver.result AS verification_result,
+    cs.customer_result,
+    r.created_at,
+    r.created_by,
+    r.updated_at,
+    r.updated_by
+   FROM (((((public.npd_requests r
+     LEFT JOIN public.npd_request_versions v ON ((v.id = r.current_version_id)))
+     LEFT JOIN LATERAL ( SELECT ce.id,
+            ce.request_id,
+            ce.version_id,
+            ce.status,
+            ce.costing_no,
+            ce.raw_material_value,
+            ce.process_value,
+            ce.tooling_value,
+            ce.sample_cost,
+            ce.unit_rate,
+            ce.total_estimated_value,
+            ce.remarks,
+            ce.calc_json,
+            ce.submitted_at,
+            ce.submitted_by,
+            ce.approved_at,
+            ce.approved_by,
+            ce.created_at,
+            ce.created_by,
+            ce.updated_at,
+            ce.updated_by
+           FROM public.npd_costing_evaluations ce
+          WHERE (ce.version_id = r.current_version_id)
+          ORDER BY ce.created_at DESC
+         LIMIT 1) c ON (true))
+     LEFT JOIN LATERAL ( SELECT wo.id,
+            wo.request_id,
+            wo.version_id,
+            wo.sample_wo_no,
+            wo.status,
+            wo.planned_sample_qty,
+            wo.produced_qty,
+            wo.accepted_qty,
+            wo.rejected_qty,
+            wo.process_plan_json,
+            wo.released_at,
+            wo.released_by,
+            wo.linked_wo_id,
+            wo.created_at,
+            wo.created_by,
+            wo.updated_at,
+            wo.updated_by
+           FROM public.npd_sample_work_orders wo
+          WHERE (wo.version_id = r.current_version_id)
+          ORDER BY wo.created_at DESC
+         LIMIT 1) swo ON (true))
+     LEFT JOIN LATERAL ( SELECT sv.id,
+            sv.request_id,
+            sv.version_id,
+            sv.sample_wo_id,
+            sv.required_specs_json,
+            sv.actual_specs_json,
+            sv.result,
+            sv.checked_qty,
+            sv.accepted_qty,
+            sv.rejected_qty,
+            sv.remarks,
+            sv.verified_at,
+            sv.verified_by,
+            sv.created_at,
+            sv.created_by
+           FROM public.npd_sample_verifications sv
+          WHERE (sv.version_id = r.current_version_id)
+          ORDER BY sv.verified_at DESC
+         LIMIT 1) ver ON (true))
+     LEFT JOIN LATERAL ( SELECT sub.id,
+            sub.request_id,
+            sub.version_id,
+            sub.submitted_qty,
+            sub.submitted_at,
+            sub.submitted_by,
+            sub.customer_result,
+            sub.feedback,
+            sub.resubmission_required,
+            sub.next_version_id,
+            sub.created_at,
+            sub.created_by
+           FROM public.npd_customer_submissions sub
+          WHERE (sub.version_id = r.current_version_id)
+          ORDER BY sub.submitted_at DESC
+         LIMIT 1) cs ON (true));
+
+
+--
+-- Name: v_npd_costing_queue; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_npd_costing_queue AS
+ SELECT id,
+    sampling_id,
+    status,
+    current_version_no,
+    current_version_id,
+    client_id,
+    client_code,
+    client_name,
+    manual_client_name,
+    job_ref,
+    sales_user_id,
+    sample_required,
+    sample_qty,
+    latest_customer_result,
+    product_dimension_uom,
+    product_length,
+    product_width,
+    product_height,
+    sheet_size_uom,
+    sheet_length,
+    sheet_width,
+    ups,
+    ply,
+    printing_colors,
+    printing_type,
+    job_type,
+    binding_type,
+    costing_no,
+    unit_rate,
+    total_estimated_value,
+    sample_wo_no,
+    sample_wo_status,
+    verification_result,
+    customer_result,
+    created_at,
+    created_by,
+    updated_at,
+    updated_by
+   FROM public.v_npd_request_register
+  WHERE (status = ANY (ARRAY['SUBMITTED_BY_SALES'::text, 'COSTING_IN_PROGRESS'::text]));
+
+
+--
+-- Name: v_npd_dashboard_summary; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_npd_dashboard_summary AS
+ SELECT (count(*))::integer AS total_requests,
+    (count(*) FILTER (WHERE (status <> ALL (ARRAY['CUSTOMER_APPROVED'::text, 'CLOSED_NO_SAMPLE'::text, 'CANCELLED'::text]))))::integer AS open_requests,
+    (count(*) FILTER (WHERE (status = ANY (ARRAY['SUBMITTED_BY_SALES'::text, 'COSTING_IN_PROGRESS'::text]))))::integer AS costing_pending,
+    (count(*) FILTER (WHERE ((sample_required = true) AND (status = ANY (ARRAY['COSTING_SUBMITTED'::text, 'SAMPLE_PLANNING'::text, 'SAMPLE_WO_RELEASED'::text, 'SAMPLE_PRODUCED'::text])))))::integer AS sample_pending,
+    (count(*) FILTER (WHERE (status = 'SAMPLE_VERIFIED'::text)))::integer AS verified_pending_customer,
+    (count(*) FILTER (WHERE (status = 'SUBMITTED_TO_CUSTOMER'::text)))::integer AS customer_decision_pending,
+    (count(*) FILTER (WHERE (status = 'CUSTOMER_APPROVED'::text)))::integer AS customer_approved,
+    (count(*) FILTER (WHERE (status = ANY (ARRAY['CUSTOMER_REJECTED'::text, 'RESUBMISSION_REQUIRED'::text]))))::integer AS rework_required,
+    (COALESCE(round(avg((EXTRACT(epoch FROM (updated_at - created_at)) / 86400.0)), 2), (0)::numeric))::numeric(12,2) AS avg_age_days
+   FROM public.v_npd_request_register;
+
+
+--
+-- Name: v_npd_sample_queue; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_npd_sample_queue AS
+ SELECT id,
+    sampling_id,
+    status,
+    current_version_no,
+    current_version_id,
+    client_id,
+    client_code,
+    client_name,
+    manual_client_name,
+    job_ref,
+    sales_user_id,
+    sample_required,
+    sample_qty,
+    latest_customer_result,
+    product_dimension_uom,
+    product_length,
+    product_width,
+    product_height,
+    sheet_size_uom,
+    sheet_length,
+    sheet_width,
+    ups,
+    ply,
+    printing_colors,
+    printing_type,
+    job_type,
+    binding_type,
+    costing_no,
+    unit_rate,
+    total_estimated_value,
+    sample_wo_no,
+    sample_wo_status,
+    verification_result,
+    customer_result,
+    created_at,
+    created_by,
+    updated_at,
+    updated_by
+   FROM public.v_npd_request_register
+  WHERE ((sample_required = true) AND (status = ANY (ARRAY['COSTING_SUBMITTED'::text, 'SAMPLE_PLANNING'::text, 'SAMPLE_WO_RELEASED'::text, 'SAMPLE_PRODUCED'::text])));
 
 
 --
@@ -12296,6 +13053,540 @@ CREATE VIEW public.v_report_dispatch_register AS
      LEFT JOIN dispatch_line_base dlb ON ((dlb.so_line_id = dr.so_line_id)))
      LEFT JOIN invoice_base ib ON ((ib.so_line_id = dr.so_line_id)))
   WHERE ((COALESCE(dr.dispatch_qty, (0)::numeric) > (0)::numeric) AND (upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text));
+
+
+--
+-- Name: v_report_job_process_cost_lines; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_job_process_cost_lines AS
+ WITH line_base AS (
+         SELECT so.id AS so_id,
+            sol.id AS so_line_id,
+            so.so_number,
+            COALESCE(so.so_date, (so.created_at)::date) AS so_date,
+            so.client_code,
+            COALESCE(c.client_name, so.client_code) AS client_name,
+            so.sales_rep,
+            sol.line_no,
+            sol.division,
+            sol.product_code,
+            sol.product_name,
+            sol.category,
+            COALESCE(sol.qty, (0)::numeric) AS order_qty,
+            COALESCE(sol.unit, ''::text) AS unit,
+            COALESCE(sol.rate, (0)::numeric) AS rate,
+            COALESCE(sol.job_reference, ''::text) AS sales_job_reference,
+            COALESCE(sol.status, 'OPEN'::text) AS so_line_status
+           FROM ((public.sales_orders so
+             JOIN public.sales_order_lines sol ON ((sol.so_id = so.id)))
+             LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+          WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text))
+        ), entry_raw AS (
+         SELECT pe.id AS production_entry_id,
+            pe.wo_id AS entry_wo_id,
+            pe.routing_id,
+            COALESCE(pe.wo_id, wor.wo_id) AS wo_id,
+            COALESCE(NULLIF(pe.so_number, ''::text), NULLIF(TRIM(BOTH FROM "substring"(COALESCE(pe.downtime_reason, ''::text), 'SO:([^|]+)'::text)), ''::text), NULLIF(wor.so_number, ''::text)) AS entry_so_number,
+            COALESCE(NULLIF(pe.line_no, ''::text), NULLIF(TRIM(BOTH FROM "substring"(COALESCE(pe.downtime_reason, ''::text), 'LINE:([^|]+)'::text)), ''::text), NULLIF(wor.line_no, ''::text)) AS entry_line_no,
+            COALESCE(NULLIF(pe.job_reference, ''::text), NULLIF(TRIM(BOTH FROM "substring"(COALESCE(pe.downtime_reason, ''::text), 'JOBREF:([^|]+)'::text)), ''::text)) AS entry_job_reference,
+            pe.entry_datetime,
+            pe.start_datetime,
+            pe.end_datetime,
+            pe.run_hours,
+            pe.downtime_reason,
+            pe.downtime_minutes,
+            pe.machine,
+            COALESCE(NULLIF(wor.process_name, ''::text), NULLIF(wor.department, ''::text), 'Production'::text) AS production_stage,
+            COALESCE(NULLIF(wor.planned_machine, ''::text), NULLIF(pe.machine, ''::text), 'Unassigned'::text) AS production_machine,
+            wor.sequence_no AS stage_sequence,
+            COALESCE(pe.ok_qty, GREATEST((COALESCE(pe.produced_qty, (0)::numeric) - COALESCE(pe.rejected_qty, (0)::numeric)), (0)::numeric)) AS good_qty,
+            COALESCE(pe.produced_qty, (0)::numeric) AS produced_qty,
+            COALESCE(pe.rejected_qty, (0)::numeric) AS rejected_qty
+           FROM (public.production_entries pe
+             LEFT JOIN public.work_order_routing wor ON ((wor.id = pe.routing_id)))
+          WHERE ((pe.entry_datetime IS NOT NULL) AND (COALESCE(pe.ok_qty, GREATEST((COALESCE(pe.produced_qty, (0)::numeric) - COALESCE(pe.rejected_qty, (0)::numeric)), (0)::numeric)) > (0)::numeric))
+        ), entry_candidates_exact AS (
+         SELECT er.production_entry_id,
+            er.entry_wo_id,
+            er.routing_id,
+            er.wo_id,
+            er.entry_so_number,
+            er.entry_line_no,
+            er.entry_job_reference,
+            er.entry_datetime,
+            er.start_datetime,
+            er.end_datetime,
+            er.run_hours,
+            er.downtime_reason,
+            er.downtime_minutes,
+            er.machine,
+            er.production_stage,
+            er.production_machine,
+            er.stage_sequence,
+            er.good_qty,
+            er.produced_qty,
+            er.rejected_qty,
+            lb.so_id,
+            lb.so_line_id,
+            lb.so_number,
+            lb.so_date,
+            lb.client_code,
+            lb.client_name,
+            lb.sales_rep,
+            lb.line_no,
+            lb.division,
+            lb.product_code,
+            lb.product_name,
+            lb.category,
+            lb.order_qty,
+            lb.unit,
+            lb.rate,
+            lb.so_line_status,
+            COALESCE(NULLIF(er.entry_job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ((lb.so_number || '||'::text) || (lb.line_no)::text)) AS job_key,
+            COALESCE(NULLIF(er.entry_job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ''::text) AS job_reference,
+            GREATEST(COALESCE(woj.job_qty, lb.order_qty, (0)::numeric), (0)::numeric) AS candidate_qty
+           FROM ((entry_raw er
+             JOIN line_base lb ON (((lb.so_number = er.entry_so_number) AND ((lb.line_no)::text = btrim(er.entry_line_no)))))
+             LEFT JOIN LATERAL ( SELECT woj1.job_reference,
+                    GREATEST(COALESCE(woj1.qty, (0)::numeric), (0)::numeric) AS job_qty
+                   FROM public.work_order_jobs woj1
+                  WHERE ((woj1.wo_id = er.wo_id) AND (woj1.so_number = lb.so_number) AND ((woj1.line_no)::text = (lb.line_no)::text) AND ((COALESCE(er.entry_job_reference, ''::text) = ''::text) OR (COALESCE(woj1.job_reference, ''::text) = er.entry_job_reference)))
+                UNION ALL
+                 SELECT NULL::text AS job_reference,
+                    GREATEST(COALESCE(lb.order_qty, (0)::numeric), (0)::numeric) AS job_qty
+                  WHERE (NOT (EXISTS ( SELECT 1
+                           FROM public.work_order_jobs woj2
+                          WHERE ((woj2.wo_id = er.wo_id) AND (woj2.so_number = lb.so_number) AND ((woj2.line_no)::text = (lb.line_no)::text) AND ((COALESCE(er.entry_job_reference, ''::text) = ''::text) OR (COALESCE(woj2.job_reference, ''::text) = er.entry_job_reference))))))) woj ON (true))
+        ), entry_candidates_wo_fallback AS (
+         SELECT er.production_entry_id,
+            er.entry_wo_id,
+            er.routing_id,
+            er.wo_id,
+            er.entry_so_number,
+            er.entry_line_no,
+            er.entry_job_reference,
+            er.entry_datetime,
+            er.start_datetime,
+            er.end_datetime,
+            er.run_hours,
+            er.downtime_reason,
+            er.downtime_minutes,
+            er.machine,
+            er.production_stage,
+            er.production_machine,
+            er.stage_sequence,
+            er.good_qty,
+            er.produced_qty,
+            er.rejected_qty,
+            lb.so_id,
+            lb.so_line_id,
+            lb.so_number,
+            lb.so_date,
+            lb.client_code,
+            lb.client_name,
+            lb.sales_rep,
+            lb.line_no,
+            lb.division,
+            lb.product_code,
+            lb.product_name,
+            lb.category,
+            lb.order_qty,
+            lb.unit,
+            lb.rate,
+            lb.so_line_status,
+            COALESCE(NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ((lb.so_number || '||'::text) || (lb.line_no)::text)) AS job_key,
+            COALESCE(NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ''::text) AS job_reference,
+            GREATEST(COALESCE(woj.qty, lb.order_qty, (0)::numeric), (0)::numeric) AS candidate_qty
+           FROM ((entry_raw er
+             JOIN public.work_order_jobs woj ON ((woj.wo_id = er.wo_id)))
+             JOIN line_base lb ON (((lb.so_number = woj.so_number) AND ((lb.line_no)::text = (woj.line_no)::text))))
+          WHERE (NOT (EXISTS ( SELECT 1
+                   FROM line_base exact_lb
+                  WHERE ((exact_lb.so_number = er.entry_so_number) AND ((exact_lb.line_no)::text = btrim(er.entry_line_no))))))
+        ), entry_candidates AS (
+         SELECT entry_candidates_exact.production_entry_id,
+            entry_candidates_exact.entry_wo_id,
+            entry_candidates_exact.routing_id,
+            entry_candidates_exact.wo_id,
+            entry_candidates_exact.entry_so_number,
+            entry_candidates_exact.entry_line_no,
+            entry_candidates_exact.entry_job_reference,
+            entry_candidates_exact.entry_datetime,
+            entry_candidates_exact.start_datetime,
+            entry_candidates_exact.end_datetime,
+            entry_candidates_exact.run_hours,
+            entry_candidates_exact.downtime_reason,
+            entry_candidates_exact.downtime_minutes,
+            entry_candidates_exact.machine,
+            entry_candidates_exact.production_stage,
+            entry_candidates_exact.production_machine,
+            entry_candidates_exact.stage_sequence,
+            entry_candidates_exact.good_qty,
+            entry_candidates_exact.produced_qty,
+            entry_candidates_exact.rejected_qty,
+            entry_candidates_exact.so_id,
+            entry_candidates_exact.so_line_id,
+            entry_candidates_exact.so_number,
+            entry_candidates_exact.so_date,
+            entry_candidates_exact.client_code,
+            entry_candidates_exact.client_name,
+            entry_candidates_exact.sales_rep,
+            entry_candidates_exact.line_no,
+            entry_candidates_exact.division,
+            entry_candidates_exact.product_code,
+            entry_candidates_exact.product_name,
+            entry_candidates_exact.category,
+            entry_candidates_exact.order_qty,
+            entry_candidates_exact.unit,
+            entry_candidates_exact.rate,
+            entry_candidates_exact.so_line_status,
+            entry_candidates_exact.job_key,
+            entry_candidates_exact.job_reference,
+            entry_candidates_exact.candidate_qty
+           FROM entry_candidates_exact
+        UNION ALL
+         SELECT entry_candidates_wo_fallback.production_entry_id,
+            entry_candidates_wo_fallback.entry_wo_id,
+            entry_candidates_wo_fallback.routing_id,
+            entry_candidates_wo_fallback.wo_id,
+            entry_candidates_wo_fallback.entry_so_number,
+            entry_candidates_wo_fallback.entry_line_no,
+            entry_candidates_wo_fallback.entry_job_reference,
+            entry_candidates_wo_fallback.entry_datetime,
+            entry_candidates_wo_fallback.start_datetime,
+            entry_candidates_wo_fallback.end_datetime,
+            entry_candidates_wo_fallback.run_hours,
+            entry_candidates_wo_fallback.downtime_reason,
+            entry_candidates_wo_fallback.downtime_minutes,
+            entry_candidates_wo_fallback.machine,
+            entry_candidates_wo_fallback.production_stage,
+            entry_candidates_wo_fallback.production_machine,
+            entry_candidates_wo_fallback.stage_sequence,
+            entry_candidates_wo_fallback.good_qty,
+            entry_candidates_wo_fallback.produced_qty,
+            entry_candidates_wo_fallback.rejected_qty,
+            entry_candidates_wo_fallback.so_id,
+            entry_candidates_wo_fallback.so_line_id,
+            entry_candidates_wo_fallback.so_number,
+            entry_candidates_wo_fallback.so_date,
+            entry_candidates_wo_fallback.client_code,
+            entry_candidates_wo_fallback.client_name,
+            entry_candidates_wo_fallback.sales_rep,
+            entry_candidates_wo_fallback.line_no,
+            entry_candidates_wo_fallback.division,
+            entry_candidates_wo_fallback.product_code,
+            entry_candidates_wo_fallback.product_name,
+            entry_candidates_wo_fallback.category,
+            entry_candidates_wo_fallback.order_qty,
+            entry_candidates_wo_fallback.unit,
+            entry_candidates_wo_fallback.rate,
+            entry_candidates_wo_fallback.so_line_status,
+            entry_candidates_wo_fallback.job_key,
+            entry_candidates_wo_fallback.job_reference,
+            entry_candidates_wo_fallback.candidate_qty
+           FROM entry_candidates_wo_fallback
+        ), entry_base AS (
+         SELECT ec.so_id,
+            ec.so_line_id,
+            ec.so_number,
+            ec.so_date,
+            ec.client_code,
+            ec.client_name,
+            ec.sales_rep,
+            ec.line_no,
+            ec.division,
+            ec.product_code,
+            ec.product_name,
+            ec.category,
+            ec.order_qty,
+            ec.unit,
+            ec.rate,
+            ec.so_line_status,
+            ec.job_key,
+            ec.job_reference,
+            ec.production_entry_id,
+            ec.routing_id,
+            ec.production_stage,
+            ec.production_machine,
+            regexp_replace(upper(COALESCE(NULLIF(ec.production_machine, ''::text), 'UNASSIGNED'::text)), '[^A-Z0-9]+'::text, ''::text, 'g'::text) AS machine_key,
+            ec.stage_sequence,
+            (timezone('Asia/Kolkata'::text, COALESCE(ec.end_datetime, ec.entry_datetime)))::date AS production_date,
+            timezone('Asia/Kolkata'::text, COALESCE(ec.end_datetime, ec.entry_datetime)) AS entry_local_ts,
+            (ec.good_qty * ec.entry_share) AS good_qty,
+            (ec.produced_qty * ec.entry_share) AS produced_qty,
+            (ec.rejected_qty * ec.entry_share) AS rejected_qty,
+            (GREATEST(COALESCE(ec.downtime_minutes, (NULLIF("substring"(COALESCE(ec.downtime_reason, ''::text), 'DOWN:[[:space:]]*([0-9]+[.]?[0-9]*)[[:space:]]*min'::text), ''::text))::numeric, (0)::numeric), (0)::numeric) * ec.entry_share) AS downtime_minutes,
+                CASE
+                    WHEN (COALESCE(ec.run_hours, (0)::numeric) > (0)::numeric) THEN (ec.run_hours * ec.entry_share)
+                    WHEN ((ec.start_datetime IS NOT NULL) AND (COALESCE(ec.end_datetime, ec.entry_datetime) > ec.start_datetime)) THEN ((EXTRACT(epoch FROM (COALESCE(ec.end_datetime, ec.entry_datetime) - ec.start_datetime)) / 3600.0) * ec.entry_share)
+                    ELSE NULL::numeric
+                END AS entry_run_hours
+           FROM ( SELECT ec_1.production_entry_id,
+                    ec_1.entry_wo_id,
+                    ec_1.routing_id,
+                    ec_1.wo_id,
+                    ec_1.entry_so_number,
+                    ec_1.entry_line_no,
+                    ec_1.entry_job_reference,
+                    ec_1.entry_datetime,
+                    ec_1.start_datetime,
+                    ec_1.end_datetime,
+                    ec_1.run_hours,
+                    ec_1.downtime_reason,
+                    ec_1.downtime_minutes,
+                    ec_1.machine,
+                    ec_1.production_stage,
+                    ec_1.production_machine,
+                    ec_1.stage_sequence,
+                    ec_1.good_qty,
+                    ec_1.produced_qty,
+                    ec_1.rejected_qty,
+                    ec_1.so_id,
+                    ec_1.so_line_id,
+                    ec_1.so_number,
+                    ec_1.so_date,
+                    ec_1.client_code,
+                    ec_1.client_name,
+                    ec_1.sales_rep,
+                    ec_1.line_no,
+                    ec_1.division,
+                    ec_1.product_code,
+                    ec_1.product_name,
+                    ec_1.category,
+                    ec_1.order_qty,
+                    ec_1.unit,
+                    ec_1.rate,
+                    ec_1.so_line_status,
+                    ec_1.job_key,
+                    ec_1.job_reference,
+                    ec_1.candidate_qty,
+                        CASE
+                            WHEN (sum(ec_1.candidate_qty) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric) THEN (ec_1.candidate_qty / NULLIF(sum(ec_1.candidate_qty) OVER (PARTITION BY ec_1.production_entry_id), (0)::numeric))
+                            ELSE ((1)::numeric / (NULLIF(count(*) OVER (PARTITION BY ec_1.production_entry_id), 0))::numeric)
+                        END AS entry_share
+                   FROM entry_candidates ec_1) ec
+        ), entry_with_net_hours AS (
+         SELECT eb.so_id,
+            eb.so_line_id,
+            eb.so_number,
+            eb.so_date,
+            eb.client_code,
+            eb.client_name,
+            eb.sales_rep,
+            eb.line_no,
+            eb.division,
+            eb.product_code,
+            eb.product_name,
+            eb.category,
+            eb.order_qty,
+            eb.unit,
+            eb.rate,
+            eb.so_line_status,
+            eb.job_key,
+            eb.job_reference,
+            eb.production_entry_id,
+            eb.routing_id,
+            eb.production_stage,
+            eb.production_machine,
+            eb.machine_key,
+            eb.stage_sequence,
+            eb.production_date,
+            eb.entry_local_ts,
+            eb.good_qty,
+            eb.produced_qty,
+            eb.rejected_qty,
+            eb.downtime_minutes,
+            eb.entry_run_hours,
+                CASE
+                    WHEN (eb.entry_run_hours IS NOT NULL) THEN GREATEST((eb.entry_run_hours - (COALESCE(eb.downtime_minutes, (0)::numeric) / 60.0)), (0)::numeric)
+                    ELSE NULL::numeric
+                END AS entry_net_hours
+           FROM entry_base eb
+        ), machine_day_totals AS (
+         SELECT eb.production_date,
+            eb.machine_key,
+            eb.production_machine,
+            max(eb.entry_local_ts) AS last_entry_local_ts,
+            sum(eb.good_qty) AS machine_day_good_qty,
+            (sum(eb.downtime_minutes) / 60.0) AS machine_day_downtime_hours,
+            sum(eb.entry_net_hours) FILTER (WHERE (eb.entry_net_hours IS NOT NULL)) AS machine_day_actual_net_hours,
+            count(DISTINCT eb.production_entry_id) FILTER (WHERE (eb.entry_net_hours IS NOT NULL)) AS machine_day_actual_hour_entry_count
+           FROM entry_with_net_hours eb
+          GROUP BY eb.production_date, eb.machine_key, eb.production_machine
+        ), machine_day_hours AS (
+         SELECT mdt.production_date,
+            mdt.machine_key,
+            mdt.production_machine,
+            mdt.last_entry_local_ts,
+            mdt.machine_day_good_qty,
+            mdt.machine_day_downtime_hours,
+            mdt.machine_day_actual_net_hours,
+            mdt.machine_day_actual_hour_entry_count,
+            round(((8)::numeric +
+                CASE
+                    WHEN ((mdt.last_entry_local_ts)::time without time zone > '17:30:00'::time without time zone) THEN (EXTRACT(epoch FROM (mdt.last_entry_local_ts - ((mdt.production_date)::timestamp without time zone + ('17:30:00'::time without time zone)::interval))) / 3600.0)
+                    ELSE (0)::numeric
+                END), 2) AS working_hours,
+            round(GREATEST((((8)::numeric +
+                CASE
+                    WHEN ((mdt.last_entry_local_ts)::time without time zone > '17:30:00'::time without time zone) THEN (EXTRACT(epoch FROM (mdt.last_entry_local_ts - ((mdt.production_date)::timestamp without time zone + ('17:30:00'::time without time zone)::interval))) / 3600.0)
+                    ELSE (0)::numeric
+                END) - COALESCE(mdt.machine_day_downtime_hours, (0)::numeric)), (0)::numeric), 2) AS net_production_hours
+           FROM machine_day_totals mdt
+        ), job_stage_day AS (
+         SELECT eb.so_id,
+            eb.so_line_id,
+            eb.so_number,
+            eb.so_date,
+            eb.client_code,
+            eb.client_name,
+            eb.sales_rep,
+            eb.line_no,
+            eb.division,
+            eb.product_code,
+            eb.product_name,
+            eb.category,
+            eb.order_qty,
+            eb.unit,
+            eb.rate,
+            eb.so_line_status,
+            eb.job_key,
+            eb.job_reference,
+            eb.routing_id,
+            eb.production_stage,
+            eb.production_machine,
+            eb.machine_key,
+            eb.stage_sequence,
+            eb.production_date,
+            count(DISTINCT eb.production_entry_id) AS production_entry_count,
+            count(DISTINCT eb.production_entry_id) FILTER (WHERE (eb.entry_net_hours IS NOT NULL)) AS actual_hour_entry_count,
+            sum(eb.entry_net_hours) FILTER (WHERE (eb.entry_net_hours IS NOT NULL)) AS actual_process_hours,
+            sum(eb.good_qty) AS good_qty,
+            sum(eb.produced_qty) AS produced_qty,
+            sum(eb.rejected_qty) AS rejected_qty,
+            min(eb.entry_local_ts) AS first_production_at,
+            max(eb.entry_local_ts) AS last_production_at
+           FROM entry_with_net_hours eb
+          GROUP BY eb.so_id, eb.so_line_id, eb.so_number, eb.so_date, eb.client_code, eb.client_name, eb.sales_rep, eb.line_no, eb.division, eb.product_code, eb.product_name, eb.category, eb.order_qty, eb.unit, eb.rate, eb.so_line_status, eb.job_key, eb.job_reference, eb.routing_id, eb.production_stage, eb.production_machine, eb.machine_key, eb.stage_sequence, eb.production_date
+        ), cost_base AS (
+         SELECT jsd.so_id,
+            jsd.so_line_id,
+            jsd.so_number,
+            jsd.so_date,
+            jsd.client_code,
+            jsd.client_name,
+            jsd.sales_rep,
+            jsd.line_no,
+            jsd.division,
+            jsd.product_code,
+            jsd.product_name,
+            jsd.category,
+            jsd.order_qty,
+            jsd.unit,
+            jsd.rate,
+            jsd.so_line_status,
+            jsd.job_key,
+            jsd.job_reference,
+            jsd.routing_id,
+            jsd.production_stage,
+            jsd.production_machine,
+            jsd.machine_key,
+            jsd.stage_sequence,
+            jsd.production_date,
+            jsd.production_entry_count,
+            jsd.actual_hour_entry_count,
+            jsd.actual_process_hours,
+            jsd.good_qty,
+            jsd.produced_qty,
+            jsd.rejected_qty,
+            jsd.first_production_at,
+            jsd.last_production_at,
+            mdh.working_hours,
+            mdh.machine_day_downtime_hours,
+            mdh.net_production_hours AS machine_day_net_hours,
+            mdh.machine_day_actual_net_hours,
+            mdh.machine_day_actual_hour_entry_count,
+            mdh.machine_day_good_qty,
+                CASE
+                    WHEN (COALESCE(mdh.machine_day_good_qty, (0)::numeric) > (0)::numeric) THEN ((mdh.net_production_hours * jsd.good_qty) / NULLIF(mdh.machine_day_good_qty, (0)::numeric))
+                    ELSE (0)::numeric
+                END AS allocated_process_hours,
+                CASE
+                    WHEN ((jsd.actual_hour_entry_count = jsd.production_entry_count) AND (jsd.production_entry_count > 0)) THEN COALESCE(jsd.actual_process_hours, (0)::numeric)
+                    WHEN (jsd.actual_hour_entry_count > 0) THEN
+                    CASE
+                        WHEN (COALESCE(mdh.machine_day_good_qty, (0)::numeric) > (0)::numeric) THEN ((mdh.net_production_hours * jsd.good_qty) / NULLIF(mdh.machine_day_good_qty, (0)::numeric))
+                        ELSE (0)::numeric
+                    END
+                    ELSE
+                    CASE
+                        WHEN (COALESCE(mdh.machine_day_good_qty, (0)::numeric) > (0)::numeric) THEN ((mdh.net_production_hours * jsd.good_qty) / NULLIF(mdh.machine_day_good_qty, (0)::numeric))
+                        ELSE (0)::numeric
+                    END
+                END AS process_hours,
+                CASE
+                    WHEN ((jsd.actual_hour_entry_count = jsd.production_entry_count) AND (jsd.production_entry_count > 0)) THEN 'ACTUAL_ENTRY_HOURS'::text
+                    WHEN (jsd.actual_hour_entry_count > 0) THEN 'ALLOCATED_PARTIAL_ACTUAL'::text
+                    ELSE 'ALLOCATED_MACHINE_DAY'::text
+                END AS hours_source
+           FROM (job_stage_day jsd
+             JOIN machine_day_hours mdh ON (((mdh.production_date = jsd.production_date) AND (mdh.machine_key = jsd.machine_key))))
+        )
+ SELECT cb.so_id,
+    cb.so_line_id,
+    cb.so_number,
+    cb.so_date,
+    cb.client_code,
+    cb.client_name,
+    cb.sales_rep,
+    cb.line_no,
+    cb.division,
+    cb.product_code,
+    cb.product_name,
+    cb.category,
+    cb.order_qty,
+    cb.unit,
+    cb.rate,
+    cb.so_line_status,
+    cb.job_key,
+    cb.job_reference,
+    cb.routing_id,
+    cb.production_stage,
+    cb.production_machine,
+    cb.machine_key,
+    cb.stage_sequence,
+    cb.production_date,
+    cb.production_entry_count,
+    cb.actual_hour_entry_count,
+    cb.hours_source,
+    round(cb.good_qty, 3) AS good_qty,
+    round(cb.produced_qty, 3) AS produced_qty,
+    round(cb.rejected_qty, 3) AS rejected_qty,
+    round(cb.working_hours, 2) AS machine_day_working_hours,
+    round(cb.machine_day_downtime_hours, 2) AS machine_day_downtime_hours,
+    round(cb.machine_day_net_hours, 2) AS machine_day_net_hours,
+    round(COALESCE(cb.machine_day_actual_net_hours, (0)::numeric), 4) AS machine_day_actual_net_hours,
+    cb.machine_day_actual_hour_entry_count,
+    round(cb.machine_day_good_qty, 3) AS machine_day_good_qty,
+    round(COALESCE(cb.actual_process_hours, (0)::numeric), 4) AS actual_process_hours,
+    round(COALESCE(cb.allocated_process_hours, (0)::numeric), 4) AS allocated_process_hours,
+    round(COALESCE(cb.process_hours, (0)::numeric), 4) AS process_hours,
+    COALESCE(mhr.mhr, (0)::numeric) AS mhr,
+    round((COALESCE(cb.process_hours, (0)::numeric) * COALESCE(mhr.mhr, (0)::numeric)), 2) AS process_cost,
+        CASE
+            WHEN (mhr.id IS NULL) THEN true
+            ELSE false
+        END AS mhr_missing,
+    cb.first_production_at,
+    cb.last_production_at
+   FROM (cost_base cb
+     LEFT JOIN LATERAL ( SELECT r.id,
+            r.mhr
+           FROM public.machine_hour_rates r
+          WHERE ((r.active = true) AND (r.machine_key = cb.machine_key) AND (r.effective_from <= cb.production_date) AND ((r.effective_to IS NULL) OR (r.effective_to >= cb.production_date)))
+          ORDER BY r.effective_from DESC, r.updated_at DESC
+         LIMIT 1) mhr ON (true));
 
 
 --
@@ -17078,6 +18369,125 @@ CREATE VIEW public.v_report_production_bottleneck AS
 
 
 --
+-- Name: v_report_production_entry_logs; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_production_entry_logs AS
+ WITH job_base AS (
+         SELECT woj.wo_id,
+            woj.so_number,
+            (woj.line_no)::text AS line_no,
+            max(NULLIF(woj.client_name, ''::text)) AS client_name,
+            string_agg(DISTINCT NULLIF(woj.product_name, ''::text), ' / '::text) FILTER (WHERE (NULLIF(woj.product_name, ''::text) IS NOT NULL)) AS product_name,
+            max(NULLIF(woj.artwork_no, ''::text)) AS artwork_no,
+            max(NULLIF(woj.category, ''::text)) AS category,
+            max(NULLIF(woj.job_reference, ''::text)) AS job_reference,
+            max(woj.expected_delivery) AS expected_delivery,
+            max(woj.qty) AS order_qty,
+            max(NULLIF(woj.unit, ''::text)) AS order_unit
+           FROM public.work_order_jobs woj
+          GROUP BY woj.wo_id, woj.so_number, (woj.line_no)::text
+        ), entry_base AS (
+         SELECT pe.id AS production_entry_id,
+            pe.wo_id AS entry_wo_id,
+            pe.routing_id,
+            r.wo_id AS routing_wo_id,
+            COALESCE(r.wo_id, pe.wo_id) AS wo_id,
+            wo.wo_number,
+            wo.wo_date,
+            wo.status AS wo_status,
+            r.sequence_no,
+            NULLIF(r.process_name, ''::text) AS process_name,
+            NULLIF(r.department, ''::text) AS department,
+            NULLIF(r.planned_machine, ''::text) AS planned_machine,
+            COALESCE(r.planned_qty, (0)::numeric) AS planned_qty,
+            COALESCE(r.completed_qty, (0)::numeric) AS completed_qty,
+            COALESCE(r.status, ''::text) AS routing_status,
+            COALESCE(NULLIF(pe.so_number, ''::text), NULLIF(r.so_number, ''::text)) AS so_number,
+            COALESCE(NULLIF(pe.line_no, ''::text), NULLIF(r.line_no, ''::text)) AS line_no,
+            timezone('Asia/Kolkata'::text, COALESCE(pe.end_datetime, pe.entry_datetime)) AS entry_local_ts,
+            timezone('Asia/Kolkata'::text, pe.start_datetime) AS start_local_ts,
+            timezone('Asia/Kolkata'::text, COALESCE(pe.end_datetime, pe.entry_datetime)) AS end_local_ts,
+            (timezone('Asia/Kolkata'::text, COALESCE(pe.end_datetime, pe.entry_datetime)))::date AS production_date,
+            NULLIF(pe.machine, ''::text) AS production_entry_machine,
+            COALESCE(NULLIF(pe.machine, ''::text), NULLIF(r.planned_machine, ''::text), 'Unassigned'::text) AS machine,
+            NULLIF(TRIM(BOTH FROM pe.operator_name), ''::text) AS operator_name,
+            GREATEST(COALESCE(pe.produced_qty, (0)::numeric), (0)::numeric) AS produced_qty,
+            GREATEST(COALESCE(pe.rejected_qty, (0)::numeric), (0)::numeric) AS rejected_qty,
+                CASE
+                    WHEN ((pe.ok_qty IS NOT NULL) AND (pe.ok_qty >= (0)::numeric)) THEN pe.ok_qty
+                    ELSE GREATEST((COALESCE(pe.produced_qty, (0)::numeric) - COALESCE(pe.rejected_qty, (0)::numeric)), (0)::numeric)
+                END AS good_qty,
+            GREATEST(COALESCE(pe.ok_qty, (0)::numeric), (0)::numeric) AS ok_qty,
+            GREATEST(COALESCE(pe.downtime_minutes, (NULLIF("substring"(COALESCE(pe.downtime_reason, ''::text), 'DOWN:[[:space:]]*([0-9]+[.]?[0-9]*)[[:space:]]*min'::text), ''::text))::numeric, (0)::numeric), (0)::numeric) AS downtime_minutes,
+                CASE
+                    WHEN (COALESCE(pe.run_hours, (0)::numeric) > (0)::numeric) THEN pe.run_hours
+                    WHEN ((pe.start_datetime IS NOT NULL) AND (COALESCE(pe.end_datetime, pe.entry_datetime) > pe.start_datetime)) THEN (EXTRACT(epoch FROM (COALESCE(pe.end_datetime, pe.entry_datetime) - pe.start_datetime)) / 3600.0)
+                    ELSE NULL::numeric
+                END AS run_hours,
+            NULLIF(TRIM(BOTH FROM regexp_replace(COALESCE("substring"(COALESCE(pe.downtime_reason, ''::text), 'DOWN:([^|]+)'::text), ''::text), '^[[:space:]]*[0-9]+[.]?[0-9]*[[:space:]]*min[[:space:]]*-?[[:space:]]*'::text, ''::text)), ''::text) AS downtime_label,
+            COALESCE(pe.downtime_reason, ''::text) AS downtime_reason_raw,
+            pe.created_by,
+            pe.created_at,
+            pe.job_reference AS entry_job_reference
+           FROM ((public.production_entries pe
+             LEFT JOIN public.work_order_routing r ON ((r.id = pe.routing_id)))
+             LEFT JOIN public.work_orders wo ON ((wo.id = COALESCE(r.wo_id, pe.wo_id))))
+          WHERE (pe.entry_datetime IS NOT NULL)
+        )
+ SELECT eb.production_entry_id,
+    eb.production_date,
+    eb.entry_local_ts,
+    eb.start_local_ts,
+    eb.end_local_ts,
+    eb.machine,
+    eb.production_entry_machine,
+    eb.operator_name,
+    eb.wo_id,
+    eb.entry_wo_id,
+    eb.routing_wo_id,
+    eb.wo_number,
+    eb.wo_date,
+    eb.wo_status,
+    eb.routing_id,
+    eb.sequence_no,
+    eb.process_name,
+    eb.department,
+    eb.planned_machine,
+    eb.planned_qty,
+    eb.completed_qty,
+    eb.routing_status,
+    eb.so_number,
+    eb.line_no,
+    COALESCE(NULLIF(eb.entry_job_reference, ''::text), NULLIF(jb.job_reference, ''::text)) AS job_reference,
+    jb.client_name,
+    jb.product_name,
+    jb.artwork_no,
+    jb.category,
+    jb.expected_delivery,
+    jb.order_qty,
+    jb.order_unit,
+    round(eb.produced_qty, 2) AS produced_qty,
+    round(eb.rejected_qty, 2) AS rejected_qty,
+    round(eb.ok_qty, 2) AS ok_qty,
+    round(eb.good_qty, 2) AS good_qty,
+    round(COALESCE(eb.run_hours, (0)::numeric), 4) AS run_hours,
+    round(GREATEST((COALESCE(eb.run_hours, (0)::numeric) - (COALESCE(eb.downtime_minutes, (0)::numeric) / 60.0)), (0)::numeric), 4) AS net_run_hours,
+        CASE
+            WHEN (eb.run_hours IS NULL) THEN 'MISSING_ENTRY_HOURS'::text
+            ELSE 'ACTUAL_ENTRY_HOURS'::text
+        END AS hours_source,
+    round(eb.downtime_minutes, 2) AS downtime_minutes,
+    round((eb.downtime_minutes / 60.0), 2) AS downtime_hours,
+    COALESCE(eb.downtime_label, ''::text) AS downtime_label,
+    eb.downtime_reason_raw,
+    eb.created_by,
+    eb.created_at
+   FROM (entry_base eb
+     LEFT JOIN job_base jb ON (((jb.wo_id = eb.wo_id) AND (jb.so_number = eb.so_number) AND (jb.line_no = eb.line_no))));
+
+
+--
 -- Name: v_report_production_nop_daily; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -17243,6 +18653,193 @@ CREATE VIEW public.v_report_production_nop_daily AS
         END AS performance_status,
     last_completion_at
    FROM final_calc;
+
+
+--
+-- Name: v_report_production_nop_entry_lines; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_production_nop_entry_lines AS
+ WITH machine_standards(machine_key, machine, standard_make_ready_minutes, target_hourly_output) AS (
+         VALUES ('SM74'::text,'Heidelberg SM74'::text,(30)::numeric,(4125)::numeric), ('CD102'::text,'CD102'::text,(30)::numeric,(4125)::numeric), ('LAM1'::text,'Lamination Roll-1'::text,(10)::numeric,(1100)::numeric), ('LAM2'::text,'Lamination 02'::text,(10)::numeric,(1100)::numeric), ('LAM3'::text,'Lamination 03'::text,(10)::numeric,(1100)::numeric), ('DIE1'::text,'Die Cutting 01'::text,(30)::numeric,(880)::numeric), ('DIE2'::text,'Die Cutting 02'::text,(30)::numeric,(880)::numeric), ('DIE3'::text,'Die Cutting 03'::text,(30)::numeric,(880)::numeric), ('DIE4'::text,'Die Cutting 04'::text,(30)::numeric,(880)::numeric), ('DIE5'::text,'Die Cutting 05'::text,(30)::numeric,(880)::numeric), ('FLEXOPRINT'::text,'Markany Flexo E5'::text,(30)::numeric,(55)::numeric), ('FLEXODIE'::text,'Flexo Die Cutting Offline'::text,(30)::numeric,(44)::numeric), ('FLEXOSLIT'::text,'Rhyguan'::text,(30)::numeric,(88)::numeric), ('DIGITAL'::text,'Canon Digital Printing'::text,(10)::numeric,(660)::numeric), ('2PLY'::text,'2 Ply Making Machine'::text,(15)::numeric,(2000)::numeric), ('ROTARY'::text,'Rotary Cutting'::text,(0)::numeric,(650)::numeric), ('AUTOWINDOW'::text,'Auto Window Pasting'::text,(0)::numeric,(1500)::numeric), ('MSP1'::text,'Manual Sheet Pasting'::text,(0)::numeric,(600)::numeric), ('MSP2'::text,'Manual Pasting'::text,(0)::numeric,(600)::numeric), ('FMZ'::text,'Flute Laminator'::text,(0)::numeric,(2000)::numeric), ('DCMAN1'::text,'Manual Die Cutting 04'::text,(45)::numeric,(800)::numeric), ('DCMAN2'::text,'Manual Die Cutting 05'::text,(45)::numeric,(800)::numeric), ('DCAUTO'::text,'Automatic Die Cutting'::text,(90)::numeric,(2500)::numeric), ('STMAN1'::text,'Stitching Manual 01'::text,(0)::numeric,(250)::numeric), ('STMAN2'::text,'Stitching Manual 02'::text,(0)::numeric,(250)::numeric), ('STAUTO'::text,'Auto Stitching'::text,(0)::numeric,(200)::numeric), ('FOLDER'::text,'Folder Gluer'::text,(45)::numeric,(15000)::numeric), ('RS4'::text,'RS4 Printing'::text,(60)::numeric,(1500)::numeric)
+        ), job_base AS (
+         SELECT woj.wo_id,
+            woj.so_number,
+            (woj.line_no)::text AS line_no,
+            max(NULLIF(woj.client_name, ''::text)) AS client_name,
+            string_agg(DISTINCT NULLIF(woj.product_name, ''::text), ' / '::text ORDER BY NULLIF(woj.product_name, ''::text)) FILTER (WHERE (NULLIF(woj.product_name, ''::text) IS NOT NULL)) AS product_name,
+            max(NULLIF(woj.artwork_no, ''::text)) AS artwork_no,
+            max(NULLIF(woj.category, ''::text)) AS category,
+            max(NULLIF(woj.job_reference, ''::text)) AS job_reference,
+            max(woj.expected_delivery) AS expected_delivery,
+            max(woj.qty) AS order_qty,
+            max(NULLIF(woj.unit, ''::text)) AS order_unit
+           FROM public.work_order_jobs woj
+          GROUP BY woj.wo_id, woj.so_number, (woj.line_no)::text
+        ), entry_base AS (
+         SELECT pe.id AS production_entry_id,
+            pe.wo_id AS entry_wo_id,
+            pe.routing_id,
+            r.wo_id AS routing_wo_id,
+            COALESCE(r.wo_id, pe.wo_id) AS resolved_wo_id,
+            wo.wo_number,
+            wo.wo_date,
+            COALESCE(NULLIF(pe.so_number, ''::text), NULLIF(r.so_number, ''::text)) AS so_number,
+            COALESCE(NULLIF(pe.line_no, ''::text), NULLIF(r.line_no, ''::text)) AS line_no,
+            COALESCE(NULLIF(pe.job_reference, ''::text), NULLIF(jb.job_reference, ''::text)) AS job_reference,
+            jb.client_name,
+            jb.product_name,
+            jb.artwork_no,
+            jb.category,
+            jb.expected_delivery,
+            jb.order_qty,
+            jb.order_unit,
+            r.sequence_no,
+            NULLIF(r.process_name, ''::text) AS process_name,
+            NULLIF(r.department, ''::text) AS department,
+            NULLIF(r.planned_machine, ''::text) AS planned_machine,
+            COALESCE(r.planned_qty, (0)::numeric) AS planned_qty,
+            COALESCE(r.completed_qty, (0)::numeric) AS completed_qty,
+            COALESCE(r.status, ''::text) AS routing_status,
+            timezone('Asia/Kolkata'::text, pe.entry_datetime) AS entry_local_ts,
+            (timezone('Asia/Kolkata'::text, pe.entry_datetime))::date AS production_date,
+            NULLIF(pe.machine, ''::text) AS production_entry_machine,
+            COALESCE(NULLIF(pe.machine, ''::text), NULLIF(r.planned_machine, ''::text), 'Unassigned'::text) AS raw_machine,
+            upper(COALESCE(NULLIF(pe.machine, ''::text), NULLIF(r.planned_machine, ''::text), 'UNASSIGNED'::text)) AS raw_machine_upper,
+            upper(COALESCE(NULLIF(r.process_name, ''::text), NULLIF(r.department, ''::text), ''::text)) AS raw_process_upper,
+            NULLIF(TRIM(BOTH FROM pe.operator_name), ''::text) AS operator_name,
+            GREATEST(COALESCE(pe.produced_qty, (0)::numeric), (0)::numeric) AS produced_qty,
+            GREATEST(COALESCE(pe.rejected_qty, (0)::numeric), (0)::numeric) AS rejected_qty,
+            GREATEST(COALESCE(pe.ok_qty, (0)::numeric), (0)::numeric) AS ok_qty,
+            COALESCE((NULLIF("substring"(COALESCE(pe.downtime_reason, ''::text), 'DOWN:[[:space:]]*([0-9]+[.]?[0-9]*)[[:space:]]*min'::text), ''::text))::numeric, (0)::numeric) AS downtime_minutes,
+            NULLIF(TRIM(BOTH FROM regexp_replace(COALESCE("substring"(COALESCE(pe.downtime_reason, ''::text), 'DOWN:([^|]+)'::text), ''::text), '^[[:space:]]*[0-9]+[.]?[0-9]*[[:space:]]*min[[:space:]]*-?[[:space:]]*'::text, ''::text)), ''::text) AS downtime_label,
+            COALESCE(pe.downtime_reason, ''::text) AS downtime_reason_raw
+           FROM (((public.production_entries pe
+             LEFT JOIN public.work_order_routing r ON ((r.id = pe.routing_id)))
+             LEFT JOIN public.work_orders wo ON ((wo.id = COALESCE(r.wo_id, pe.wo_id))))
+             LEFT JOIN job_base jb ON (((jb.wo_id = COALESCE(r.wo_id, pe.wo_id)) AND (jb.so_number = COALESCE(NULLIF(pe.so_number, ''::text), NULLIF(r.so_number, ''::text))) AND (jb.line_no = COALESCE(NULLIF(pe.line_no, ''::text), NULLIF(r.line_no, ''::text))))))
+          WHERE (pe.entry_datetime IS NOT NULL)
+        ), entry_normalized AS (
+         SELECT eb.production_entry_id,
+            eb.entry_wo_id,
+            eb.routing_id,
+            eb.routing_wo_id,
+            eb.resolved_wo_id,
+            eb.wo_number,
+            eb.wo_date,
+            eb.so_number,
+            eb.line_no,
+            eb.job_reference,
+            eb.client_name,
+            eb.product_name,
+            eb.artwork_no,
+            eb.category,
+            eb.expected_delivery,
+            eb.order_qty,
+            eb.order_unit,
+            eb.sequence_no,
+            eb.process_name,
+            eb.department,
+            eb.planned_machine,
+            eb.planned_qty,
+            eb.completed_qty,
+            eb.routing_status,
+            eb.entry_local_ts,
+            eb.production_date,
+            eb.production_entry_machine,
+            eb.raw_machine,
+            eb.raw_machine_upper,
+            eb.raw_process_upper,
+            eb.operator_name,
+            eb.produced_qty,
+            eb.rejected_qty,
+            eb.ok_qty,
+            eb.downtime_minutes,
+            eb.downtime_label,
+            eb.downtime_reason_raw,
+                CASE
+                    WHEN ((eb.raw_machine_upper ~~ '%SM74%'::text) OR (eb.raw_machine_upper ~~ '%SM-74%'::text) OR (eb.raw_machine_upper ~~ '%HEIDELBERG%'::text)) THEN 'SM74'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%CD102%'::text) OR (eb.raw_machine_upper ~~ '%CD-102%'::text) OR (eb.raw_machine_upper ~~ '%CD 102%'::text)) THEN 'CD102'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%LAMINATION 01%'::text) OR (eb.raw_machine_upper ~~ '%LAMINATION 1%'::text) OR (eb.raw_machine_upper ~~ '%LAMINATION ROLL-1%'::text) OR (eb.raw_machine_upper ~~ '%LAMINATION ROLL 1%'::text) OR (eb.raw_machine_upper ~~ '%LAM-1%'::text) OR (eb.raw_machine_upper = 'LAM1'::text)) THEN 'LAM1'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%LAMINATION 02%'::text) OR (eb.raw_machine_upper ~~ '%LAMINATION 2%'::text) OR (eb.raw_machine_upper ~~ '%LAM-2%'::text) OR (eb.raw_machine_upper = 'LAM2'::text)) THEN 'LAM2'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%LAMINATION 03%'::text) OR (eb.raw_machine_upper ~~ '%LAMINATION 3%'::text) OR (eb.raw_machine_upper ~~ '%LAM-3%'::text) OR (eb.raw_machine_upper = 'LAM3'::text)) THEN 'LAM3'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%RHYGUAN%'::text) OR (eb.raw_process_upper ~~ '%INSPECTION%'::text) OR (eb.raw_process_upper ~~ '%SLITTING%'::text) OR (eb.raw_process_upper ~~ '%SLIT%'::text)) THEN 'FLEXOSLIT'::text
+                    WHEN (((eb.raw_process_upper ~~ '%FLEXO%'::text) AND ((eb.raw_process_upper ~~ '%DIE%'::text) OR (eb.raw_process_upper ~~ '%CUT%'::text))) OR ((eb.raw_machine_upper ~~ '%FLEXO%'::text) AND ((eb.raw_machine_upper ~~ '%DIE%'::text) OR (eb.raw_machine_upper ~~ '%CUT%'::text)))) THEN 'FLEXODIE'::text
+                    WHEN ((eb.raw_process_upper ~~ '%FLEXO%'::text) OR (eb.raw_machine_upper ~~ '%FLEXO%'::text) OR (eb.raw_machine_upper ~~ '%MARKANY%'::text)) THEN 'FLEXOPRINT'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%DIGITAL%'::text) OR (eb.raw_machine_upper ~~ '%CANON%'::text)) THEN 'DIGITAL'::text
+                    WHEN (eb.raw_machine_upper = ANY (ARRAY['AUTOMATIC'::text, 'AUTO'::text])) THEN '2PLY'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%2 PLY%'::text) OR (eb.raw_machine_upper ~~ '%TWO PLY%'::text) OR (eb.raw_machine_upper ~~ '%PLY MAKING%'::text)) THEN '2PLY'::text
+                    WHEN (eb.raw_machine_upper ~~ '%ROTARY%'::text) THEN 'ROTARY'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%AUTO WINDOW%'::text) OR (eb.raw_machine_upper ~~ '%AUTOMATIC WINDOW%'::text) OR ((eb.raw_machine_upper ~~ '%WINDOW%'::text) AND (eb.raw_machine_upper ~~ '%PAST%'::text) AND (eb.raw_machine_upper !~~ '%MANUAL%'::text))) THEN 'AUTOWINDOW'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%FMZ%'::text) OR (eb.raw_machine_upper ~~ '%FLUTE%'::text)) THEN 'FMZ'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%MANUAL PASTING%'::text) OR (eb.raw_machine_upper ~~ '%MANUAL SHEET PASTING 2%'::text) OR (eb.raw_machine_upper ~~ '%MANUAL SHEET PASTING - 2%'::text)) THEN 'MSP2'::text
+                    WHEN (eb.raw_machine_upper ~~ '%MANUAL SHEET PASTING%'::text) THEN 'MSP1'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 05%'::text) OR (eb.raw_machine_upper ~~ '%DIE CUTTING MANUAL 2%'::text) OR (eb.raw_machine_upper ~~ '%DIE CUTTING MANUAL - 2%'::text)) THEN 'DCMAN2'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%MANUAL DIE%'::text) OR (eb.raw_machine_upper ~~ '%DIE CUTTING MANUAL%'::text) OR (eb.raw_machine_upper ~~ '%MANUAL DIE CUTTING 04%'::text)) THEN 'DCMAN1'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%AUTOMATIC DIE%'::text) OR (eb.raw_machine_upper ~~ '%AUTO DIE%'::text) OR (eb.raw_machine_upper ~~ '%DIE CUTTING AUTO%'::text)) THEN 'DCAUTO'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%DIE CUTTING 01%'::text) OR (eb.raw_machine_upper ~~ '%DIE CUTTING-01%'::text) OR (eb.raw_machine_upper ~~ '%DIE-CUTTING-01%'::text) OR (eb.raw_machine_upper ~~ '%DIE-1%'::text) OR (eb.raw_machine_upper ~~ '%DYE-1%'::text)) THEN 'DIE1'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%DIE CUTTING 02%'::text) OR (eb.raw_machine_upper ~~ '%DIE CUTTING-02%'::text) OR (eb.raw_machine_upper ~~ '%DIE-CUTTING-02%'::text) OR (eb.raw_machine_upper ~~ '%DIE-2%'::text) OR (eb.raw_machine_upper ~~ '%DYE-2%'::text)) THEN 'DIE2'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%DIE CUTTING 03%'::text) OR (eb.raw_machine_upper ~~ '%DIE CUTTING-03%'::text) OR (eb.raw_machine_upper ~~ '%DIE-CUTTING-03%'::text) OR (eb.raw_machine_upper ~~ '%DIE-3%'::text) OR (eb.raw_machine_upper ~~ '%DYE-3%'::text)) THEN 'DIE3'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%DIE CUTTING 04%'::text) OR (eb.raw_machine_upper ~~ '%DIE-4%'::text) OR (eb.raw_machine_upper ~~ '%DYE-4%'::text)) THEN 'DIE4'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%DIE CUTTING 05%'::text) OR (eb.raw_machine_upper ~~ '%DIE-5%'::text) OR (eb.raw_machine_upper ~~ '%DYE-5%'::text)) THEN 'DIE5'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%STITCHING MANUAL 02%'::text) OR (eb.raw_machine_upper ~~ '%STITCHING MANUAL - 2%'::text)) THEN 'STMAN2'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%STITCHING MANUAL%'::text) OR (eb.raw_machine_upper ~~ '%STITCHING MANUAL 01%'::text) OR (eb.raw_machine_upper ~~ '%STITCHING MANUAL - 1%'::text)) THEN 'STMAN1'::text
+                    WHEN ((eb.raw_machine_upper ~~ '%AUTO STITCH%'::text) OR (eb.raw_machine_upper ~~ '%STITCHING AUTO%'::text)) THEN 'STAUTO'::text
+                    WHEN (eb.raw_machine_upper = 'STITCHING'::text) THEN 'STMAN1'::text
+                    WHEN (eb.raw_machine_upper ~~ '%FOLDER GLUER%'::text) THEN 'FOLDER'::text
+                    WHEN (eb.raw_machine_upper = ANY (ARRAY['PASTING'::text, 'SIDE PASTING'::text])) THEN 'FOLDER'::text
+                    WHEN (eb.raw_machine_upper ~~ '%RS4%'::text) THEN 'RS4'::text
+                    ELSE regexp_replace(eb.raw_machine_upper, '[^A-Z0-9]+'::text, ''::text, 'g'::text)
+                END AS machine_key
+           FROM entry_base eb
+        )
+ SELECT en.production_entry_id,
+    en.entry_wo_id,
+    en.routing_id,
+    en.routing_wo_id,
+    en.resolved_wo_id AS wo_id,
+    en.wo_number,
+    en.wo_date,
+    en.so_number,
+    en.line_no,
+    en.job_reference,
+    en.client_name,
+    en.product_name,
+    en.artwork_no,
+    en.category,
+    en.expected_delivery,
+    en.order_qty,
+    en.order_unit,
+    en.sequence_no,
+    en.process_name,
+    en.department,
+    en.planned_machine,
+    en.planned_qty,
+    en.completed_qty,
+    en.routing_status,
+    en.production_date,
+    en.entry_local_ts,
+    en.production_entry_machine,
+    en.raw_machine,
+    en.machine_key,
+    COALESCE(ms.machine, en.raw_machine) AS machine,
+    COALESCE(ms.standard_make_ready_minutes, (0)::numeric) AS standard_make_ready_minutes,
+    COALESCE(ms.target_hourly_output, (0)::numeric) AS target_hourly_output,
+        CASE
+            WHEN (en.machine_key = ANY (ARRAY['FLEXOPRINT'::text, 'FLEXODIE'::text, 'FLEXOSLIT'::text])) THEN 'meter/min'::text
+            ELSE 'qty/hour'::text
+        END AS target_unit,
+    en.operator_name,
+    round(en.produced_qty, 2) AS produced_qty,
+    round(en.rejected_qty, 2) AS rejected_qty,
+    round(en.ok_qty, 2) AS ok_qty,
+    round(en.produced_qty, 2) AS nop_production_qty,
+    round(en.downtime_minutes, 2) AS downtime_minutes,
+    round((en.downtime_minutes / 60.0), 2) AS downtime_hours,
+    COALESCE(en.downtime_label, ''::text) AS downtime_label,
+    en.downtime_reason_raw
+   FROM (entry_normalized en
+     LEFT JOIN machine_standards ms ON ((ms.machine_key = en.machine_key)));
 
 
 --
@@ -18742,8 +20339,8 @@ CREATE VIEW public.v_sales_order_advance_payment_clearance WITH (security_invoke
 --
 
 CREATE VIEW public.v_sales_order_item_picker AS
- SELECT COALESCE(i.item_code, ''::text) AS item_code,
-    COALESCE(i.item_name, ''::text) AS item_name,
+ SELECT TRIM(BOTH FROM COALESCE(i.item_code, ''::text)) AS item_code,
+    TRIM(BOTH FROM COALESCE(i.item_name, ''::text)) AS item_name,
     COALESCE(i.category, ''::text) AS category,
     COALESCE(i.hsn_group, ''::text) AS hsn_group,
     COALESCE(i.unit, ''::text) AS unit,
@@ -18781,7 +20378,7 @@ UNION ALL
     NULL::numeric AS width_mm,
     NULL::numeric AS height_mm,
     NULL::text AS dimension_unit
-   FROM ( VALUES ('MTR001'::text,'Ball Pen'::text,'Ball Pen'::text,'BALL PEN'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR002'::text,'Banner'::text,'Banner'::text,'BANNER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR003'::text,'Cap'::text,'Cap'::text,'CAP'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR004'::text,'Card Holder'::text,'Card Holder'::text,'CARD HOLDER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR005'::text,'Cello Tape'::text,'Cello Tape'::text,'CELLO TAPE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR006'::text,'Cup'::text,'Cup'::text,'CUP'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR007'::text,'Diary'::text,'Diary'::text,'DIARY'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR008'::text,'Flag'::text,'Flag'::text,'FLAG'::text,'Pcs'::text,(0)::numeric,(0)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR009'::text,'Flexo Plate'::text,'Flexo Plate'::text,'FLEXO PLATE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR010'::text,'Folder'::text,'Folder'::text,'FOLDER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR011'::text,'Garbage Bag'::text,'Garbage Bag'::text,'GARBAGE BAG'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR012'::text,'Gift Box'::text,'Gift Box'::text,'GIFT BOX'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR013'::text,'Key Chain'::text,'Key Chain'::text,'KEY CHAIN'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR014'::text,'Key CutOut'::text,'Key CutOut'::text,'KEY CUTOUT'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR015'::text,'Pen Holder'::text,'Pen Holder'::text,'PEN HOLDER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR016'::text,'Stamp'::text,'Stamp'::text,'STAMP'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR017'::text,'Standy'::text,'Standy'::text,'STANDY'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR018'::text,'T Shirt'::text,'T Shirt'::text,'T SHIRT'::text,'Pcs'::text,(0)::numeric,(5)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR019'::text,'Table Matt'::text,'Table Matt'::text,'TABLE MATT'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR020'::text,'Designing Charges'::text,'Designing Charges'::text,'DESIGNING CHARGES'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('SLC001'::text,'Flexo Printing Plate'::text,'Flexo Printing Plate'::text,'FLEXO PRINTING PLATE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'SL'::text,30), ('SLC002'::text,'Offset Printing Plate'::text,'Offset Printing Plate'::text,'OFFSET PRINTING PLATE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'SL'::text,30), ('SLC003'::text,'Die'::text,'Die'::text,'DIE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'SL'::text,30)) virtual_items(item_code, item_name, category, hsn_group, unit, default_rate, gst_pct, description, client_code, client_name, active, is_virtual, prefix_scope, sort_rank);
+   FROM ( VALUES ('MTR001'::text,'Ball Pen'::text,'Ball Pen'::text,'BALL PEN'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR002'::text,'Banner'::text,'Banner'::text,'BANNER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR003'::text,'Cap'::text,'Cap'::text,'CAP'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR004'::text,'Card Holder'::text,'Card Holder'::text,'CARD HOLDER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR005'::text,'Cello Tape'::text,'Cello Tape'::text,'CELLO TAPE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR006'::text,'Cup'::text,'Cup'::text,'CUP'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR007'::text,'Diary'::text,'Diary'::text,'DIARY'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR008'::text,'Flag'::text,'Flag'::text,'FLAG'::text,'Pcs'::text,(0)::numeric,(0)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR009'::text,'Flexo Plate'::text,'Flexo Plate'::text,'FLEXO PLATE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR010'::text,'Folder'::text,'Folder'::text,'FOLDER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR011'::text,'Garbage Bag'::text,'Garbage Bag'::text,'GARBAGE BAG'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR012'::text,'Gift Box'::text,'Gift Box'::text,'GIFT BOX'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR013'::text,'Key Chain'::text,'Key Chain'::text,'KEY CHAIN'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR014'::text,'Key CutOut'::text,'Key CutOut'::text,'KEY CUTOUT'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR015'::text,'Pen Holder'::text,'Pen Holder'::text,'PEN HOLDER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR016'::text,'Stamp'::text,'Stamp'::text,'STAMP'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR017'::text,'Standy'::text,'Standy'::text,'STANDY'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR018'::text,'T Shirt'::text,'T Shirt'::text,'T SHIRT'::text,'Pcs'::text,(0)::numeric,(5)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR019'::text,'Table Matt'::text,'Table Matt'::text,'TABLE MATT'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR020'::text,'Designing Charges'::text,'Designing Charges'::text,'DESIGNING CHARGES'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('MTR021'::text,'Stepney Cover'::text,'Stepney Cover'::text,'STEPNEY COVER'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'M'::text,10), ('SLC001'::text,'Flexo Printing Plate'::text,'Flexo Printing Plate'::text,'FLEXO PRINTING PLATE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'SL'::text,30), ('SLC002'::text,'Offset Printing Plate'::text,'Offset Printing Plate'::text,'OFFSET PRINTING PLATE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'SL'::text,30), ('SLC003'::text,'Die'::text,'Die'::text,'DIE'::text,'Pcs'::text,(0)::numeric,(18)::numeric,''::text,''::text,''::text,true,true,'SL'::text,30)) virtual_items(item_code, item_name, category, hsn_group, unit, default_rate, gst_pct, description, client_code, client_name, active, is_virtual, prefix_scope, sort_rank);
 
 
 --
@@ -18959,6 +20556,201 @@ CREATE VIEW public.v_sales_orders_list_fast WITH (security_invoker='on') AS
    FROM ((public.sales_orders so
      LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
      LEFT JOIN public.sales_order_rollup_cache src ON ((src.so_id = (so.id)::text)));
+
+
+--
+-- Name: v_standard_processed_work_orders; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_standard_processed_work_orders AS
+ WITH latest_artwork AS (
+         SELECT DISTINCT ON (a.so_id, (a.line_no)::text) a.so_id,
+            (a.line_no)::text AS line_no_key,
+            a.artwork_no,
+            a.product_type,
+            a.sheet_length,
+            a.sheet_width,
+            a.sheet_ups,
+            a.printing_colors,
+            a.across_ups,
+            a.along_ups,
+            a.total_ups,
+            a.across_width,
+            a.teeth,
+            a.across_gap_mm,
+            a.along_gap_mm,
+            COALESCE(a.stock_qty_to_bill, (0)::numeric) AS stock_qty_to_bill,
+            upper(COALESCE(NULLIF(a.status, ''::text), 'PENDING'::text)) AS artwork_status,
+            a.approved_at
+           FROM public.artworks a
+          ORDER BY a.so_id, (a.line_no)::text,
+                CASE
+                    WHEN (NULLIF(btrim(COALESCE(a.artwork_no, ''::text)), ''::text) IS NOT NULL) THEN 0
+                    ELSE 1
+                END, a.approved_at DESC NULLS LAST, a.artwork_at DESC NULLS LAST, a.id DESC
+        ), standard_wo_jobs AS (
+         SELECT wo.id AS wo_id,
+            wo.wo_number,
+            wo.wo_date,
+            woj.so_number,
+            (woj.line_no)::text AS line_no_key,
+            woj.product_name AS woj_product_name,
+            COALESCE(woj.qty, (0)::numeric) AS job_qty,
+            woj.unit,
+            woj.category AS woj_category,
+            woj.sales_rep AS woj_sales_rep,
+            woj.so_date AS woj_so_date,
+            woj.artwork_no AS woj_artwork_no,
+            woj.client_name AS woj_client_name,
+            woj.expected_delivery AS woj_expected_delivery,
+            woj.po_number AS woj_po_number,
+            woj.job_priority AS woj_job_priority,
+            woj.product_remarks AS woj_product_remarks,
+            woj.so_remarks AS woj_so_remarks,
+            woj.job_reference AS woj_job_reference,
+            woj.prepress_remark AS woj_prepress_remark
+           FROM (public.work_order_jobs woj
+             JOIN public.work_orders wo ON ((wo.id = woj.wo_id)))
+          WHERE ((COALESCE(woj.qty, (0)::numeric) > (0)::numeric) AND (NOT ((upper(COALESCE((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text)) = 'FLEXO'::text) OR (COALESCE(wo.snapshot_json, '{}'::jsonb) ? 'flexoDetails'::text))))
+        ), line_processed_totals AS (
+         SELECT swj.so_number,
+            swj.line_no_key,
+            sum(swj.job_qty) AS processed_total_qty,
+            string_agg(DISTINCT swj.wo_number, ', '::text ORDER BY swj.wo_number) AS wo_list
+           FROM standard_wo_jobs swj
+          GROUP BY swj.so_number, swj.line_no_key
+        ), base AS (
+         SELECT swj.wo_id,
+            swj.wo_number,
+            swj.wo_number AS wo_no,
+            swj.wo_date,
+            ''::text AS wo_time,
+            COALESCE(to_char((swj.wo_date)::timestamp without time zone, 'YYYY-MM-DD'::text), ''::text) AS wo_date_time,
+            swj.so_number,
+            COALESCE(so.so_date, swj.woj_so_date) AS so_date,
+            COALESCE(to_char((so.created_at AT TIME ZONE 'Asia/Kolkata'::text), 'HH24:MI'::text), ''::text) AS so_time,
+            btrim(concat_ws(' '::text, COALESCE((COALESCE(so.so_date, swj.woj_so_date))::text, ''::text), COALESCE(to_char((so.created_at AT TIME ZONE 'Asia/Kolkata'::text), 'HH24:MI'::text), ''::text))) AS so_date_time,
+            COALESCE(swj.woj_sales_rep, so.sales_rep, ''::text) AS sales_rep,
+            COALESCE(so.client_code, ''::text) AS client_code,
+            COALESCE(NULLIF(swj.woj_client_name, ''::text), c.client_name, so.client_code, ''::text) AS client_name,
+            swj.line_no_key AS line_no,
+            COALESCE(sol.product_code, ''::text) AS product_code,
+            COALESCE(NULLIF(swj.woj_product_name, ''::text), sol.product_name, ''::text) AS product_name,
+            COALESCE(NULLIF(swj.woj_category, ''::text), sol.category, ''::text) AS category,
+            COALESCE(sol.qty, swj.job_qty, (0)::numeric) AS order_qty,
+            COALESCE(NULLIF(swj.unit, ''::text), sol.unit, ''::text) AS unit,
+            COALESCE(NULLIF(swj.woj_po_number, ''::text), so.po_number, ''::text) AS po_number,
+            COALESCE(swj.woj_expected_delivery, sol.expected_delivery) AS expected_delivery,
+            COALESCE(NULLIF(swj.woj_job_priority, ''::text), sol.job_priority, ''::text) AS job_priority,
+            COALESCE(sol.job_type, ''::text) AS job_type,
+            COALESCE(NULLIF(swj.woj_so_remarks, ''::text), so.remarks, ''::text) AS so_remarks,
+            COALESCE(NULLIF(swj.woj_product_remarks, ''::text), sol.product_remarks, ''::text) AS product_remarks,
+            COALESCE(NULLIF(swj.woj_prepress_remark, ''::text), sol.prepress_remarks, ''::text) AS prepress_remark,
+            COALESCE(NULLIF(swj.woj_job_reference, ''::text), sol.job_reference, ''::text) AS job_reference,
+            upper(COALESCE(NULLIF(sol.accounts_status, ''::text), 'PENDING'::text)) AS accounts_status,
+            upper(COALESCE(NULLIF(sol.business_status, ''::text), 'PENDING'::text)) AS business_status,
+            COALESCE(NULLIF(swj.woj_artwork_no, ''::text), la.artwork_no, ''::text) AS artwork_no,
+            COALESCE(NULLIF(la.product_type, ''::text),
+                CASE
+                    WHEN (upper(COALESCE(swj.woj_category, sol.category, ''::text)) ~~ '%CORR%'::text) THEN 'Corrugated'::text
+                    WHEN (upper(COALESCE(swj.woj_category, sol.category, ''::text)) ~~ '%DIGITAL%'::text) THEN 'Digital'::text
+                    WHEN (upper(COALESCE(swj.woj_category, sol.category, ''::text)) ~~ '%OFFSET%'::text) THEN 'Offset'::text
+                    ELSE COALESCE(NULLIF(swj.woj_category, ''::text), sol.category, ''::text)
+                END) AS product_type,
+                CASE
+                    WHEN (upper(COALESCE(NULLIF(la.product_type, ''::text), swj.woj_category, sol.category, ''::text)) ~~ '%FLEXO%'::text) THEN 'FLEXO'::text
+                    WHEN (upper(COALESCE(NULLIF(la.product_type, ''::text), swj.woj_category, sol.category, ''::text)) ~~ '%CORR%'::text) THEN 'CORRUGATION'::text
+                    WHEN (upper(COALESCE(NULLIF(la.product_type, ''::text), swj.woj_category, sol.category, ''::text)) ~~ '%DIGITAL%'::text) THEN 'DIGITAL'::text
+                    WHEN (upper(COALESCE(NULLIF(la.product_type, ''::text), swj.woj_category, sol.category, ''::text)) ~~ '%OFFSET%'::text) THEN 'OFFSET'::text
+                    ELSE upper(COALESCE(swj.woj_category, sol.category, ''::text))
+                END AS department_category,
+            la.sheet_length,
+            la.sheet_width,
+            la.sheet_ups,
+            la.printing_colors,
+            la.across_ups,
+            la.along_ups,
+            la.total_ups,
+            la.across_width,
+            la.teeth,
+            la.across_gap_mm,
+            la.along_gap_mm,
+            COALESCE(la.stock_qty_to_bill, (0)::numeric) AS stock_qty_to_bill,
+            COALESCE(la.artwork_status, 'NO_ART'::text) AS artwork_status,
+            la.approved_at AS artwork_approved_at,
+            swj.job_qty AS processed_qty,
+            COALESCE(lpt.processed_total_qty, swj.job_qty) AS processed_total_qty,
+            COALESCE(lpt.wo_list, swj.wo_number) AS all_wo_list
+           FROM (((((standard_wo_jobs swj
+             LEFT JOIN public.sales_orders so ON ((so.so_number = swj.so_number)))
+             LEFT JOIN public.sales_order_lines sol ON (((sol.so_id = so.id) AND ((sol.line_no)::text = swj.line_no_key))))
+             LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+             LEFT JOIN latest_artwork la ON (((la.so_id = so.id) AND (la.line_no_key = swj.line_no_key))))
+             LEFT JOIN line_processed_totals lpt ON (((lpt.so_number = swj.so_number) AND (lpt.line_no_key = swj.line_no_key))))
+        )
+ SELECT wo_id,
+    wo_number,
+    wo_no,
+    wo_date,
+    wo_time,
+    wo_date_time,
+    so_number,
+    so_date,
+    so_time,
+    so_date_time,
+    sales_rep,
+    client_code,
+    client_name,
+    line_no,
+    product_code,
+    product_name,
+    category,
+    department_category,
+    product_type,
+    processed_qty AS qty,
+    order_qty,
+    stock_qty_to_bill,
+    GREATEST((GREATEST((COALESCE(order_qty, (0)::numeric) - COALESCE(stock_qty_to_bill, (0)::numeric)), (0)::numeric) - COALESCE(processed_total_qty, (0)::numeric)), (0)::numeric) AS remaining_qty,
+    processed_qty,
+    unit,
+    po_number,
+    expected_delivery,
+    job_priority,
+    job_type,
+    so_remarks,
+    product_remarks,
+    prepress_remark,
+    job_reference,
+    accounts_status,
+    business_status,
+    artwork_no,
+    sheet_length,
+    sheet_width,
+    sheet_ups,
+    printing_colors,
+    across_ups,
+    along_ups,
+    total_ups,
+    across_width,
+    teeth,
+    across_gap_mm,
+    along_gap_mm,
+    artwork_status,
+    artwork_approved_at,
+        CASE
+            WHEN ((accounts_status = 'REJECTED'::text) OR (business_status = 'REJECTED'::text) OR (artwork_status = 'REJECTED'::text)) THEN 'Rejected'::text
+            WHEN ((accounts_status <> 'APPROVED'::text) OR (business_status <> 'APPROVED'::text) OR (artwork_status <> 'APPROVED'::text)) THEN 'Pending'::text
+            ELSE 'Approved'::text
+        END AS approval_stage
+   FROM base
+  WHERE (department_category !~~ '%FLEXO%'::text);
+
+
+--
+-- Name: VIEW v_standard_processed_work_orders; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_standard_processed_work_orders IS 'Standard Work Order processed list sourced from WO tables, independent of active SO-line queue filters.';
 
 
 --
@@ -20276,6 +22068,118 @@ ALTER TABLE ONLY public.items
 
 
 --
+-- Name: machine_hour_rates machine_hour_rates_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.machine_hour_rates
+    ADD CONSTRAINT machine_hour_rates_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: npd_costing_evaluations npd_costing_evaluations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_costing_evaluations
+    ADD CONSTRAINT npd_costing_evaluations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: npd_customer_submissions npd_customer_submissions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_customer_submissions
+    ADD CONSTRAINT npd_customer_submissions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: npd_paper_specs npd_paper_specs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_paper_specs
+    ADD CONSTRAINT npd_paper_specs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: npd_paper_specs npd_paper_specs_version_line_uk; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_paper_specs
+    ADD CONSTRAINT npd_paper_specs_version_line_uk UNIQUE (version_id, line_no);
+
+
+--
+-- Name: npd_request_versions npd_request_versions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_request_versions
+    ADD CONSTRAINT npd_request_versions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: npd_request_versions npd_request_versions_request_version_uk; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_request_versions
+    ADD CONSTRAINT npd_request_versions_request_version_uk UNIQUE (request_id, version_no);
+
+
+--
+-- Name: npd_requests npd_requests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_requests
+    ADD CONSTRAINT npd_requests_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: npd_requests npd_requests_sampling_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_requests
+    ADD CONSTRAINT npd_requests_sampling_id_key UNIQUE (sampling_id);
+
+
+--
+-- Name: npd_sample_verifications npd_sample_verifications_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sample_verifications
+    ADD CONSTRAINT npd_sample_verifications_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: npd_sample_work_orders npd_sample_work_orders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sample_work_orders
+    ADD CONSTRAINT npd_sample_work_orders_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: npd_sample_work_orders npd_sample_work_orders_sample_wo_no_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sample_work_orders
+    ADD CONSTRAINT npd_sample_work_orders_sample_wo_no_key UNIQUE (sample_wo_no);
+
+
+--
+-- Name: npd_sequences npd_sequences_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sequences
+    ADD CONSTRAINT npd_sequences_pkey PRIMARY KEY (prefix, fy);
+
+
+--
+-- Name: npd_status_history npd_status_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_status_history
+    ADD CONSTRAINT npd_status_history_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: packing_entry_audit_log packing_entry_audit_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -21522,6 +23426,20 @@ CREATE INDEX idx_inv_ledger_reversal_ref ON public.inv_ledger USING btree (ref_n
 
 
 --
+-- Name: idx_inv_ledger_wo_return_wo_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_ledger_wo_return_wo_key ON public.inv_ledger USING btree (ref_type, ref_no, remarks) WHERE (upper(COALESCE(ref_type, ''::text)) = 'WO-RETURN'::text);
+
+
+--
+-- Name: idx_inv_ledger_wo_variance_export; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_ledger_wo_variance_export ON public.inv_ledger USING btree (ref_no, remarks, ref_type, created_at) WHERE (upper(COALESCE(ref_type, ''::text)) = ANY (ARRAY['ISSUE'::text, 'WO-RETURN'::text]));
+
+
+--
 -- Name: idx_inv_lot_alloc_item; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -21774,6 +23692,13 @@ CREATE INDEX idx_invoices_register_v3 ON public.invoices USING btree (invoice_da
 
 
 --
+-- Name: idx_machine_hour_rates_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_machine_hour_rates_lookup ON public.machine_hour_rates USING btree (machine_key, active, effective_from DESC, effective_to);
+
+
+--
 -- Name: idx_pack_so_line; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -21869,6 +23794,13 @@ CREATE INDEX idx_packing_records_so_line_ready ON public.packing_records USING b
 --
 
 CREATE INDEX idx_packing_records_so_number_line ON public.packing_records USING btree (so_number, line_no);
+
+
+--
+-- Name: idx_production_entries_actual_time; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_production_entries_actual_time ON public.production_entries USING btree (start_datetime, end_datetime);
 
 
 --
@@ -22306,6 +24238,20 @@ CREATE INDEX idx_so_lines_soid ON public.sales_order_lines USING btree (so_id);
 
 
 --
+-- Name: idx_standard_processed_wo_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_standard_processed_wo_date ON public.work_orders USING btree (wo_date DESC, wo_number);
+
+
+--
+-- Name: idx_standard_processed_wo_jobs_wo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_standard_processed_wo_jobs_wo ON public.work_order_jobs USING btree (wo_id, so_number, line_no);
+
+
+--
 -- Name: idx_v_inventory_transaction_register_type_date; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -22523,6 +24469,83 @@ CREATE INDEX item_bom_routing_revision_idx ON public.item_bom_routing USING btre
 
 
 --
+-- Name: npd_costing_evaluations_version_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_costing_evaluations_version_idx ON public.npd_costing_evaluations USING btree (version_id, created_at DESC);
+
+
+--
+-- Name: npd_customer_submissions_version_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_customer_submissions_version_idx ON public.npd_customer_submissions USING btree (version_id, submitted_at DESC);
+
+
+--
+-- Name: npd_paper_specs_version_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_paper_specs_version_idx ON public.npd_paper_specs USING btree (version_id, line_no);
+
+
+--
+-- Name: npd_request_versions_request_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_request_versions_request_idx ON public.npd_request_versions USING btree (request_id, version_no DESC);
+
+
+--
+-- Name: npd_requests_client_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_requests_client_idx ON public.npd_requests USING btree (client_name, job_ref);
+
+
+--
+-- Name: npd_requests_sales_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_requests_sales_idx ON public.npd_requests USING btree (sales_user_id, created_at DESC);
+
+
+--
+-- Name: npd_requests_status_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_requests_status_idx ON public.npd_requests USING btree (status, updated_at DESC);
+
+
+--
+-- Name: npd_sample_verifications_version_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_sample_verifications_version_idx ON public.npd_sample_verifications USING btree (version_id, verified_at DESC);
+
+
+--
+-- Name: npd_sample_work_orders_queue_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_sample_work_orders_queue_idx ON public.npd_sample_work_orders USING btree (status, created_at DESC);
+
+
+--
+-- Name: npd_sample_work_orders_version_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_sample_work_orders_version_idx ON public.npd_sample_work_orders USING btree (version_id, created_at DESC);
+
+
+--
+-- Name: npd_status_history_request_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX npd_status_history_request_idx ON public.npd_status_history USING btree (request_id, created_at DESC);
+
+
+--
 -- Name: uq_client_parties_one_default_bill_to; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -22534,6 +24557,13 @@ CREATE UNIQUE INDEX uq_client_parties_one_default_bill_to ON public.client_parti
 --
 
 CREATE UNIQUE INDEX uq_client_parties_one_default_ship_to ON public.client_parties USING btree (client_id) WHERE ((address_type = 'SHIP_TO'::text) AND (is_default = true));
+
+
+--
+-- Name: uq_machine_hour_rates_machine_from; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_machine_hour_rates_machine_from ON public.machine_hour_rates USING btree (machine_key, effective_from);
 
 
 --
@@ -22702,6 +24732,34 @@ CREATE TRIGGER trg_item_bom_routing_updated_at BEFORE UPDATE ON public.item_bom_
 --
 
 CREATE TRIGGER trg_lock_invoice_lines BEFORE DELETE OR UPDATE ON public.invoice_lines FOR EACH ROW EXECUTE FUNCTION public.lock_invoice_lines();
+
+
+--
+-- Name: npd_costing_evaluations trg_npd_costing_evaluations_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_npd_costing_evaluations_updated_at BEFORE UPDATE ON public.npd_costing_evaluations FOR EACH ROW EXECUTE FUNCTION public.set_updated_at_timestamp();
+
+
+--
+-- Name: npd_request_versions trg_npd_request_versions_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_npd_request_versions_updated_at BEFORE UPDATE ON public.npd_request_versions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at_timestamp();
+
+
+--
+-- Name: npd_requests trg_npd_requests_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_npd_requests_updated_at BEFORE UPDATE ON public.npd_requests FOR EACH ROW EXECUTE FUNCTION public.set_updated_at_timestamp();
+
+
+--
+-- Name: npd_sample_work_orders trg_npd_sample_work_orders_updated_at; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_npd_sample_work_orders_updated_at BEFORE UPDATE ON public.npd_sample_work_orders FOR EACH ROW EXECUTE FUNCTION public.set_updated_at_timestamp();
 
 
 --
@@ -23243,6 +25301,150 @@ ALTER TABLE ONLY public.item_bom_routing
 
 
 --
+-- Name: npd_costing_evaluations npd_costing_evaluations_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_costing_evaluations
+    ADD CONSTRAINT npd_costing_evaluations_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.npd_requests(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_costing_evaluations npd_costing_evaluations_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_costing_evaluations
+    ADD CONSTRAINT npd_costing_evaluations_version_id_fkey FOREIGN KEY (version_id) REFERENCES public.npd_request_versions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_customer_submissions npd_customer_submissions_next_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_customer_submissions
+    ADD CONSTRAINT npd_customer_submissions_next_version_id_fkey FOREIGN KEY (next_version_id) REFERENCES public.npd_request_versions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: npd_customer_submissions npd_customer_submissions_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_customer_submissions
+    ADD CONSTRAINT npd_customer_submissions_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.npd_requests(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_customer_submissions npd_customer_submissions_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_customer_submissions
+    ADD CONSTRAINT npd_customer_submissions_version_id_fkey FOREIGN KEY (version_id) REFERENCES public.npd_request_versions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_paper_specs npd_paper_specs_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_paper_specs
+    ADD CONSTRAINT npd_paper_specs_version_id_fkey FOREIGN KEY (version_id) REFERENCES public.npd_request_versions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_request_versions npd_request_versions_previous_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_request_versions
+    ADD CONSTRAINT npd_request_versions_previous_version_id_fkey FOREIGN KEY (previous_version_id) REFERENCES public.npd_request_versions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: npd_request_versions npd_request_versions_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_request_versions
+    ADD CONSTRAINT npd_request_versions_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.npd_requests(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_requests npd_requests_client_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_requests
+    ADD CONSTRAINT npd_requests_client_id_fkey FOREIGN KEY (client_id) REFERENCES public.clients(id) ON DELETE SET NULL;
+
+
+--
+-- Name: npd_requests npd_requests_current_version_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_requests
+    ADD CONSTRAINT npd_requests_current_version_fk FOREIGN KEY (current_version_id) REFERENCES public.npd_request_versions(id) ON DELETE SET NULL;
+
+
+--
+-- Name: npd_sample_verifications npd_sample_verifications_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sample_verifications
+    ADD CONSTRAINT npd_sample_verifications_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.npd_requests(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_sample_verifications npd_sample_verifications_sample_wo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sample_verifications
+    ADD CONSTRAINT npd_sample_verifications_sample_wo_id_fkey FOREIGN KEY (sample_wo_id) REFERENCES public.npd_sample_work_orders(id) ON DELETE SET NULL;
+
+
+--
+-- Name: npd_sample_verifications npd_sample_verifications_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sample_verifications
+    ADD CONSTRAINT npd_sample_verifications_version_id_fkey FOREIGN KEY (version_id) REFERENCES public.npd_request_versions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_sample_work_orders npd_sample_work_orders_linked_wo_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sample_work_orders
+    ADD CONSTRAINT npd_sample_work_orders_linked_wo_id_fkey FOREIGN KEY (linked_wo_id) REFERENCES public.work_orders(id) ON DELETE SET NULL;
+
+
+--
+-- Name: npd_sample_work_orders npd_sample_work_orders_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sample_work_orders
+    ADD CONSTRAINT npd_sample_work_orders_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.npd_requests(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_sample_work_orders npd_sample_work_orders_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_sample_work_orders
+    ADD CONSTRAINT npd_sample_work_orders_version_id_fkey FOREIGN KEY (version_id) REFERENCES public.npd_request_versions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_status_history npd_status_history_request_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_status_history
+    ADD CONSTRAINT npd_status_history_request_id_fkey FOREIGN KEY (request_id) REFERENCES public.npd_requests(id) ON DELETE CASCADE;
+
+
+--
+-- Name: npd_status_history npd_status_history_version_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.npd_status_history
+    ADD CONSTRAINT npd_status_history_version_id_fkey FOREIGN KEY (version_id) REFERENCES public.npd_request_versions(id) ON DELETE SET NULL;
+
+
+--
 -- Name: packing_entry_log packing_entry_log_pack_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -23751,6 +25953,66 @@ ALTER TABLE public.item_sequences ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.items ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: machine_hour_rates; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.machine_hour_rates ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: npd_costing_evaluations; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.npd_costing_evaluations ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: npd_customer_submissions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.npd_customer_submissions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: npd_paper_specs; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.npd_paper_specs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: npd_request_versions; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.npd_request_versions ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: npd_requests; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.npd_requests ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: npd_sample_verifications; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.npd_sample_verifications ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: npd_sample_work_orders; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.npd_sample_work_orders ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: npd_sequences; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.npd_sequences ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: npd_status_history; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.npd_status_history ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: packing_entry_audit_log; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -23999,5 +26261,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 3TTUMutx7iK9wdQcGA06U1SKYrSgYMpnp9jMGIXAXReSjOSAsLnEwcsPIfttG54
+\unrestrict bQXDXIVOaE6C6sKe5f5nKYzfSyH1pNbrKl5apeSz2MZOKwpff1rBZqlFQG55YyY
 
