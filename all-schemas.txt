@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict bQXDXIVOaE6C6sKe5f5nKYzfSyH1pNbrKl5apeSz2MZOKwpff1rBZqlFQG55YyY
+\restrict NqMuXTpe0EaL4g7lCdt5PTPHNDWPfFt6snaptfBuxB9TU7BeGrwjjtaceor5Ktx
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.3
@@ -2403,13 +2403,14 @@ $$;
 
 
 --
--- Name: inv_wo_issue_variance_export_ui(text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: inv_wo_issue_variance_export_ui(text, date, date, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.inv_wo_issue_variance_export_ui(p_search text DEFAULT NULL::text, p_limit integer DEFAULT 50000, p_offset integer DEFAULT 0) RETURNS TABLE(wo_no text, job_card_no text, sales_orders text, client text, product text, artwork_no text, department text, material_key text, material text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, pending_qty numeric, excess_qty numeric, status text, issue_batches text, return_batches text, last_issue_date timestamp with time zone, last_return_date timestamp with time zone)
+CREATE FUNCTION public.inv_wo_issue_variance_export_ui(p_search text DEFAULT NULL::text, p_date_from date DEFAULT NULL::date, p_date_to date DEFAULT NULL::date, p_limit integer DEFAULT 500000, p_offset integer DEFAULT 0) RETURNS TABLE(wo_date date, wo_no text, job_card_no text, sales_orders text, client text, product text, artwork_no text, department text, material_key text, material text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, pending_qty numeric, excess_qty numeric, status text, issue_batches text, return_batches text, last_issue_date timestamp with time zone, last_return_date timestamp with time zone)
     LANGUAGE sql STABLE
     AS $$
   select
+    v.wo_date,
     v.wo_no,
     v.job_card_no,
     v.sales_orders,
@@ -2446,8 +2447,11 @@ CREATE FUNCTION public.inv_wo_issue_variance_export_ui(p_search text DEFAULT NUL
     or v.artwork_no ilike '%' || trim(p_search) || '%'
     or v.material ilike '%' || trim(p_search) || '%'
   )
-  order by v.wo_no desc, v.material asc, v.material_key asc
-  limit greatest(coalesce(p_limit, 50000), 1)
+  and coalesce(v.required_qty, 0) > 0
+  and (p_date_from is null or (v.last_issue_date at time zone 'Asia/Kolkata')::date >= p_date_from)
+  and (p_date_to is null or (v.last_issue_date at time zone 'Asia/Kolkata')::date <= p_date_to)
+  order by v.last_issue_date desc nulls last, v.wo_date desc nulls last, v.wo_no desc, v.material asc, v.material_key asc
+  limit greatest(coalesce(p_limit, 500000), 1)
   offset greatest(coalesce(p_offset, 0), 0);
 $$;
 
@@ -2456,7 +2460,7 @@ $$;
 -- Name: inv_work_order_issue_detail_ui(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.inv_work_order_issue_detail_ui(p_wo_no text) RETURNS TABLE(wo_number text, issue_department text, line_status text, material_key text, item_label text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, remaining_qty numeric, excess_qty numeric)
+CREATE FUNCTION public.inv_work_order_issue_detail_ui(p_wo_no text) RETURNS TABLE(wo_number text, issue_department text, line_status text, material_key text, item_label text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, remaining_qty numeric, excess_qty numeric, item_code text)
     LANGUAGE sql STABLE
     AS $$
   select
@@ -2474,7 +2478,8 @@ CREATE FUNCTION public.inv_work_order_issue_detail_ui(p_wo_no text) RETURNS TABL
     r.returned_qty,
     r.net_issued_qty,
     r.remaining_qty,
-    r.excess_qty
+    r.excess_qty,
+    r.item_code::text
   from public.inv_wo_issue_requirement_fast_v r
   where r.wo_number = trim(p_wo_no)
   order by r.item_label asc, r.material_key asc;
@@ -2529,7 +2534,7 @@ $$;
 -- Name: inv_work_orders_for_issue_ui(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.inv_work_orders_for_issue_ui() RETURNS TABLE(wo_no text, issue_department text, material_status text, material_key text, item_label text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, remaining_qty numeric)
+CREATE FUNCTION public.inv_work_orders_for_issue_ui() RETURNS TABLE(wo_no text, issue_department text, material_status text, material_key text, item_label text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, remaining_qty numeric, item_code text)
     LANGUAGE sql STABLE
     AS $$
   select
@@ -2546,7 +2551,8 @@ CREATE FUNCTION public.inv_work_orders_for_issue_ui() RETURNS TABLE(wo_no text, 
     r.issued_qty,
     r.returned_qty,
     r.net_issued_qty,
-    r.remaining_qty
+    r.remaining_qty,
+    r.item_code::text
   from public.inv_wo_issue_requirement_v r
   join public.inv_wo_issue_status_v s on s.wo_number = r.wo_number
   order by r.wo_number desc, r.item_label asc, r.material_key asc;
@@ -7256,6 +7262,26 @@ COMMENT ON COLUMN public.work_order_materials.sheets IS 'DEPRECATED – do not u
 
 
 --
+-- Name: work_order_routing; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.work_order_routing (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    wo_id uuid,
+    so_number text,
+    line_no text,
+    process_name text,
+    sequence_no integer,
+    department text,
+    planned_machine text,
+    planned_qty numeric DEFAULT 0,
+    completed_qty numeric DEFAULT 0,
+    status text DEFAULT 'PENDING'::text,
+    created_at timestamp with time zone DEFAULT now()
+);
+
+
+--
 -- Name: work_orders; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7280,11 +7306,23 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
             wo.wo_number,
             wo.status,
             wo.snapshot_json,
-            COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text) AS raw_department,
+                CASE
+                    WHEN (upper(COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text)) ~~ '%FLEXO%'::text) THEN COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text)
+                    WHEN ((EXISTS ( SELECT 1
+                       FROM public.work_order_routing wor
+                      WHERE ((wor.wo_id = wo.id) AND ((upper(COALESCE(wor.department, ''::text)) ~~ '%DIGITAL%'::text) OR (upper(COALESCE(wor.process_name, ''::text)) ~~ '%DIGITAL%'::text) OR (upper(COALESCE(wor.planned_machine, ''::text)) ~~ '%DIGITAL%'::text) OR (upper(COALESCE(wor.planned_machine, ''::text)) ~~ '%CANON%'::text))))) OR (EXISTS ( SELECT 1
+                       FROM jsonb_array_elements(
+                            CASE
+                                WHEN (jsonb_typeof((wo.snapshot_json -> 'routing'::text)) = 'array'::text) THEN (wo.snapshot_json -> 'routing'::text)
+                                ELSE '[]'::jsonb
+                            END) rt("row")
+                      WHERE ((upper(concat_ws(' '::text, (rt."row" ->> 'dept'::text), (rt."row" ->> 'department'::text), (rt."row" ->> 'operation'::text), (rt."row" ->> 'process_name'::text), (rt."row" ->> 'machine'::text), (rt."row" ->> 'planned_machine'::text))) ~~ '%DIGITAL%'::text) OR (upper(concat_ws(' '::text, (rt."row" ->> 'machine'::text), (rt."row" ->> 'planned_machine'::text))) ~~ '%CANON%'::text))))) THEN 'Digital'::text
+                    ELSE COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text)
+                END AS raw_department,
             COALESCE((NULLIF((wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}'::text[]), ''::text))::numeric, (NULLIF((wo.snapshot_json #>> '{flexoDetails,baseRunningMeter}'::text[]), ''::text))::numeric, (0)::numeric) AS flexo_running_meter,
             (EXISTS ( SELECT 1
                    FROM public.work_order_materials wom0
-                  WHERE (wom0.wo_id = wo.id))) AS has_material_rows
+                  WHERE ((wom0.wo_id = wo.id) AND (COALESCE(wom0.required_qty, (0)::numeric) > (0)::numeric) AND (NULLIF(TRIM(BOTH FROM COALESCE(NULLIF(wom0.item_name, ''::text), NULLIF(split_part(wom0.material_key, '|'::text, 1), ''::text), ''::text)), ''::text) IS NOT NULL)))) AS has_valid_material_rows
            FROM public.work_orders wo
           WHERE (COALESCE(upper(wo.status), ''::text) <> ALL (ARRAY['CANCELLED'::text, 'CANCELED'::text, 'VOID'::text, 'DELETED'::text]))
         ), stored_materials AS (
@@ -7294,6 +7332,7 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
             wb.raw_department,
             wb.flexo_running_meter,
             wom.material_key,
+            COALESCE(NULLIF(wom.item_code, ''::text), NULLIF(split_part(wom.material_key, '|'::text, 1), ''::text), ''::text) AS item_code,
             COALESCE(NULLIF(wom.item_name, ''::text), NULLIF(split_part(wom.material_key, '|'::text, 1), ''::text), ''::text) AS item_label,
             (wom.gsm)::text AS gsm,
             COALESCE(NULLIF(wom.deckle, (0)::numeric), NULLIF((NULLIF(split_part(wom.material_key, '|'::text, 3), ''::text))::numeric, (0)::numeric), (0)::numeric) AS deckle_mm,
@@ -7302,13 +7341,14 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
             sum(COALESCE(wom.required_qty, (0)::numeric)) AS required_qty
            FROM (wo_base wb
              JOIN public.work_order_materials wom ON ((wom.wo_id = wb.wo_id)))
-          GROUP BY wb.wo_id, wb.wo_number, wb.status, wb.raw_department, wb.flexo_running_meter, wom.material_key, wom.item_name, wom.gsm, wom.deckle, wom.cut_size, wom.uom
+          GROUP BY wb.wo_id, wb.wo_number, wb.status, wb.raw_department, wb.flexo_running_meter, wom.material_key, wom.item_code, wom.item_name, wom.gsm, wom.deckle, wom.cut_size, wom.uom
         ), paper_snapshot AS (
          SELECT wb.wo_id,
             wb.wo_number,
             wb.status,
             wb.raw_department,
             wb.flexo_running_meter,
+            COALESCE(NULLIF((p."row" ->> 'itemCode'::text), ''::text), NULLIF((p."row" ->> 'item_code'::text), ''::text), ''::text) AS item_code,
             COALESCE(NULLIF((p."row" ->> 'stock'::text), ''::text), NULLIF((p."row" ->> 'itemLabel'::text), ''::text), NULLIF((p."row" ->> 'item_name'::text), ''::text), ''::text) AS item_label,
             COALESCE((p."row" ->> 'gsm'::text), ''::text) AS gsm,
             COALESCE((NULLIF((p."row" ->> 'deckle'::text), ''::text))::numeric, (0)::numeric) AS deckle_mm,
@@ -7321,13 +7361,14 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
                     WHEN (jsonb_typeof((wb.snapshot_json -> 'papers'::text)) = 'array'::text) THEN (wb.snapshot_json -> 'papers'::text)
                     ELSE '[]'::jsonb
                 END) p("row"))
-          WHERE (wb.has_material_rows = false)
+          WHERE (wb.has_valid_material_rows = false)
         ), corr_snapshot AS (
          SELECT wb.wo_id,
             wb.wo_number,
             wb.status,
             wb.raw_department,
             wb.flexo_running_meter,
+            COALESCE(NULLIF((c."row" ->> 'itemCode'::text), ''::text), NULLIF((c."row" ->> 'item_code'::text), ''::text), ''::text) AS item_code,
             COALESCE(NULLIF((c."row" ->> 'itemDetails'::text), ''::text), NULLIF((c."row" ->> 'itemLabel'::text), ''::text), NULLIF((c."row" ->> 'item_name'::text), ''::text), ''::text) AS item_label,
             COALESCE((c."row" ->> 'gsm'::text), ''::text) AS gsm,
             COALESCE((NULLIF((c."row" ->> 'deckle'::text), ''::text))::numeric, (0)::numeric) AS deckle_mm,
@@ -7346,13 +7387,14 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
                     WHEN (jsonb_typeof((wb.snapshot_json -> 'corrugation'::text)) = 'array'::text) THEN (wb.snapshot_json -> 'corrugation'::text)
                     ELSE '[]'::jsonb
                 END) c("row"))
-          WHERE (wb.has_material_rows = false)
+          WHERE (wb.has_valid_material_rows = false)
         ), extra_snapshot AS (
          SELECT wb.wo_id,
             wb.wo_number,
             wb.status,
             wb.raw_department,
             wb.flexo_running_meter,
+            COALESCE(NULLIF((e."row" ->> 'materialItemCode'::text), ''::text), NULLIF((e."row" ->> 'itemCode'::text), ''::text), NULLIF((e."row" ->> 'item_code'::text), ''::text), ''::text) AS item_code,
             COALESCE(NULLIF((e."row" ->> 'materialItemCode'::text), ''::text), NULLIF((e."row" ->> 'materialName'::text), ''::text), NULLIF((e."row" ->> 'itemLabel'::text), ''::text), NULLIF((e."row" ->> 'item_name'::text), ''::text), ''::text) AS item_label,
             COALESCE((e."row" ->> 'gsm'::text), ''::text) AS gsm,
             COALESCE((NULLIF((e."row" ->> 'deckle'::text), ''::text))::numeric, (0)::numeric) AS deckle_mm,
@@ -7365,7 +7407,7 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
                     WHEN (jsonb_typeof((wb.snapshot_json -> 'extraMaterials'::text)) = 'array'::text) THEN (wb.snapshot_json -> 'extraMaterials'::text)
                     ELSE '[]'::jsonb
                 END) e("row"))
-          WHERE (wb.has_material_rows = false)
+          WHERE (wb.has_valid_material_rows = false)
         ), raw_rows AS (
          SELECT stored_materials.wo_id,
             stored_materials.wo_number,
@@ -7373,6 +7415,7 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
             stored_materials.raw_department,
             stored_materials.flexo_running_meter,
             stored_materials.material_key,
+            stored_materials.item_code,
             stored_materials.item_label,
             stored_materials.gsm,
             stored_materials.deckle_mm,
@@ -7387,6 +7430,7 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
             paper_snapshot.raw_department,
             paper_snapshot.flexo_running_meter,
             concat_ws('|'::text, paper_snapshot.item_label, paper_snapshot.gsm, to_char(paper_snapshot.deckle_mm, 'FM999999999990.00'::text), to_char(paper_snapshot.cut_mm, 'FM999999999990.00'::text), paper_snapshot.source_uom) AS material_key,
+            paper_snapshot.item_code,
             paper_snapshot.item_label,
             paper_snapshot.gsm,
             paper_snapshot.deckle_mm,
@@ -7401,6 +7445,7 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
             corr_snapshot.raw_department,
             corr_snapshot.flexo_running_meter,
             concat_ws('|'::text, corr_snapshot.item_label, corr_snapshot.gsm, to_char(corr_snapshot.deckle_mm, 'FM999999999990.00'::text), to_char(corr_snapshot.cut_mm, 'FM999999999990.00'::text), corr_snapshot.source_uom) AS material_key,
+            corr_snapshot.item_code,
             corr_snapshot.item_label,
             corr_snapshot.gsm,
             corr_snapshot.deckle_mm,
@@ -7415,6 +7460,7 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
             extra_snapshot.raw_department,
             extra_snapshot.flexo_running_meter,
             concat_ws('|'::text, extra_snapshot.item_label, extra_snapshot.gsm, to_char(extra_snapshot.deckle_mm, 'FM999999999990.00'::text), to_char(extra_snapshot.cut_mm, 'FM999999999990.00'::text), extra_snapshot.source_uom) AS material_key,
+            extra_snapshot.item_code,
             extra_snapshot.item_label,
             extra_snapshot.gsm,
             extra_snapshot.deckle_mm,
@@ -7447,7 +7493,8 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
         CASE
             WHEN ((upper(raw_department) ~~ '%FLEXO%'::text) AND (flexo_running_meter > (0)::numeric) AND (upper(COALESCE(source_uom, ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text]))) THEN flexo_running_meter
             ELSE required_qty
-        END AS required_qty
+        END AS required_qty,
+    item_code
    FROM raw_rows
   WHERE ((NULLIF(TRIM(BOTH FROM item_label), ''::text) IS NOT NULL) AND (COALESCE(required_qty, (0)::numeric) > (0)::numeric));
 
@@ -7459,6 +7506,7 @@ CREATE VIEW public.inv_wo_issue_material_source_v AS
 CREATE VIEW public.inv_wo_issue_requirement_fast_v AS
  WITH issued_rows AS (
          SELECT il.ref_no AS wo_number,
+            il.remarks AS material_key,
             upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text)) AS item_label_key,
             COALESCE(split_part(il.remarks, '|'::text, 2), ''::text) AS gsm_key,
             COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric) AS deckle_key,
@@ -7474,7 +7522,7 @@ CREATE VIEW public.inv_wo_issue_requirement_fast_v AS
           WHERE ((upper(COALESCE(il.ref_type, ''::text)) = 'ISSUE'::text) AND (COALESCE(il.qty_out, (0)::numeric) > (0)::numeric) AND (COALESCE(il.remarks, ''::text) <> ''::text) AND (NOT (EXISTS ( SELECT 1
                    FROM public.inv_ledger rev
                   WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
-          GROUP BY il.ref_no, (upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text))), COALESCE(split_part(il.remarks, '|'::text, 2), ''::text), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric),
+          GROUP BY il.ref_no, il.remarks, (upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text))), COALESCE(split_part(il.remarks, '|'::text, 2), ''::text), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric),
                 CASE
                     WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['RM'::text, 'R.M.'::text, 'RUNNING METER'::text, 'RUNNING METERS'::text])) THEN 'RM'::text
                     WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])) THEN 'KG'::text
@@ -7483,6 +7531,7 @@ CREATE VIEW public.inv_wo_issue_requirement_fast_v AS
                 END
         ), returned_rows AS (
          SELECT il.ref_no AS wo_number,
+            il.remarks AS material_key,
             upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text)) AS item_label_key,
             COALESCE(split_part(il.remarks, '|'::text, 2), ''::text) AS gsm_key,
             COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric) AS deckle_key,
@@ -7498,7 +7547,7 @@ CREATE VIEW public.inv_wo_issue_requirement_fast_v AS
           WHERE ((upper(COALESCE(il.ref_type, ''::text)) = 'WO-RETURN'::text) AND (COALESCE(il.qty_in, (0)::numeric) > (0)::numeric) AND (COALESCE(il.remarks, ''::text) <> ''::text) AND (NOT (EXISTS ( SELECT 1
                    FROM public.inv_ledger rev
                   WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
-          GROUP BY il.ref_no, (upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text))), COALESCE(split_part(il.remarks, '|'::text, 2), ''::text), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric),
+          GROUP BY il.ref_no, il.remarks, (upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text))), COALESCE(split_part(il.remarks, '|'::text, 2), ''::text), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric),
                 CASE
                     WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['RM'::text, 'R.M.'::text, 'RUNNING METER'::text, 'RUNNING METERS'::text])) THEN 'RM'::text
                     WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])) THEN 'KG'::text
@@ -7517,19 +7566,23 @@ CREATE VIEW public.inv_wo_issue_requirement_fast_v AS
     src.cut_mm,
     src.uom,
     src.required_qty,
-    COALESCE(sum(ir.issued_qty), (0)::numeric) AS issued_qty,
-    GREATEST((src.required_qty - GREATEST((COALESCE(sum(ir.issued_qty), (0)::numeric) - COALESCE(sum(rr.returned_qty), (0)::numeric)), (0)::numeric)), (0)::numeric) AS remaining_qty,
+    COALESCE(ir.issued_qty, (0)::numeric) AS issued_qty,
+    GREATEST((src.required_qty - GREATEST((COALESCE(ir.issued_qty, (0)::numeric) - COALESCE(rr.returned_qty, (0)::numeric)), (0)::numeric)), (0)::numeric) AS remaining_qty,
         CASE
-            WHEN (GREATEST((src.required_qty - GREATEST((COALESCE(sum(ir.issued_qty), (0)::numeric) - COALESCE(sum(rr.returned_qty), (0)::numeric)), (0)::numeric)), (0)::numeric) > 0.0001) THEN 'PENDING'::text
+            WHEN (GREATEST((src.required_qty - GREATEST((COALESCE(ir.issued_qty, (0)::numeric) - COALESCE(rr.returned_qty, (0)::numeric)), (0)::numeric)), (0)::numeric) > 0.0001) THEN 'PENDING'::text
             ELSE 'ISSUED'::text
         END AS line_status,
-    COALESCE(sum(rr.returned_qty), (0)::numeric) AS returned_qty,
-    GREATEST((COALESCE(sum(ir.issued_qty), (0)::numeric) - COALESCE(sum(rr.returned_qty), (0)::numeric)), (0)::numeric) AS net_issued_qty,
-    GREATEST((GREATEST((COALESCE(sum(ir.issued_qty), (0)::numeric) - COALESCE(sum(rr.returned_qty), (0)::numeric)), (0)::numeric) - src.required_qty), (0)::numeric) AS excess_qty
+    COALESCE(rr.returned_qty, (0)::numeric) AS returned_qty,
+    GREATEST((COALESCE(ir.issued_qty, (0)::numeric) - COALESCE(rr.returned_qty, (0)::numeric)), (0)::numeric) AS net_issued_qty,
+    GREATEST((GREATEST((COALESCE(ir.issued_qty, (0)::numeric) - COALESCE(rr.returned_qty, (0)::numeric)), (0)::numeric) - src.required_qty), (0)::numeric) AS excess_qty,
+    src.item_code
    FROM ((public.inv_wo_issue_material_source_v src
-     LEFT JOIN issued_rows ir ON (((ir.wo_number = src.wo_number) AND (ir.item_label_key = upper(COALESCE(src.item_label, ''::text))) AND ((COALESCE(src.gsm, ''::text) = ''::text) OR (ir.gsm_key = ''::text) OR (ir.gsm_key = COALESCE(src.gsm, ''::text))) AND ((COALESCE(src.deckle_mm, (0)::numeric) = (0)::numeric) OR (ir.deckle_key = (0)::numeric) OR (abs((ir.deckle_key - COALESCE(src.deckle_mm, (0)::numeric))) <= 0.01)) AND ((COALESCE(src.cut_mm, (0)::numeric) = (0)::numeric) OR (ir.cut_key = (0)::numeric) OR (abs((ir.cut_key - COALESCE(src.cut_mm, (0)::numeric))) <= 0.01)) AND ((ir.uom_key = upper(COALESCE(src.uom, ''::text))) OR ((src.issue_department = 'Flexo'::text) AND (src.uom = 'RM'::text) AND (ir.uom_key = ANY (ARRAY['RM'::text, 'KG'::text])))))))
-     LEFT JOIN returned_rows rr ON (((rr.wo_number = src.wo_number) AND (rr.item_label_key = upper(COALESCE(src.item_label, ''::text))) AND ((COALESCE(src.gsm, ''::text) = ''::text) OR (rr.gsm_key = ''::text) OR (rr.gsm_key = COALESCE(src.gsm, ''::text))) AND ((COALESCE(src.deckle_mm, (0)::numeric) = (0)::numeric) OR (rr.deckle_key = (0)::numeric) OR (abs((rr.deckle_key - COALESCE(src.deckle_mm, (0)::numeric))) <= 0.01)) AND ((COALESCE(src.cut_mm, (0)::numeric) = (0)::numeric) OR (rr.cut_key = (0)::numeric) OR (abs((rr.cut_key - COALESCE(src.cut_mm, (0)::numeric))) <= 0.01)) AND ((rr.uom_key = upper(COALESCE(src.uom, ''::text))) OR ((src.issue_department = 'Flexo'::text) AND (src.uom = 'RM'::text) AND (rr.uom_key = ANY (ARRAY['RM'::text, 'KG'::text])))))))
-  GROUP BY src.wo_id, src.wo_number, src.status, src.issue_department, src.material_key, src.item_label, src.gsm, src.deckle_mm, src.cut_mm, src.uom, src.required_qty;
+     LEFT JOIN LATERAL ( SELECT sum(ir0.issued_qty) AS issued_qty
+           FROM issued_rows ir0
+          WHERE ((ir0.wo_number = src.wo_number) AND ((ir0.material_key = src.material_key) OR (ir0.item_label_key = ANY (ARRAY[upper(COALESCE(src.item_label, ''::text)), upper(COALESCE(src.item_code, ''::text)), upper(COALESCE(split_part(src.material_key, '|'::text, 1), ''::text))]))) AND ((COALESCE(src.gsm, ''::text) = ''::text) OR (ir0.gsm_key = ''::text) OR (ir0.gsm_key = COALESCE(src.gsm, ''::text))) AND ((COALESCE(src.deckle_mm, (0)::numeric) = (0)::numeric) OR (ir0.deckle_key = (0)::numeric) OR (abs((ir0.deckle_key - COALESCE(src.deckle_mm, (0)::numeric))) <= 0.01)) AND ((COALESCE(src.cut_mm, (0)::numeric) = (0)::numeric) OR (ir0.cut_key = (0)::numeric) OR (abs((ir0.cut_key - COALESCE(src.cut_mm, (0)::numeric))) <= 0.01)) AND ((ir0.uom_key = upper(COALESCE(src.uom, ''::text))) OR ((src.issue_department = 'Flexo'::text) AND (src.uom = 'RM'::text) AND (ir0.uom_key = ANY (ARRAY['RM'::text, 'KG'::text])))))) ir ON (true))
+     LEFT JOIN LATERAL ( SELECT sum(rr0.returned_qty) AS returned_qty
+           FROM returned_rows rr0
+          WHERE ((rr0.wo_number = src.wo_number) AND ((rr0.material_key = src.material_key) OR (rr0.item_label_key = ANY (ARRAY[upper(COALESCE(src.item_label, ''::text)), upper(COALESCE(src.item_code, ''::text)), upper(COALESCE(split_part(src.material_key, '|'::text, 1), ''::text))]))) AND ((COALESCE(src.gsm, ''::text) = ''::text) OR (rr0.gsm_key = ''::text) OR (rr0.gsm_key = COALESCE(src.gsm, ''::text))) AND ((COALESCE(src.deckle_mm, (0)::numeric) = (0)::numeric) OR (rr0.deckle_key = (0)::numeric) OR (abs((rr0.deckle_key - COALESCE(src.deckle_mm, (0)::numeric))) <= 0.01)) AND ((COALESCE(src.cut_mm, (0)::numeric) = (0)::numeric) OR (rr0.cut_key = (0)::numeric) OR (abs((rr0.cut_key - COALESCE(src.cut_mm, (0)::numeric))) <= 0.01)) AND ((rr0.uom_key = upper(COALESCE(src.uom, ''::text))) OR ((src.issue_department = 'Flexo'::text) AND (src.uom = 'RM'::text) AND (rr0.uom_key = ANY (ARRAY['RM'::text, 'KG'::text])))))) rr ON (true));
 
 
 --
@@ -7540,6 +7593,7 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
  WITH material_rows AS (
          SELECT wom.wo_id,
             wom.material_key,
+            COALESCE(max(NULLIF(wom.item_code, ''::text)), NULLIF(split_part(wom.material_key, '|'::text, 1), ''::text), ''::text) AS item_code,
             max(wom.item_name) AS item_name,
             max(wom.gsm) AS gsm,
             max(wom.deckle) AS deckle,
@@ -7551,21 +7605,53 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
         ), issued_rows AS (
          SELECT il.ref_no AS wo_number,
             il.remarks AS material_key,
+            upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text)) AS item_label_key,
+            COALESCE(split_part(il.remarks, '|'::text, 2), ''::text) AS gsm_key,
+            COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric) AS deckle_key,
+            COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric) AS cut_key,
+                CASE
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['RM'::text, 'R.M.'::text, 'RUNNING METER'::text, 'RUNNING METERS'::text])) THEN 'RM'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])) THEN 'KG'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['SHEET'::text, 'SHEETS'::text])) THEN 'SHEET'::text
+                    ELSE upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text))
+                END AS uom_key,
             sum(COALESCE(il.qty_out, (0)::numeric)) AS issued_qty
            FROM public.inv_ledger il
           WHERE ((upper(COALESCE(il.ref_type, ''::text)) = 'ISSUE'::text) AND (COALESCE(il.qty_out, (0)::numeric) > (0)::numeric) AND (COALESCE(il.remarks, ''::text) <> ''::text) AND (NOT (EXISTS ( SELECT 1
                    FROM public.inv_ledger rev
                   WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
-          GROUP BY il.ref_no, il.remarks
+          GROUP BY il.ref_no, il.remarks, (upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text))), COALESCE(split_part(il.remarks, '|'::text, 2), ''::text), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric),
+                CASE
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['RM'::text, 'R.M.'::text, 'RUNNING METER'::text, 'RUNNING METERS'::text])) THEN 'RM'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])) THEN 'KG'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['SHEET'::text, 'SHEETS'::text])) THEN 'SHEET'::text
+                    ELSE upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text))
+                END
         ), returned_rows AS (
          SELECT il.ref_no AS wo_number,
             il.remarks AS material_key,
+            upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text)) AS item_label_key,
+            COALESCE(split_part(il.remarks, '|'::text, 2), ''::text) AS gsm_key,
+            COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric) AS deckle_key,
+            COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric) AS cut_key,
+                CASE
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['RM'::text, 'R.M.'::text, 'RUNNING METER'::text, 'RUNNING METERS'::text])) THEN 'RM'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])) THEN 'KG'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['SHEET'::text, 'SHEETS'::text])) THEN 'SHEET'::text
+                    ELSE upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text))
+                END AS uom_key,
             sum(COALESCE(il.qty_in, (0)::numeric)) AS returned_qty
            FROM public.inv_ledger il
           WHERE ((upper(COALESCE(il.ref_type, ''::text)) = 'WO-RETURN'::text) AND (COALESCE(il.qty_in, (0)::numeric) > (0)::numeric) AND (COALESCE(il.remarks, ''::text) <> ''::text) AND (NOT (EXISTS ( SELECT 1
                    FROM public.inv_ledger rev
                   WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
-          GROUP BY il.ref_no, il.remarks
+          GROUP BY il.ref_no, il.remarks, (upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text))), COALESCE(split_part(il.remarks, '|'::text, 2), ''::text), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric), COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric),
+                CASE
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['RM'::text, 'R.M.'::text, 'RUNNING METER'::text, 'RUNNING METERS'::text])) THEN 'RM'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])) THEN 'KG'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['SHEET'::text, 'SHEETS'::text])) THEN 'SHEET'::text
+                    ELSE upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text))
+                END
         ), wo_base AS (
          SELECT wo.id,
             wo.wo_number,
@@ -7574,7 +7660,19 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
             NULLIF(upper(TRIM(BOTH FROM COALESCE((wo.snapshot_json #>> '{flexoDetails,itemCode}'::text[]), ''::text))), ''::text) AS flexo_item_code,
             NULLIF(upper(TRIM(BOTH FROM COALESCE((wo.snapshot_json #>> '{flexoDetails,itemName}'::text[]), ''::text))), ''::text) AS flexo_item_name,
             COALESCE((NULLIF((wo.snapshot_json #>> '{flexoDetails,totalRunningMeter}'::text[]), ''::text))::numeric, (NULLIF((wo.snapshot_json #>> '{flexoDetails,baseRunningMeter}'::text[]), ''::text))::numeric, (0)::numeric) AS flexo_running_meter,
-            COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text) AS raw_department
+                CASE
+                    WHEN (upper(COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text)) ~~ '%FLEXO%'::text) THEN COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text)
+                    WHEN ((EXISTS ( SELECT 1
+                       FROM public.work_order_routing wor
+                      WHERE ((wor.wo_id = wo.id) AND ((upper(COALESCE(wor.department, ''::text)) ~~ '%DIGITAL%'::text) OR (upper(COALESCE(wor.process_name, ''::text)) ~~ '%DIGITAL%'::text) OR (upper(COALESCE(wor.planned_machine, ''::text)) ~~ '%DIGITAL%'::text) OR (upper(COALESCE(wor.planned_machine, ''::text)) ~~ '%CANON%'::text))))) OR (EXISTS ( SELECT 1
+                       FROM jsonb_array_elements(
+                            CASE
+                                WHEN (jsonb_typeof((wo.snapshot_json -> 'routing'::text)) = 'array'::text) THEN (wo.snapshot_json -> 'routing'::text)
+                                ELSE '[]'::jsonb
+                            END) rt("row")
+                      WHERE ((upper(concat_ws(' '::text, (rt."row" ->> 'dept'::text), (rt."row" ->> 'department'::text), (rt."row" ->> 'operation'::text), (rt."row" ->> 'process_name'::text), (rt."row" ->> 'machine'::text), (rt."row" ->> 'planned_machine'::text))) ~~ '%DIGITAL%'::text) OR (upper(concat_ws(' '::text, (rt."row" ->> 'machine'::text), (rt."row" ->> 'planned_machine'::text))) ~~ '%CANON%'::text))))) THEN 'Digital'::text
+                    ELSE COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text)
+                END AS raw_department
            FROM public.work_orders wo
           WHERE (COALESCE(upper(wo.status), ''::text) <> ALL (ARRAY['CANCELLED'::text, 'CANCELED'::text, 'VOID'::text, 'DELETED'::text]))
         ), prepared AS (
@@ -7604,11 +7702,16 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
                     ELSE COALESCE(mr.required_qty, (0)::numeric)
                 END AS required_qty,
             COALESCE(ir.issued_qty, (0)::numeric) AS issued_qty,
-            COALESCE(rr.returned_qty, (0)::numeric) AS returned_qty
+            COALESCE(rr.returned_qty, (0)::numeric) AS returned_qty,
+            mr.item_code
            FROM (((wo_base wb
              JOIN material_rows mr ON ((mr.wo_id = wb.id)))
-             LEFT JOIN issued_rows ir ON (((ir.wo_number = wb.wo_number) AND (ir.material_key = mr.material_key))))
-             LEFT JOIN returned_rows rr ON (((rr.wo_number = wb.wo_number) AND (rr.material_key = mr.material_key))))
+             LEFT JOIN LATERAL ( SELECT sum(ir0.issued_qty) AS issued_qty
+                   FROM issued_rows ir0
+                  WHERE ((ir0.wo_number = wb.wo_number) AND ((ir0.material_key = mr.material_key) OR (ir0.item_label_key = ANY (ARRAY[upper(COALESCE(mr.item_name, ''::text)), upper(COALESCE(mr.item_code, ''::text)), upper(COALESCE(split_part(mr.material_key, '|'::text, 1), ''::text))]))) AND ((COALESCE((mr.gsm)::text, ''::text) = ''::text) OR (ir0.gsm_key = ''::text) OR (ir0.gsm_key = COALESCE((mr.gsm)::text, ''::text))) AND ((COALESCE(mr.deckle, (0)::numeric) = (0)::numeric) OR (ir0.deckle_key = (0)::numeric) OR (abs((ir0.deckle_key - COALESCE(mr.deckle, (0)::numeric))) <= 0.01)) AND ((COALESCE(mr.cut_size, (0)::numeric) = (0)::numeric) OR (ir0.cut_key = (0)::numeric) OR (abs((ir0.cut_key - COALESCE(mr.cut_size, (0)::numeric))) <= 0.01)) AND ((ir0.uom_key = upper(COALESCE(NULLIF(mr.uom, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 5), ''::text), ''::text))) OR ((upper(wb.raw_department) ~~ '%FLEXO%'::text) AND (ir0.uom_key = ANY (ARRAY['RM'::text, 'KG'::text])))))) ir ON (true))
+             LEFT JOIN LATERAL ( SELECT sum(rr0.returned_qty) AS returned_qty
+                   FROM returned_rows rr0
+                  WHERE ((rr0.wo_number = wb.wo_number) AND ((rr0.material_key = mr.material_key) OR (rr0.item_label_key = ANY (ARRAY[upper(COALESCE(mr.item_name, ''::text)), upper(COALESCE(mr.item_code, ''::text)), upper(COALESCE(split_part(mr.material_key, '|'::text, 1), ''::text))]))) AND ((COALESCE((mr.gsm)::text, ''::text) = ''::text) OR (rr0.gsm_key = ''::text) OR (rr0.gsm_key = COALESCE((mr.gsm)::text, ''::text))) AND ((COALESCE(mr.deckle, (0)::numeric) = (0)::numeric) OR (rr0.deckle_key = (0)::numeric) OR (abs((rr0.deckle_key - COALESCE(mr.deckle, (0)::numeric))) <= 0.01)) AND ((COALESCE(mr.cut_size, (0)::numeric) = (0)::numeric) OR (rr0.cut_key = (0)::numeric) OR (abs((rr0.cut_key - COALESCE(mr.cut_size, (0)::numeric))) <= 0.01)) AND ((rr0.uom_key = upper(COALESCE(NULLIF(mr.uom, ''::text), NULLIF(split_part(mr.material_key, '|'::text, 5), ''::text), ''::text))) OR ((upper(wb.raw_department) ~~ '%FLEXO%'::text) AND (rr0.uom_key = ANY (ARRAY['RM'::text, 'KG'::text])))))) rr ON (true))
         )
  SELECT wo_id,
     wo_number,
@@ -7629,7 +7732,8 @@ CREATE VIEW public.inv_wo_issue_requirement_v AS
         END AS line_status,
     returned_qty,
     GREATEST((issued_qty - returned_qty), (0)::numeric) AS net_issued_qty,
-    GREATEST((GREATEST((issued_qty - returned_qty), (0)::numeric) - required_qty), (0)::numeric) AS excess_qty
+    GREATEST((GREATEST((issued_qty - returned_qty), (0)::numeric) - required_qty), (0)::numeric) AS excess_qty,
+    item_code
    FROM prepared;
 
 
@@ -7641,7 +7745,19 @@ CREATE VIEW public.inv_wo_issue_status_fast_v AS
  WITH wo_base AS (
          SELECT wo.id AS wo_id,
             wo.wo_number,
-            COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text) AS raw_department
+                CASE
+                    WHEN (upper(COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text)) ~~ '%FLEXO%'::text) THEN COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text)
+                    WHEN ((EXISTS ( SELECT 1
+                       FROM public.work_order_routing wor
+                      WHERE ((wor.wo_id = wo.id) AND ((upper(COALESCE(wor.department, ''::text)) ~~ '%DIGITAL%'::text) OR (upper(COALESCE(wor.process_name, ''::text)) ~~ '%DIGITAL%'::text) OR (upper(COALESCE(wor.planned_machine, ''::text)) ~~ '%DIGITAL%'::text) OR (upper(COALESCE(wor.planned_machine, ''::text)) ~~ '%CANON%'::text))))) OR (EXISTS ( SELECT 1
+                       FROM jsonb_array_elements(
+                            CASE
+                                WHEN (jsonb_typeof((wo.snapshot_json -> 'routing'::text)) = 'array'::text) THEN (wo.snapshot_json -> 'routing'::text)
+                                ELSE '[]'::jsonb
+                            END) rt("row")
+                      WHERE ((upper(concat_ws(' '::text, (rt."row" ->> 'dept'::text), (rt."row" ->> 'department'::text), (rt."row" ->> 'operation'::text), (rt."row" ->> 'process_name'::text), (rt."row" ->> 'machine'::text), (rt."row" ->> 'planned_machine'::text))) ~~ '%DIGITAL%'::text) OR (upper(concat_ws(' '::text, (rt."row" ->> 'machine'::text), (rt."row" ->> 'planned_machine'::text))) ~~ '%CANON%'::text))))) THEN 'Digital'::text
+                    ELSE COALESCE(NULLIF((wo.snapshot_json #>> '{jobDetails,department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{department}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{departmentCategory}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,category}'::text[]), ''::text), NULLIF((wo.snapshot_json #>> '{jobDetails,type}'::text[]), ''::text), ''::text)
+                END AS raw_department
            FROM public.work_orders wo
           WHERE (COALESCE(upper(wo.status), ''::text) <> ALL (ARRAY['CANCELLED'::text, 'CANCELED'::text, 'VOID'::text, 'DELETED'::text]))
         ), req_status AS (
@@ -7752,6 +7868,18 @@ CREATE VIEW public.inv_wo_issue_variance_export_v AS
          SELECT upper(COALESCE(il.ref_type, ''::text)) AS ref_type,
             il.ref_no AS wo_number,
             il.remarks AS material_key,
+            upper(COALESCE(split_part(il.remarks, '|'::text, 1), ''::text)) AS item_label_key,
+            COALESCE(split_part(il.remarks, '|'::text, 2), ''::text) AS gsm_key,
+            COALESCE((NULLIF(split_part(il.remarks, '|'::text, 3), ''::text))::numeric, (0)::numeric) AS deckle_key,
+            COALESCE((NULLIF(split_part(il.remarks, '|'::text, 4), ''::text))::numeric, (0)::numeric) AS cut_key,
+                CASE
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['RM'::text, 'R.M.'::text, 'RUNNING METER'::text, 'RUNNING METERS'::text])) THEN 'RM'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['KG'::text, 'KGS'::text, 'KILOGRAM'::text, 'KILOGRAMS'::text])) THEN 'KG'::text
+                    WHEN (upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text)) = ANY (ARRAY['SHEET'::text, 'SHEETS'::text])) THEN 'SHEET'::text
+                    ELSE upper(COALESCE(split_part(il.remarks, '|'::text, 5), ''::text))
+                END AS uom_key,
+            COALESCE(il.qty_out, (0)::numeric) AS qty_out,
+            COALESCE(il.qty_in, (0)::numeric) AS qty_in,
             il.batch_no,
             il.created_at
            FROM public.inv_ledger il
@@ -7760,45 +7888,86 @@ CREATE VIEW public.inv_wo_issue_variance_export_v AS
                   WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
         ), ledger_rollup AS (
          SELECT lr.wo_number,
-            lr.material_key,
+            lr.item_label_key,
+            lr.gsm_key,
+            lr.deckle_key,
+            lr.cut_key,
+            lr.uom_key,
+            array_agg(DISTINCT lr.material_key) AS material_keys,
             string_agg(DISTINCT NULLIF(TRIM(BOTH FROM lr.batch_no), ''::text), ', '::text) FILTER (WHERE (lr.ref_type = 'ISSUE'::text)) AS issue_batches,
             string_agg(DISTINCT NULLIF(TRIM(BOTH FROM lr.batch_no), ''::text), ', '::text) FILTER (WHERE (lr.ref_type = 'WO-RETURN'::text)) AS return_batches,
+            sum(COALESCE(lr.qty_out, (0)::numeric)) FILTER (WHERE (lr.ref_type = 'ISSUE'::text)) AS issued_qty,
+            sum(COALESCE(lr.qty_in, (0)::numeric)) FILTER (WHERE (lr.ref_type = 'WO-RETURN'::text)) AS returned_qty,
             max(lr.created_at) FILTER (WHERE (lr.ref_type = 'ISSUE'::text)) AS last_issue_date,
             max(lr.created_at) FILTER (WHERE (lr.ref_type = 'WO-RETURN'::text)) AS last_return_date
            FROM ledger_rows lr
-          GROUP BY lr.wo_number, lr.material_key
+          GROUP BY lr.wo_number, lr.item_label_key, lr.gsm_key, lr.deckle_key, lr.cut_key, lr.uom_key
+        ), requirement_export AS (
+         SELECT wo.wo_date,
+            r.wo_number AS wo_no,
+            COALESCE(j.job_card_no, ''::text) AS job_card_no,
+            COALESCE(j.sales_orders, ''::text) AS sales_orders,
+            COALESCE(j.client, ''::text) AS client,
+            COALESCE(j.product, ''::text) AS product,
+            COALESCE(j.artwork_no, ''::text) AS artwork_no,
+            r.issue_department AS department,
+            r.material_key,
+            r.item_label AS material,
+            r.gsm,
+            r.deckle_mm,
+            r.cut_mm,
+            r.uom,
+            r.required_qty,
+            r.issued_qty,
+            r.returned_qty,
+            r.net_issued_qty,
+            r.remaining_qty AS pending_qty,
+            r.excess_qty,
+                CASE
+                    WHEN (COALESCE(r.excess_qty, (0)::numeric) > 0.0001) THEN 'EXCESS'::text
+                    WHEN (COALESCE(r.remaining_qty, (0)::numeric) > 0.0001) THEN 'PENDING'::text
+                    ELSE 'OK'::text
+                END AS status,
+            COALESCE(l.issue_batches, ''::text) AS issue_batches,
+            COALESCE(l.return_batches, ''::text) AS return_batches,
+            l.last_issue_date,
+            l.last_return_date
+           FROM (((public.inv_wo_issue_requirement_fast_v r
+             LEFT JOIN public.work_orders wo ON ((wo.id = r.wo_id)))
+             LEFT JOIN job_rollup j ON ((j.wo_id = r.wo_id)))
+             LEFT JOIN LATERAL ( SELECT string_agg(DISTINCT NULLIF(TRIM(BOTH FROM l0.issue_batches), ''::text), ', '::text) AS issue_batches,
+                    string_agg(DISTINCT NULLIF(TRIM(BOTH FROM l0.return_batches), ''::text), ', '::text) AS return_batches,
+                    max(l0.last_issue_date) AS last_issue_date,
+                    max(l0.last_return_date) AS last_return_date
+                   FROM ledger_rollup l0
+                  WHERE ((l0.wo_number = r.wo_number) AND ((r.material_key = ANY (l0.material_keys)) OR (l0.item_label_key = ANY (ARRAY[upper(COALESCE(r.item_label, ''::text)), upper(COALESCE(r.item_code, ''::text)), upper(COALESCE(split_part(r.material_key, '|'::text, 1), ''::text))]))) AND ((COALESCE(r.gsm, ''::text) = ''::text) OR (l0.gsm_key = ''::text) OR (l0.gsm_key = COALESCE(r.gsm, ''::text))) AND ((COALESCE(r.deckle_mm, (0)::numeric) = (0)::numeric) OR (l0.deckle_key = (0)::numeric) OR (abs((l0.deckle_key - COALESCE(r.deckle_mm, (0)::numeric))) <= 0.01)) AND ((COALESCE(r.cut_mm, (0)::numeric) = (0)::numeric) OR (l0.cut_key = (0)::numeric) OR (abs((l0.cut_key - COALESCE(r.cut_mm, (0)::numeric))) <= 0.01)) AND ((l0.uom_key = upper(COALESCE(r.uom, ''::text))) OR ((r.issue_department = 'Flexo'::text) AND (r.uom = 'RM'::text) AND (l0.uom_key = ANY (ARRAY['RM'::text, 'KG'::text])))))) l ON (true))
         )
- SELECT r.wo_number AS wo_no,
-    COALESCE(j.job_card_no, ''::text) AS job_card_no,
-    COALESCE(j.sales_orders, ''::text) AS sales_orders,
-    COALESCE(j.client, ''::text) AS client,
-    COALESCE(j.product, ''::text) AS product,
-    COALESCE(j.artwork_no, ''::text) AS artwork_no,
-    r.issue_department AS department,
-    r.material_key,
-    r.item_label AS material,
-    r.gsm,
-    r.deckle_mm,
-    r.cut_mm,
-    r.uom,
-    r.required_qty,
-    r.issued_qty,
-    r.returned_qty,
-    r.net_issued_qty,
-    r.remaining_qty AS pending_qty,
-    r.excess_qty,
-        CASE
-            WHEN (COALESCE(r.excess_qty, (0)::numeric) > 0.0001) THEN 'EXCESS'::text
-            WHEN (COALESCE(r.remaining_qty, (0)::numeric) > 0.0001) THEN 'PENDING'::text
-            ELSE 'OK'::text
-        END AS status,
-    COALESCE(l.issue_batches, ''::text) AS issue_batches,
-    COALESCE(l.return_batches, ''::text) AS return_batches,
-    l.last_issue_date,
-    l.last_return_date
-   FROM ((public.inv_wo_issue_requirement_fast_v r
-     LEFT JOIN job_rollup j ON ((j.wo_id = r.wo_id)))
-     LEFT JOIN ledger_rollup l ON (((l.wo_number = r.wo_number) AND (l.material_key = r.material_key))));
+ SELECT wo_date,
+    wo_no,
+    job_card_no,
+    sales_orders,
+    client,
+    product,
+    artwork_no,
+    department,
+    material_key,
+    material,
+    gsm,
+    deckle_mm,
+    cut_mm,
+    uom,
+    required_qty,
+    issued_qty,
+    returned_qty,
+    net_issued_qty,
+    pending_qty,
+    excess_qty,
+    status,
+    issue_batches,
+    return_batches,
+    last_issue_date,
+    last_return_date
+   FROM requirement_export;
 
 
 --
@@ -10000,26 +10169,6 @@ CREATE VIEW public.v_dispatch_board WITH (security_invoker='on') AS
            FROM public.dispatch_records
           GROUP BY dispatch_records.so_line_id) d ON ((d.so_line_id = pr.so_line_id)))
   WHERE (pr.ready_to_dispatch = true);
-
-
---
--- Name: work_order_routing; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.work_order_routing (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    wo_id uuid,
-    so_number text,
-    line_no text,
-    process_name text,
-    sequence_no integer,
-    department text,
-    planned_machine text,
-    planned_qty numeric DEFAULT 0,
-    completed_qty numeric DEFAULT 0,
-    status text DEFAULT 'PENDING'::text,
-    created_at timestamp with time zone DEFAULT now()
-);
 
 
 --
@@ -12579,7 +12728,8 @@ CREATE VIEW public.v_report_department_purchase_grn AS
             e.remarks
            FROM inventory_enriched e
         ), tooling_artwork AS (
-         SELECT a.artwork_no,
+         SELECT COALESCE(NULLIF(btrim(COALESCE(a.artwork_no, ''::text)), ''::text), (((a.so_id)::text || '||'::text) || (a.line_no)::text)) AS artwork_key,
+            max(NULLIF(btrim(COALESCE(a.artwork_no, ''::text)), ''::text)) AS artwork_no,
             max(a.product_type) AS artwork_product_type,
             max(so.so_number) AS so_number,
             max(sol.line_no) AS so_line_no,
@@ -12588,8 +12738,8 @@ CREATE VIEW public.v_report_department_purchase_grn AS
            FROM ((public.artworks a
              LEFT JOIN public.sales_orders so ON ((so.id = a.so_id)))
              LEFT JOIN public.sales_order_lines sol ON (((sol.so_id = a.so_id) AND (sol.line_no = a.line_no))))
-          WHERE (COALESCE(a.artwork_no, ''::text) <> ''::text)
-          GROUP BY a.artwork_no
+          WHERE (COALESCE(NULLIF(btrim(COALESCE(a.artwork_no, ''::text)), ''::text), (((a.so_id)::text || '||'::text) || (a.line_no)::text)) IS NOT NULL)
+          GROUP BY COALESCE(NULLIF(btrim(COALESCE(a.artwork_no, ''::text)), ''::text), (((a.so_id)::text || '||'::text) || (a.line_no)::text))
         ), tooling_receipts AS (
          SELECT ('TOOL-'::text || (r.id)::text) AS receipt_id,
             COALESCE(NULLIF(btrim(r.challan_no), ''::text), (r.id)::text) AS grn_no,
@@ -12607,7 +12757,7 @@ CREATE VIEW public.v_report_department_purchase_grn AS
             COALESCE(pol.source_ref, r.source_ref, ''::text) AS po_source_ref,
             ''::text AS pr_no,
             ''::text AS pr_status,
-            COALESCE(NULLIF(btrim(pol.department), ''::text), NULLIF(btrim(ta.so_line_division), ''::text), NULLIF(btrim(
+            COALESCE(NULLIF(btrim(ta.so_line_division), ''::text), NULLIF(btrim(
                 CASE
                     WHEN (upper(COALESCE(ta.artwork_product_type, ''::text)) ~~ '%FLEXO%'::text) THEN 'Flexo'::text
                     WHEN (upper(COALESCE(ta.artwork_product_type, ''::text)) ~~ '%DIGITAL%'::text) THEN 'Digital'::text
@@ -12615,7 +12765,11 @@ CREATE VIEW public.v_report_department_purchase_grn AS
                     WHEN (upper(COALESCE(ta.artwork_product_type, ''::text)) ~~ '%OFFSET%'::text) THEN 'Offset'::text
                     WHEN (upper(COALESCE(ta.artwork_product_type, ''::text)) ~~ '%FLAT%'::text) THEN 'Offset'::text
                     ELSE COALESCE(ta.artwork_product_type, ''::text)
-                END), ''::text), NULLIF(btrim(ta.so_line_category), ''::text), 'Tooling'::text) AS department,
+                END), ''::text), NULLIF(btrim(ta.so_line_category), ''::text),
+                CASE
+                    WHEN (upper(btrim(COALESCE(pol.department, ''::text))) = ANY (ARRAY['TOOLING'::text, 'PREPRESS'::text, 'PRE-PRESS'::text, 'PRE PRESS'::text, 'PLATE'::text, 'DIE'::text])) THEN NULL::text
+                    ELSE NULLIF(btrim(pol.department), ''::text)
+                END, 'Tooling'::text) AS department,
             COALESCE(NULLIF(btrim(r.job_ref), ''::text), NULLIF(btrim(pol.job_ref), ''::text), NULLIF(btrim(r.so_refs), ''::text), ''::text) AS job_ref,
             COALESCE(pol.item_code, ''::text) AS item_code,
             COALESCE(pol.item_name,
@@ -12649,7 +12803,21 @@ CREATE VIEW public.v_report_department_purchase_grn AS
            FROM (((public.purchase_po_receipts r
              LEFT JOIN public.purchase_order_lines pol ON ((pol.id = r.po_line_id)))
              LEFT JOIN public.purchase_orders po ON ((po.po_no = COALESCE(r.po_no, pol.po_no))))
-             LEFT JOIN tooling_artwork ta ON ((ta.artwork_no = COALESCE(NULLIF(r.artwork_no, ''::text), NULLIF(r.source_ref, ''::text), NULLIF(pol.source_ref, ''::text)))))
+             LEFT JOIN LATERAL ( SELECT ta1.artwork_key,
+                    ta1.artwork_no,
+                    ta1.artwork_product_type,
+                    ta1.so_number,
+                    ta1.so_line_no,
+                    ta1.so_line_division,
+                    ta1.so_line_category
+                   FROM tooling_artwork ta1
+                  WHERE ((ta1.artwork_key = COALESCE(NULLIF(r.artwork_no, ''::text), NULLIF(r.source_ref, ''::text), NULLIF(pol.source_ref, ''::text))) OR (ta1.artwork_no = COALESCE(NULLIF(r.artwork_no, ''::text), NULLIF(r.source_ref, ''::text), NULLIF(pol.source_ref, ''::text))))
+                  ORDER BY
+                        CASE
+                            WHEN (ta1.artwork_key = COALESCE(NULLIF(r.artwork_no, ''::text), NULLIF(r.source_ref, ''::text), NULLIF(pol.source_ref, ''::text))) THEN 0
+                            ELSE 1
+                        END
+                 LIMIT 1) ta ON (true))
           WHERE ((upper(COALESCE(r.source_type, pol.source_type, ''::text)) = ANY (ARRAY['ARTWORK_PLATE'::text, 'ARTWORK_DIE'::text, 'DIRECT_PLATE'::text, 'DIRECT_DIE'::text])) AND (COALESCE(r.qty, (0)::numeric) > (0)::numeric) AND (upper(COALESCE(po.status, 'OPEN'::text)) <> 'CANCELLED'::text))
         )
  SELECT inventory_rows.receipt_id,
@@ -14131,10 +14299,182 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
 
 
 --
+-- Name: v_report_job_profitability_complete; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_job_profitability_complete AS
+ WITH process_cost_by_job AS (
+         SELECT pc.so_line_id,
+            pc.job_key,
+            round(sum(COALESCE(pc.process_hours, (0)::numeric)), 4) AS process_hours,
+            round(sum(COALESCE(pc.process_cost, (0)::numeric)), 2) AS process_cost,
+            count(*) AS process_cost_line_count,
+            sum(COALESCE(pc.production_entry_count, (0)::bigint)) AS production_entry_count,
+            sum(COALESCE(pc.actual_hour_entry_count, (0)::bigint)) AS actual_hour_entry_count,
+            count(*) FILTER (WHERE (pc.mhr_missing = true)) AS mhr_missing_count,
+            string_agg(DISTINCT NULLIF(pc.production_machine, ''::text), ', '::text ORDER BY NULLIF(pc.production_machine, ''::text)) FILTER (WHERE (COALESCE(pc.production_machine, ''::text) <> ''::text)) AS process_cost_machines,
+            string_agg(DISTINCT NULLIF(pc.machine_key, ''::text), ', '::text ORDER BY NULLIF(pc.machine_key, ''::text)) FILTER (WHERE (COALESCE(pc.machine_key, ''::text) <> ''::text)) AS process_cost_machine_keys,
+            string_agg(DISTINCT NULLIF(pc.hours_source, ''::text), ', '::text ORDER BY NULLIF(pc.hours_source, ''::text)) FILTER (WHERE (COALESCE(pc.hours_source, ''::text) <> ''::text)) AS process_hours_source
+           FROM public.v_report_job_process_cost_lines pc
+          GROUP BY pc.so_line_id, pc.job_key
+        ), complete_base AS (
+         SELECT jp.so_id,
+            jp.so_line_id,
+            jp.so_number,
+            jp.so_date,
+            jp.client_code,
+            jp.client_name,
+            jp.sales_rep,
+            jp.line_no,
+            jp.division,
+            jp.product_code,
+            jp.product_name,
+            jp.category,
+            jp.unit,
+            jp.rate,
+            jp.job_type,
+            jp.so_line_status,
+            jp.billing_status,
+            jp.job_key,
+            jp.job_reference,
+            jp.artwork_no,
+            jp.wo_count,
+            jp.wo_numbers,
+            jp.order_qty,
+            jp.dispatched_qty,
+            jp.dispatched_pct,
+            jp.billed_qty,
+            jp.billed_pct,
+            jp.order_value,
+            jp.billed_value,
+            jp.rm_issued_qty,
+            jp.rm_issued_value,
+            jp.plate_cost,
+            jp.die_cost,
+            jp.tooling_cost,
+            jp.actual_cost_till_date,
+            jp.profit_on_order_value,
+            jp.profit_pct_on_order_value,
+            jp.profit_on_billed_value,
+            jp.profit_pct_on_billed_value,
+            jp.invoice_nos,
+            jp.first_invoice_date,
+            jp.last_invoice_date,
+            jp.last_dispatch_date,
+            jp.latest_production_stage,
+            jp.latest_production_machine,
+            jp.latest_stage_ok_qty,
+            jp.latest_stage_produced_pct,
+            jp.latest_production_at,
+            jp.produced_goods_value,
+            jp.profit_on_produced_value,
+            jp.profit_pct_on_produced_value,
+            COALESCE(pcj.process_hours, (0)::numeric) AS process_hours,
+            COALESCE(pcj.process_cost, (0)::numeric) AS process_cost,
+            COALESCE(pcj.process_cost_line_count, (0)::bigint) AS process_cost_line_count,
+            COALESCE(pcj.production_entry_count, (0)::numeric) AS process_cost_entry_count,
+            COALESCE(pcj.actual_hour_entry_count, (0)::numeric) AS actual_hour_entry_count,
+            COALESCE(pcj.mhr_missing_count, (0)::bigint) AS mhr_missing_count,
+            COALESCE(pcj.process_cost_machines, ''::text) AS process_cost_machines,
+            COALESCE(pcj.process_cost_machine_keys, ''::text) AS process_cost_machine_keys,
+            COALESCE(pcj.process_hours_source, ''::text) AS process_hours_source,
+                CASE
+                    WHEN (COALESCE(pcj.mhr_missing_count, (0)::bigint) > 0) THEN 'MHR_MISSING'::text
+                    WHEN (COALESCE(pcj.process_cost, (0)::numeric) > (0)::numeric) THEN 'COSTED'::text
+                    ELSE 'NO_COST'::text
+                END AS process_cost_status,
+            round((COALESCE(jp.actual_cost_till_date, (0)::numeric) + COALESCE(pcj.process_cost, (0)::numeric)), 2) AS complete_cost_till_date
+           FROM (public.v_report_job_profitability_phase1 jp
+             LEFT JOIN process_cost_by_job pcj ON (((pcj.so_line_id = jp.so_line_id) AND (pcj.job_key = jp.job_key))))
+        )
+ SELECT so_id,
+    so_line_id,
+    so_number,
+    so_date,
+    client_code,
+    client_name,
+    sales_rep,
+    line_no,
+    division,
+    product_code,
+    product_name,
+    category,
+    unit,
+    rate,
+    job_type,
+    so_line_status,
+    billing_status,
+    job_key,
+    job_reference,
+    artwork_no,
+    wo_count,
+    wo_numbers,
+    order_qty,
+    dispatched_qty,
+    dispatched_pct,
+    billed_qty,
+    billed_pct,
+    order_value,
+    billed_value,
+    rm_issued_qty,
+    rm_issued_value,
+    plate_cost,
+    die_cost,
+    tooling_cost,
+    actual_cost_till_date,
+    process_hours,
+    process_cost,
+    process_cost_status,
+    process_hours_source,
+    process_cost_machines,
+    process_cost_machine_keys,
+    process_cost_line_count,
+    process_cost_entry_count,
+    actual_hour_entry_count,
+    mhr_missing_count,
+    complete_cost_till_date,
+    latest_production_stage,
+    latest_production_machine,
+    latest_stage_ok_qty,
+    latest_stage_produced_pct,
+    latest_production_at,
+    produced_goods_value,
+    profit_on_produced_value,
+    profit_pct_on_produced_value,
+    profit_on_order_value,
+    profit_pct_on_order_value,
+    profit_on_billed_value,
+    profit_pct_on_billed_value,
+    round((COALESCE(produced_goods_value, (0)::numeric) - COALESCE(complete_cost_till_date, (0)::numeric)), 2) AS profit_on_produced_complete,
+    round(
+        CASE
+            WHEN (COALESCE(produced_goods_value, (0)::numeric) > (0)::numeric) THEN (((COALESCE(produced_goods_value, (0)::numeric) - COALESCE(complete_cost_till_date, (0)::numeric)) / NULLIF(produced_goods_value, (0)::numeric)) * 100.0)
+            ELSE (0)::numeric
+        END, 2) AS profit_pct_on_produced_complete,
+    round((COALESCE(order_value, (0)::numeric) - COALESCE(complete_cost_till_date, (0)::numeric)), 2) AS profit_on_order_complete,
+    round(
+        CASE
+            WHEN (COALESCE(order_value, (0)::numeric) > (0)::numeric) THEN (((COALESCE(order_value, (0)::numeric) - COALESCE(complete_cost_till_date, (0)::numeric)) / NULLIF(order_value, (0)::numeric)) * 100.0)
+            ELSE (0)::numeric
+        END, 2) AS profit_pct_on_order_complete,
+    round((COALESCE(billed_value, (0)::numeric) - COALESCE(complete_cost_till_date, (0)::numeric)), 2) AS profit_on_billed_complete,
+    round(
+        CASE
+            WHEN (COALESCE(billed_value, (0)::numeric) > (0)::numeric) THEN (((COALESCE(billed_value, (0)::numeric) - COALESCE(complete_cost_till_date, (0)::numeric)) / NULLIF(billed_value, (0)::numeric)) * 100.0)
+            ELSE (0)::numeric
+        END, 2) AS profit_pct_on_billed_complete,
+    invoice_nos,
+    first_invoice_date,
+    last_invoice_date,
+    last_dispatch_date
+   FROM complete_base cb;
+
+
+--
 -- Name: v_report_job_profitability_production_stages; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_report_job_profitability_production_stages AS
+CREATE VIEW public.v_report_job_profitability_production_stages WITH (security_invoker='on') AS
  WITH line_base AS (
          SELECT so.id AS so_id,
             sol.id AS so_line_id,
@@ -23426,6 +23766,13 @@ CREATE INDEX idx_inv_ledger_reversal_ref ON public.inv_ledger USING btree (ref_n
 
 
 --
+-- Name: idx_inv_ledger_wo_issue_date_export; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_ledger_wo_issue_date_export ON public.inv_ledger USING btree (created_at DESC, ref_no, remarks) WHERE ((upper(COALESCE(ref_type, ''::text)) = 'ISSUE'::text) AND (COALESCE(qty_out, (0)::numeric) > (0)::numeric) AND (COALESCE(remarks, ''::text) <> ''::text));
+
+
+--
 -- Name: idx_inv_ledger_wo_return_wo_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -24364,6 +24711,13 @@ CREATE INDEX idx_work_order_routing_wo_id ON public.work_order_routing USING btr
 
 
 --
+-- Name: idx_work_order_routing_wo_issue_search; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_order_routing_wo_issue_search ON public.work_order_routing USING btree (wo_id);
+
+
+--
 -- Name: idx_work_order_routing_wo_seq; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -24382,6 +24736,13 @@ CREATE INDEX idx_work_order_routing_wo_seq_view ON public.work_order_routing USI
 --
 
 CREATE INDEX idx_work_orders_issue_active ON public.work_orders USING btree (wo_number DESC) WHERE (COALESCE(upper(status), ''::text) <> ALL (ARRAY['CANCELLED'::text, 'CANCELED'::text, 'VOID'::text, 'DELETED'::text]));
+
+
+--
+-- Name: idx_work_orders_issue_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_orders_issue_date ON public.work_orders USING btree (wo_date DESC, wo_number DESC) WHERE (COALESCE(upper(status), ''::text) <> ALL (ARRAY['CANCELLED'::text, 'CANCELED'::text, 'VOID'::text, 'DELETED'::text]));
 
 
 --
@@ -26261,5 +26622,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict bQXDXIVOaE6C6sKe5f5nKYzfSyH1pNbrKl5apeSz2MZOKwpff1rBZqlFQG55YyY
+\unrestrict NqMuXTpe0EaL4g7lCdt5PTPHNDWPfFt6snaptfBuxB9TU7BeGrwjjtaceor5Ktx
 
