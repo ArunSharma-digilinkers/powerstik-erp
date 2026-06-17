@@ -462,6 +462,9 @@ const APP_SECRET_KEY = 'AJangra';
 const SPREADSHEET_ID = '1voKg25EsXIYWquE78E3MtNSCTLiNssM6-HaWi1O_ngk';
 const EXTERNAL_SO_DB_ID = '1voKg25EsXIYWquE78E3MtNSCTLiNssM6-HaWi1O_ngk';
 const MASTER_DB_ID = '1kJpXEhwjhf74PutuvkoVF5WlMdl0v3P7orTbJ6SenHs';
+const CLIENT_CREDIT_SPREADSHEET_ID = '1ALsuVW8IeULpMnvWaaCvbRp727BeB9Kus9ju_kVqdJ8';
+const CLIENT_CREDIT_SHEET_NAME = 'Client wise Bal';
+const CLIENT_CREDIT_SHEETS_SCOPE = 'https://www.googleapis.com/auth/spreadsheets';
 
 /* Sheet name constants */
 const SH = {
@@ -717,6 +720,8 @@ const PAGE_MODULE_MAP = {
   'printchallan':'BILLING',
   'planning':'PLANNING',
   'reports':'REPORTS',
+  'salesdashboard':'REPORTS',
+  'salestargets':'MASTERADMIN',
   'costing':'COSTING',
   'npd':'NPD',
   'checklist':'CHECKLIST',
@@ -2228,6 +2233,25 @@ function _purchaseDerivePOStatusWithShortClose_(totalQty, receivedQty, shortClos
   return 'OPEN';
 }
 
+function _purchaseMaybeSyncPOHeaderStatus_(poNo, poId, storedStatus, liveStatus) {
+  const nextStatus = String(liveStatus || '').trim().toUpperCase();
+  const currentStatus = String(storedStatus || '').trim().toUpperCase();
+  const key = String(poNo || '').trim();
+  if (!key || !nextStatus || currentStatus === nextStatus) return;
+  if (_purchaseIsCancelledStatus_(currentStatus) || _purchaseIsCancelledStatus_(nextStatus)) return;
+  try {
+    const filters = poId
+      ? { id: 'eq.' + String(poId || '').trim() }
+      : { po_no: 'eq.' + key };
+    supabaseUpdate('purchase_orders', filters, {
+      status: nextStatus,
+      updated_at: _purchaseNowIso_()
+    });
+  } catch (err) {
+    Logger.log('PO live status sync failed for ' + key + ': ' + (err.message || err));
+  }
+}
+
 function _purchaseBuildActivePRPoLineMap_(prNos, receiptSeed) {
   const wanted = Array.isArray(prNos)
     ? new Set(prNos.map(function(v) { return String(v || '').trim(); }).filter(Boolean))
@@ -2260,17 +2284,16 @@ function _purchaseBuildActivePRPoLineMap_(prNos, receiptSeed) {
     if (!receiptEntriesByLine[lineId]) receiptEntriesByLine[lineId] = [];
     receiptEntriesByLine[lineId].push(row);
   });
-  const linesWithoutLinkedReceipt = activeLines.filter(function(line) {
-    return !(receiptEntriesByLine[String(line.id || '').trim()] || []).length;
-  });
-  const ledgerReceiptEntriesByLine = _purchaseLedgerPOReceiptEntriesByLine_(linesWithoutLinkedReceipt);
+  const ledgerReceiptEntriesByLine = _purchaseLedgerPOReceiptEntriesByLine_(activeLines);
 
   activeLines.forEach(function(line) {
       const prNo = String(line.sourceRef || '').trim();
       const lineId = String(line.id || '').trim();
       const linkedEntries = receiptEntriesByLine[lineId] || [];
       const fallbackEntries = ledgerReceiptEntriesByLine[lineId] || [];
-      const receiptEntries = linkedEntries.length ? linkedEntries : fallbackEntries;
+      const receiptEntries = _purchaseUseLedgerReceiptsForLine_(line.sourceType)
+        ? fallbackEntries
+        : (linkedEntries.length ? linkedEntries : fallbackEntries);
       const allocated = receiptEntries.reduce(function(sum, row) {
         return sum + Number(row.qty || 0);
       }, 0);
@@ -2324,6 +2347,21 @@ function _purchaseListPOReceipts_(opts) {
       return rows;
     }
 
+    return _purchaseFilterActivePOReceiptRows_(rows, _purchaseListPOLines_());
+  } catch (e) {
+    Logger.log('purchase_po_receipts lookup failed: ' + e.message);
+    return [];
+  }
+}
+
+function _purchaseFilterActivePOReceiptRows_(rows, lineRows) {
+  const receiptRows = Array.isArray(rows) ? rows : [];
+  if (!receiptRows.length) return receiptRows;
+
+  try {
+    const poNos = [...new Set(receiptRows.map(function(row) {
+      return String(row.poNo || '').trim();
+    }).filter(Boolean))];
     const reversedRows = _supabaseSelectAll_('inv_ledger', {
       select: 'id,ref_no,ref_type,created_at',
       filters: { ref_type: 'eq.REV-PO-RECEIPT' },
@@ -2332,13 +2370,15 @@ function _purchaseListPOReceipts_(opts) {
     const originalIds = [...new Set(reversedRows.map(function(row) {
       return String(row.ref_no || '').trim();
     }).filter(Boolean))];
-    if (!originalIds.length || !rows.length) {
-      return rows;
+    if (!originalIds.length || !receiptRows.length) {
+      return receiptRows;
     }
 
     const originalLedgerRows = [];
     const chunks = _supabaseChunkValuesByFilterLength_(originalIds, 900, 20);
     chunks.forEach(function(chunk) {
+      const filters = { id: _supabaseInFilter_(chunk) };
+      if (poNos.length === 1) filters.ref_no = 'eq.' + poNos[0];
       const chunkRows = supabaseSelect('inv_ledger', {
         select: `
           id,
@@ -2349,11 +2389,12 @@ function _purchaseListPOReceipts_(opts) {
           qty_in,
           rate,
           department,
+          remarks,
           inv_items!inv_ledger_item_id_fkey (
             item_code
           )
         `,
-        filters: { id: _supabaseInFilter_(chunk) },
+        filters: filters,
         order: 'created_at.asc',
         limit: 5000
       }) || [];
@@ -2364,31 +2405,31 @@ function _purchaseListPOReceipts_(opts) {
       });
     });
     if (!originalLedgerRows.length) {
-      return rows;
+      return receiptRows;
     }
 
-    const lineRows = _purchaseListPOLines_();
+    const effectiveLineRows = Array.isArray(lineRows) ? lineRows : _purchaseListPOLines_();
     const consumedReceiptIds = {};
     originalLedgerRows.forEach(function(ledgerRow) {
       const itemCode = String(ledgerRow?.inv_items?.item_code || '').trim();
-      const candidateRows = rows.filter(function(receiptRow) {
+      const candidateRows = receiptRows.filter(function(receiptRow) {
         return !consumedReceiptIds[String(receiptRow.id || '').trim()];
       });
       const match = invFindMatchingPOReceiptRecord_(ledgerRow, itemCode, {
         receiptRows: candidateRows,
-        lineRows: lineRows
+        lineRows: effectiveLineRows
       });
       if (match?.row?.id) {
         consumedReceiptIds[String(match.row.id || '').trim()] = true;
       }
     });
 
-    return rows.filter(function(row) {
+    return receiptRows.filter(function(row) {
       return !consumedReceiptIds[String(row.id || '').trim()];
     });
   } catch (e) {
-    Logger.log('purchase_po_receipts lookup failed: ' + e.message);
-    return [];
+    Logger.log('purchase receipt reversal exclusion failed: ' + e.message);
+    return receiptRows;
   }
 }
 
@@ -2410,21 +2451,22 @@ function _purchaseActualReceiptQtyByPR_(prNos) {
     lineToPr[lineId] = prNo;
   });
 
+  const relevantLines = poLines.filter(function(line) {
+    return !!lineToPr[String(line.id || '').trim()];
+  });
   const linkedReceiptLineIds = {};
   _purchaseListPOReceipts_().forEach(function(row) {
-    const prNo = lineToPr[String(row.poLineId || '').trim()];
+    const lineId = String(row.poLineId || '').trim();
+    const prNo = lineToPr[lineId];
     if (!prNo) return;
-    linkedReceiptLineIds[String(row.poLineId || '').trim()] = true;
+    linkedReceiptLineIds[lineId] = true;
     result[prNo] = Number(result[prNo] || 0) + Number(row.qty || 0);
-  });
-
-  const relevantLines = poLines.filter(function(line) {
-    return !!lineToPr[String(line.id || '').trim()] && !linkedReceiptLineIds[String(line.id || '').trim()];
   });
   const ledgerEntriesByLine = _purchaseLedgerPOReceiptEntriesByLine_(relevantLines);
   Object.keys(ledgerEntriesByLine).forEach(function(lineId) {
     const prNo = lineToPr[lineId];
     if (!prNo) return;
+    if (linkedReceiptLineIds[lineId]) return;
     (ledgerEntriesByLine[lineId] || []).forEach(function(row) {
       result[prNo] = Number(result[prNo] || 0) + Number(row.qty || 0);
     });
@@ -2441,49 +2483,31 @@ function _purchaseActualReceiptQtyByPoNos_(poNos) {
   wanted.forEach(function(poNo) { result[poNo] = 0; });
   if (!wanted.size) return result;
 
-  (_purchaseListPOReceipts_() || []).forEach(function(row) {
-    const poNo = String(row.poNo || '').trim();
-    if (wanted.has(poNo)) result[poNo] = Number(result[poNo] || 0) + Number(row.qty || 0);
+  const lines = _purchaseListPOLines_().filter(function(line) {
+    return wanted.has(String(line.poNo || '').trim());
   });
+  const linkedRowsByLine = {};
+  (_purchaseListPOReceipts_() || []).forEach(function(row) {
+    const lineId = String(row.poLineId || '').trim();
+    if (!lineId) return;
+    if (!linkedRowsByLine[lineId]) linkedRowsByLine[lineId] = [];
+    linkedRowsByLine[lineId].push(row);
+  });
+  const ledgerEntriesByLine = _purchaseLedgerPOReceiptEntriesByLine_(lines);
 
-  try {
-    const ledgerTotals = {};
-    const reversedRows = _supabaseSelectAll_('inv_ledger', {
-      select: 'ref_no,ref_type',
-      filters: { ref_type: 'eq.REV-PO-RECEIPT' },
-      order: 'created_at.desc'
-    }, 1000, 20000) || [];
-    const reversedLedgerIds = {};
-    reversedRows.forEach(function(row) {
-      const id = String(row.ref_no || '').trim();
-      if (id) reversedLedgerIds[id] = true;
+  lines.forEach(function(line) {
+    const poNo = String(line.poNo || '').trim();
+    const lineId = String(line.id || '').trim();
+    if (!poNo || !lineId || !wanted.has(poNo)) return;
+    const linkedEntries = linkedRowsByLine[lineId] || [];
+    const fallbackEntries = ledgerEntriesByLine[lineId] || [];
+    const entries = _purchaseUseLedgerReceiptsForLine_(line.sourceType)
+      ? fallbackEntries
+      : (linkedEntries.length ? linkedEntries : fallbackEntries);
+    entries.forEach(function(row) {
+      result[poNo] = Number(result[poNo] || 0) + Number(row.qty || 0);
     });
-
-    const list = Array.from(wanted);
-    for (let i = 0; i < list.length; i += 40) {
-      const chunk = list.slice(i, i + 40);
-      (supabaseSelect('inv_ledger', {
-        select: 'id,ref_no,ref_type,qty_in',
-        filters: {
-          ref_type: 'eq.PO-RECEIPT',
-          ref_no: _supabaseInFilter_(chunk),
-          qty_in: 'gt.0'
-        },
-        order: 'created_at.asc',
-        limit: 5000
-      }) || []).forEach(function(row) {
-        const ledgerId = String(row.id || '').trim();
-        if (ledgerId && reversedLedgerIds[ledgerId]) return;
-        const poNo = String(row.ref_no || '').trim();
-        if (wanted.has(poNo)) ledgerTotals[poNo] = Number(ledgerTotals[poNo] || 0) + Number(row.qty_in || 0);
-      });
-    }
-    Object.keys(ledgerTotals).forEach(function(poNo) {
-      result[poNo] = Math.max(Number(result[poNo] || 0), Number(ledgerTotals[poNo] || 0));
-    });
-  } catch (err) {
-    Logger.log('PO receipt ledger lookup failed: ' + err.message);
-  }
+  });
   return result;
 }
 
@@ -2505,11 +2529,30 @@ function _purchaseIsPlateDieSource_(sourceType) {
     normalized === 'DIRECT_DIE';
 }
 
+function _purchaseUseLedgerReceiptsForLine_(sourceType) {
+  return !_purchaseIsPlateDieSource_(sourceType);
+}
+
 function _purchasePlateDieTypeFromSource_(sourceType) {
   const normalized = String(sourceType || '').trim().toUpperCase();
   if (normalized === 'ARTWORK_DIE' || normalized === 'DIRECT_DIE') return 'DIE';
   if (normalized === 'ARTWORK_PLATE' || normalized === 'DIRECT_PLATE') return 'PLATE';
   return '';
+}
+
+function _purchaseIsDirectPlateDieSource_(sourceType) {
+  const normalized = String(sourceType || '').trim().toUpperCase();
+  return normalized === 'DIRECT_PLATE' || normalized === 'DIRECT_DIE';
+}
+
+function _purchaseIsServiceToolingDepartment_(department) {
+  const normalized = String(department || '').trim().toUpperCase();
+  return normalized === 'TOOLING' ||
+    normalized === 'PREPRESS' ||
+    normalized === 'PRE-PRESS' ||
+    normalized === 'PRE PRESS' ||
+    normalized === 'PLATE' ||
+    normalized === 'DIE';
 }
 
 function _purchaseReceiptHasOptionalLinkageColumnError_(err) {
@@ -2566,11 +2609,25 @@ function _purchaseBulkInsertPOReceipts_(rows) {
   }
 }
 
-function _purchaseReceiptRowsForPO_(poNo) {
+function _purchaseUpdatePOReceipt_(receiptId, row) {
+  const id = String(receiptId || '').trim();
+  if (!id) throw new Error('Receipt entry reference is required');
+  supabaseUpdateMinimal('purchase_po_receipts', { id: 'eq.' + id }, {
+    receipt_date: row.receiptDate || _purchaseIsoDate_(new Date()),
+    challan_no: String(row.challanNo || '').trim(),
+    qty: Number(row.qty || 0),
+    rate: Number(row.rate || 0),
+    remarks: String(row.remarks || '').trim(),
+    updated_at: _purchaseNowIso_()
+  });
+}
+
+function _purchaseReceiptRowsForPO_(poNo, opts) {
+  opts = opts || {};
   const key = String(poNo || '').trim();
   if (!key) return [];
   try {
-    return (_supabaseSelectAll_('purchase_po_receipts', {
+    const rows = (_supabaseSelectAll_('purchase_po_receipts', {
       filters: { po_no: 'eq.' + key },
       order: 'created_at.asc'
     }, 1000, 10000) || []).map(function(row) {
@@ -2586,6 +2643,8 @@ function _purchaseReceiptRowsForPO_(poNo) {
         remarks: row.remarks || ''
       };
     });
+    if (opts.includeReversed === true) return rows;
+    return _purchaseFilterActivePOReceiptRows_(rows, _purchaseListPOLinesForPO_(key));
   } catch (err) {
     throw new Error('Unable to read plate/die receipt register. Confirm purchase_po_receipts table exists in Supabase. ' + (err.message || err));
   }
@@ -2593,10 +2652,24 @@ function _purchaseReceiptRowsForPO_(poNo) {
 
 function _purchaseReceiptQtyByLineForPO_(poNo) {
   const result = {};
+  const lines = _purchaseListPOLinesForPO_(poNo);
+  const ledgerEntriesByLine = _purchaseLedgerPOReceiptEntriesByLine_(lines);
+  const linkedRowsByLine = {};
   _purchaseReceiptRowsForPO_(poNo).forEach(function(row) {
     const lineId = String(row.poLineId || '').trim();
     if (!lineId) return;
-    result[lineId] = Number(result[lineId] || 0) + Number(row.qty || 0);
+    if (!linkedRowsByLine[lineId]) linkedRowsByLine[lineId] = [];
+    linkedRowsByLine[lineId].push(row);
+  });
+  lines.forEach(function(line) {
+    const lineId = String(line.id || '').trim();
+    if (!lineId) return;
+    const entries = _purchaseUseLedgerReceiptsForLine_(line.sourceType)
+      ? (ledgerEntriesByLine[lineId] || [])
+      : (linkedRowsByLine[lineId] || []);
+    result[lineId] = entries.reduce(function(sum, row) {
+      return sum + Number(row.qty || 0);
+    }, 0);
   });
   return result;
 }
@@ -2610,17 +2683,6 @@ function _purchaseLedgerPOReceiptEntriesByLine_(lineRows) {
     return String(line.poNo || '').trim();
   }).filter(Boolean))];
   if (!poNos.length) return result;
-
-  const reversedRows = _supabaseSelectAll_('inv_ledger', {
-    select: 'ref_no,ref_type',
-    filters: { ref_type: 'eq.REV-PO-RECEIPT' },
-    order: 'created_at.desc'
-  }, 1000, 50000) || [];
-  const reversedLedgerIds = {};
-  reversedRows.forEach(function(row) {
-    const id = String(row.ref_no || '').trim();
-    if (id) reversedLedgerIds[id] = true;
-  });
 
   const linesByPo = {};
   lines.forEach(function(line) {
@@ -2659,11 +2721,17 @@ function _purchaseLedgerPOReceiptEntriesByLine_(lineRows) {
       limit: 5000
     }) || [];
     rows.forEach(function(row) {
-      if (!reversedLedgerIds[String(row.id || '').trim()]) ledgerRows.push(row);
+      ledgerRows.push(row);
     });
   });
+  const reversalMap = invGetReversalSummaryMap_(ledgerRows.map(function(row) {
+    return String(row.id || '').trim();
+  }));
+  const activeLedgerRows = ledgerRows.filter(function(row) {
+    return reversalMap[String(row.id || '').trim()]?.reversed !== true;
+  });
 
-  const missingItemIds = [...new Set(ledgerRows.filter(function(row) {
+  const missingItemIds = [...new Set(activeLedgerRows.filter(function(row) {
     return !!row.item_id && (!row.inv_items || !row.inv_items.item_code);
   }).map(function(row) {
     return String(row.item_id || '').trim();
@@ -2680,7 +2748,7 @@ function _purchaseLedgerPOReceiptEntriesByLine_(lineRows) {
     });
   });
 
-  ledgerRows.forEach(function(ledger) {
+  activeLedgerRows.forEach(function(ledger) {
     const poNo = String(ledger.ref_no || '').trim();
     const candidates = linesByPo[poNo] || [];
     if (!candidates.length) return;
@@ -2751,6 +2819,14 @@ function _purchaseNormalizeDirectLine_(line, fallbackSourceType, lineNo, poNo, n
   if (taxPct < 0) throw new Error('Invalid tax % for direct line ' + lineNo);
   const itemName = String(line.itemName || '').trim();
   if (!itemName) throw new Error('Item description is required for direct line ' + lineNo);
+  const sourceType = String(line.sourceType || fallbackSourceType || 'DIRECT').trim().toUpperCase();
+  const department = String(line.department || '').trim();
+  if (_purchaseIsDirectPlateDieSource_(sourceType)) {
+    if (!department) throw new Error('Division is required for direct plate or die line ' + lineNo);
+    if (_purchaseIsServiceToolingDepartment_(department)) {
+      throw new Error('Select the actual business division for direct plate or die line ' + lineNo + ', not Tooling or Prepress.');
+    }
+  }
   const basicAmount = Number((qty * rate).toFixed(2));
   const taxAmount = Number((basicAmount * taxPct / 100).toFixed(2));
   const totalAmount = Number((basicAmount + taxAmount).toFixed(2));
@@ -2758,7 +2834,7 @@ function _purchaseNormalizeDirectLine_(line, fallbackSourceType, lineNo, poNo, n
     id: opts.keepId ? String(line.id || Utilities.getUuid()) : Utilities.getUuid(),
     poNo: poNo,
     lineNo: lineNo,
-    sourceType: String(line.sourceType || fallbackSourceType || 'DIRECT').trim().toUpperCase(),
+    sourceType: sourceType,
     sourceRef: String(line.sourceRef || '').trim(),
     itemCode: String(line.itemCode || '').trim(),
     itemName: itemName,
@@ -2768,7 +2844,7 @@ function _purchaseNormalizeDirectLine_(line, fallbackSourceType, lineNo, poNo, n
     amount: basicAmount,
     taxAmount: taxAmount,
     totalAmount: totalAmount,
-    department: String(line.department || '').trim(),
+    department: department,
     jobRef: String(line.jobRef || '').trim(),
     remarks: String(line.remarks || '').trim(),
     receivedQty: 0,
@@ -3238,7 +3314,7 @@ function purchaseListPOsJSON(opts = {}) {
   const forceRefresh = opts.forceRefresh === true;
   const includeOpenOutsideDate = opts.includeOpenOutsideDate === true || opts.pendingOnly === true;
   const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
-  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { v: purchaseCacheVersion, logic: 'receipt-row-first-v4-line-id', opts: opts || {}, includeOpenOutsideDate: includeOpenOutsideDate ? 1 : 0 });
+  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { v: purchaseCacheVersion, logic: 'ledger-reversal-map-receipts-v7', opts: opts || {}, includeOpenOutsideDate: includeOpenOutsideDate ? 1 : 0 });
   if (!forceRefresh) {
     const cached = _getCachedJson_(cacheKey);
     if (cached) return cached;
@@ -3259,7 +3335,7 @@ function purchaseListPOsJSON(opts = {}) {
   const ledgerReceiptEntriesByLine = _purchaseLedgerPOReceiptEntriesByLine_(linesForLedgerFallback);
 
   let viewRows = null;
-  if (!forceRefresh) {
+  if (!forceRefresh && !includeOpenOutsideDate) {
     try {
       const viewFilters = {};
       if (opts.poNo) viewFilters.po_no = 'eq.' + String(opts.poNo || '').trim();
@@ -3283,6 +3359,7 @@ function purchaseListPOsJSON(opts = {}) {
           vendorId: row.vendor_id || '',
           vendorName: row.vendor_name || '',
           vendorGstin: row.vendor_gstin || '',
+          poId: row.po_id || '',
           status: row.status || 'OPEN',
           storedStatus: row.status || 'OPEN',
           lineCount: 0,
@@ -3309,7 +3386,8 @@ function purchaseListPOsJSON(opts = {}) {
       const rowLineId = String(row.line_id || '').trim();
       const linkedEntries = receiptEntriesByLine[rowLineId] || [];
       const fallbackEntries = ledgerReceiptEntriesByLine[rowLineId] || [];
-      const liveEntries = (linkedEntries.length ? linkedEntries : fallbackEntries)
+      const useLedgerReceipts = _purchaseUseLedgerReceiptsForLine_(row.source_type || '');
+      const liveEntries = (useLedgerReceipts ? fallbackEntries : (linkedEntries.length ? linkedEntries : fallbackEntries))
         .slice()
         .sort(function(a, b) {
           return String(b.receiptDate || '').localeCompare(String(a.receiptDate || '')) ||
@@ -3381,6 +3459,7 @@ function purchaseListPOsJSON(opts = {}) {
         } else {
           row.status = _purchaseDerivePOStatusWithShortClose_(row.totalQty, row.receivedQty, row.shortClosedQty || 0);
           row.pendingQty = Math.max(0, row.totalQty - row.receivedQty - Number(row.shortClosedQty || 0));
+          _purchaseMaybeSyncPOHeaderStatus_(row.poNo, row.poId, row.storedStatus, row.status);
         }
         row.totalValue = Number(row.storedTotalValue || 0) || (row.totalValue + Number(row.freightValue || 0));
         return row;
@@ -3425,7 +3504,9 @@ function purchaseListPOsJSON(opts = {}) {
       const normalizedLines = lines.map(line => {
         const linkedEntries = receiptEntriesByLine[line.id] || [];
         const fallbackEntries = ledgerReceiptEntriesByLine[line.id] || [];
-        const lineReceiptEntries = linkedEntries.length ? linkedEntries : fallbackEntries;
+        const lineReceiptEntries = _purchaseUseLedgerReceiptsForLine_(line.sourceType)
+          ? fallbackEntries
+          : (linkedEntries.length ? linkedEntries : fallbackEntries);
         const liveReceived = lineReceiptEntries.reduce((sum, row) => sum + Number(row.qty || 0), 0);
         const derivedReceived = liveReceived;
         const shortClosedQty = _purchasePOLineShortClosedQty_(line, derivedReceived);
@@ -3453,6 +3534,7 @@ function purchaseListPOsJSON(opts = {}) {
       const liveStatus = _purchaseIsCancelledStatus_(header.status)
         ? 'CANCELLED'
         : _purchaseDerivePOStatusWithShortClose_(totalQty, receivedQty, shortClosedQty);
+      _purchaseMaybeSyncPOHeaderStatus_(header.poNo, header.id, header.status, liveStatus);
       const isArtworkPO = normalizedLines.some(line => _purchaseIsPlateDieSource_(line.sourceType));
       const hasDieLines = normalizedLines.some(line => _purchasePlateDieTypeFromSource_(line.sourceType) === 'DIE');
       const hasPlateLines = normalizedLines.some(line => _purchasePlateDieTypeFromSource_(line.sourceType) === 'PLATE');
@@ -3726,7 +3808,9 @@ function purchaseListPOsForPRJSON(prNo) {
     const lineId = String(line.id || '').trim();
     const linkedEntries = receiptEntriesByLine[lineId] || [];
     const fallbackEntries = ledgerReceiptEntriesByLine[lineId] || [];
-    const receiptEntries = linkedEntries.length ? linkedEntries : fallbackEntries;
+    const receiptEntries = _purchaseUseLedgerReceiptsForLine_(line.sourceType)
+      ? fallbackEntries
+      : (linkedEntries.length ? linkedEntries : fallbackEntries);
     const derivedReceived = receiptEntries.reduce(function(sum, row) {
       return sum + Number(row.qty || 0);
     }, 0);
@@ -4692,6 +4776,70 @@ function purchaseReceiveArtworkPOLine(payload) {
   return { ok: true, poNo: payload.poNo, receiptIds: [receiptId], receiptId: receiptId };
 }
 
+function purchaseUpdateArtworkPOReceipt(payload, token) {
+  _requireAdmin_(token);
+  if (!payload || !payload.poNo || !payload.lineId || !payload.receiptId) {
+    throw new Error('PO line and receipt reference are required');
+  }
+
+  const poNo = String(payload.poNo || '').trim();
+  const lineId = String(payload.lineId || '').trim();
+  const receiptId = String(payload.receiptId || '').trim();
+  const qty = Number(payload.qty || 0);
+  const rate = Number(payload.rate || 0);
+  if (qty <= 0 || rate <= 0) throw new Error('Receive qty and rate are required');
+
+  const header = _purchaseGetPOHeaderByNo_(poNo);
+  if (!header) throw new Error('PO not found');
+  if (_purchaseIsCancelledStatus_(header.status)) {
+    throw new Error('Cancelled purchase orders cannot be edited.');
+  }
+
+  const lines = _purchaseListPOLinesForPO_(poNo);
+  const line = lines.find(function(row) {
+    return String(row.id || '').trim() === lineId;
+  });
+  if (!line) throw new Error('PO line not found');
+  if (!_purchaseIsPlateDieSource_(line.sourceType)) {
+    throw new Error('Receipts from this screen can only be edited for plate or die purchase order lines.');
+  }
+
+  const receipts = _purchaseReceiptRowsForPO_(poNo);
+  const receipt = receipts.find(function(row) {
+    return String(row.id || '').trim() === receiptId;
+  });
+  if (!receipt) throw new Error('GRN receipt entry not found');
+  if (String(receipt.poLineId || '').trim() !== lineId) {
+    throw new Error('GRN receipt entry does not belong to the selected PO line');
+  }
+
+  const otherReceivedQty = receipts.reduce(function(sum, row) {
+    if (String(row.poLineId || '').trim() !== lineId) return sum;
+    if (String(row.id || '').trim() === receiptId) return sum;
+    return sum + Number(row.qty || 0);
+  }, 0);
+  const editedTotalQty = otherReceivedQty + qty;
+  if (!payload.allowOverReceipt && editedTotalQty > Number(line.qty || 0) + 0.0001) {
+    throw new Error('Receipt exceeds PO pending quantity for line ' + (line.lineNo || ''));
+  }
+
+  try {
+    _purchaseUpdatePOReceipt_(receiptId, {
+      receiptDate: payload.receiptDate || _purchaseIsoDate_(new Date()),
+      challanNo: payload.challanNo,
+      qty: qty,
+      rate: rate,
+      remarks: payload.remarks
+    });
+  } catch (e) {
+    throw new Error('Unable to update plate or die receipt: ' + (e.message || e));
+  }
+
+  _purchaseUpdatePOStatus_(poNo);
+  PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  return { ok: true, poNo: poNo, receiptId: receiptId, receiptIds: [receiptId] };
+}
+
 function purchaseReceiveArtworkPOBulk(payload) {
   if (!payload || !payload.poNo) {
     throw new Error('PO reference is required');
@@ -4713,6 +4861,7 @@ function purchaseReceiveArtworkPOBulk(payload) {
   }
   const receiptQtyByLine = _purchaseReceiptQtyByLineForPO_(payload.poNo);
 
+  const stagedQtyByLine = {};
   const prepared = inputLines.map(function(entry, idx) {
     const lineId = String(entry.lineId || '').trim();
     const qty = Number(entry.qty || 0);
@@ -4728,9 +4877,12 @@ function purchaseReceiveArtworkPOBulk(payload) {
 
     const alreadyReceivedQty = Number(receiptQtyByLine[String(line.id || '').trim()] || 0);
     const pendingQty = Math.max(0, Number(line.qty || 0) - alreadyReceivedQty);
-    if (!payload.allowOverReceipt && qty > pendingQty) {
+    const priorStagedQty = Number(stagedQtyByLine[String(line.id || '').trim()] || 0);
+    const cumulativeReceiptQty = priorStagedQty + qty;
+    if (!payload.allowOverReceipt && cumulativeReceiptQty > pendingQty + 0.0001) {
       throw new Error('Receipt exceeds PO pending quantity for line ' + (line.lineNo || idx + 1));
     }
+    stagedQtyByLine[String(line.id || '').trim()] = cumulativeReceiptQty;
 
     return {
       id: Utilities.getUuid(),
@@ -7185,7 +7337,7 @@ function saveWorkOrder(payload, options) {
 
   // 🔥 Batch fetch item master once
   const allLabels = [
-    ...papers.map(p => p.stock || ''),
+    ...papers.map(p => p.stock || p.itemLabel || ''),
     ...corrugation.map(c => c.itemDetails || '')
   ].filter(Boolean);
 
@@ -7224,7 +7376,7 @@ function pushMaterial(m, type) {
   const label =
     type === 'CORRUGATION'
       ? m.itemDetails || m.itemLabel || ''
-      : m.itemLabel || '';
+      : m.itemLabel || m.stock || '';
 
   const item = itemMap[label] || null;
 
@@ -7878,34 +8030,51 @@ function saveFlexoWorkOrder(payload) {
   }
 }
 
-function deleteWorkOrder(woNo) {
+function _workOrderDeleteAuditRpcMissing_(err) {
+  const msg = String(err && err.message || err || '').toLowerCase();
+  return msg.indexOf('delete_work_order_with_audit') !== -1 && (
+    msg.indexOf('could not find') !== -1 ||
+    msg.indexOf('does not exist') !== -1 ||
+    msg.indexOf('schema cache') !== -1 ||
+    msg.indexOf('pgrst202') !== -1
+  );
+}
 
-  if (!woNo) {
+function _workOrderDeleteErrorMessage_(err) {
+  const raw = String(err && err.message || err || '').trim();
+  const jsonStart = raw.indexOf('{');
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(raw.slice(jsonStart));
+      if (parsed && parsed.message) return String(parsed.message);
+    } catch (parseErr) {}
+  }
+  return raw || 'Work order deletion failed.';
+}
+
+function deleteWorkOrder(woNo, reason) {
+  const normalizedWoNo = String(woNo || '').trim();
+  if (!normalizedWoNo) {
     throw new Error('Work Order number is required.');
   }
 
-  const wo = supabaseSelect('work_orders', {
-    select: 'id,wo_number',
-    filters: { wo_number: 'eq.' + woNo },
-    limit: 1
-  })[0];
-
-  if (!wo) {
-    throw new Error('Work Order not found: ' + woNo);
+  const user = Session.getActiveUser?.().getEmail?.() || 'user';
+  let rpcResult;
+  try {
+    rpcResult = supabaseRpc('delete_work_order_with_audit', {
+      p_wo_number: normalizedWoNo,
+      p_deleted_by: user,
+      p_reason: String(reason || 'Deleted from Work Order module').trim()
+    });
+  } catch (err) {
+    if (_workOrderDeleteAuditRpcMissing_(err)) {
+      throw new Error('Work order deletion protection is not installed. Apply supabase_work_order_deletion_audit.sql before deleting any work order.');
+    }
+    throw new Error(_workOrderDeleteErrorMessage_(err));
   }
 
-  const jobs = supabaseSelect('work_order_jobs', {
-    select: 'so_number',
-    filters: { wo_id: 'eq.' + wo.id }
-  }) || [];
-
-  const soNumbers = [...new Set(jobs.map(j => j.so_number).filter(Boolean))];
-
-  _deleteInventoryReservationsForWO_(woNo);
-  supabaseDelete('work_order_routing', { wo_id: 'eq.' + wo.id });
-  supabaseDelete('work_order_materials', { wo_id: 'eq.' + wo.id });
-  supabaseDelete('work_order_jobs', { wo_id: 'eq.' + wo.id });
-  supabaseDelete('work_orders', { id: 'eq.' + wo.id });
+  const result = Array.isArray(rpcResult) ? (rpcResult[0] || {}) : (rpcResult || {});
+  const soNumbers = Array.isArray(result.soNumbers) ? result.soNumbers.filter(Boolean) : [];
 
   const salesOrders = soNumbers.length ? (_supabaseSelectByKeyInBatches_(
     'sales_orders',
@@ -7921,7 +8090,11 @@ function deleteWorkOrder(woNo) {
   });
 
   _touchWorkOrderDataVersion_();
-  return { ok: true, woNo: woNo };
+  return {
+    ok: true,
+    woNo: result.woNo || normalizedWoNo,
+    auditId: result.auditId || ''
+  };
 }
 
 function saveAndExportWO(payload) {
@@ -9743,6 +9916,188 @@ function adminDeactivateMachineHourRate(id, token) {
   });
 
   return { ok: true };
+}
+
+function _adminSalesPeriodMonth_(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-01');
+  const match = raw.match(/^(\d{4})-(\d{2})/);
+  if (!match) throw new Error('Period month must be in YYYY-MM format');
+  return match[1] + '-' + match[2] + '-01';
+}
+
+function _adminSalesNumber_(value) {
+  const raw = String(value == null ? '' : value).replace(/,/g, '').trim();
+  if (!raw) return 0;
+  const number = Number(raw);
+  if (!isFinite(number) || number < 0) throw new Error('Numeric values must be zero or higher');
+  return Math.round(number * 100) / 100;
+}
+
+function _adminSalesBool_(value, defaultValue) {
+  if (value === true || value === false) return value;
+  const raw = String(value == null ? '' : value).trim().toLowerCase();
+  if (!raw) return defaultValue !== false;
+  return ['true', 'yes', 'y', '1', 'active'].indexOf(raw) !== -1;
+}
+
+function _adminSalesNormalizeTargetRow_(payload) {
+  const p = payload || {};
+  const salesRep = String(p.salesRep || p.sales_rep || '').trim();
+  if (!salesRep) throw new Error('Sales person is required');
+  return {
+    period_month: _adminSalesPeriodMonth_(p.periodMonth || p.period_month),
+    sales_rep: salesRep,
+    order_target_value: _adminSalesNumber_(p.orderTargetValue || p.order_target_value),
+    billing_target_value: _adminSalesNumber_(p.billingTargetValue || p.billing_target_value),
+    notes: String(p.notes || '').trim() || null,
+    active: _adminSalesBool_(p.active, true),
+    updated_at: new Date().toISOString()
+  };
+}
+
+function _adminSalesNormalizeBenchmarkRow_(payload) {
+  const p = payload || {};
+  const clientCode = String(p.clientCode || p.client_code || '').trim();
+  if (!clientCode) throw new Error('Client code is required');
+  const rankRaw = String(p.historicalTopRank || p.historical_top_rank || '').trim();
+  const rank = rankRaw ? Number(rankRaw) : null;
+  if (rank !== null && (!isFinite(rank) || rank < 1)) throw new Error('Top rank must be 1 or higher');
+  return {
+    client_code: clientCode,
+    client_name: String(p.clientName || p.client_name || '').trim() || null,
+    historical_max_monthly_value: _adminSalesNumber_(p.historicalMaxMonthlyValue || p.historical_max_monthly_value),
+    historical_avg_monthly_value: _adminSalesNumber_(p.historicalAvgMonthlyValue || p.historical_avg_monthly_value),
+    historical_top_rank: rank === null ? null : Math.round(rank),
+    baseline_period_label: String(p.baselinePeriodLabel || p.baseline_period_label || '').trim() || null,
+    decline_alert_pct: _adminSalesNumber_(p.declineAlertPct || p.decline_alert_pct || 25),
+    active: _adminSalesBool_(p.active, true),
+    notes: String(p.notes || '').trim() || null,
+    updated_at: new Date().toISOString()
+  };
+}
+
+function adminSalesListSetup(token) {
+  _requireAdmin_(token);
+  let targets = [];
+  let benchmarks = [];
+  try {
+    targets = (supabaseSelect('sales_monthly_targets', {
+      select: 'id,period_month,sales_rep,order_target_value,billing_target_value,notes,active,updated_at',
+      order: 'period_month.desc,sales_rep.asc',
+      limit: 2000
+    }) || []).map(function(row) {
+      return {
+        id: row.id || '',
+        periodMonth: row.period_month || '',
+        salesRep: row.sales_rep || '',
+        orderTargetValue: Number(row.order_target_value || 0),
+        billingTargetValue: Number(row.billing_target_value || 0),
+        notes: row.notes || '',
+        active: row.active !== false,
+        updatedAt: row.updated_at || ''
+      };
+    });
+    benchmarks = (supabaseSelect('sales_client_benchmarks', {
+      select: 'client_code,client_name,historical_max_monthly_value,historical_avg_monthly_value,historical_top_rank,baseline_period_label,decline_alert_pct,active,notes,updated_at',
+      order: 'historical_top_rank.asc,client_name.asc',
+      limit: 5000
+    }) || []).map(function(row) {
+      return {
+        clientCode: row.client_code || '',
+        clientName: row.client_name || '',
+        historicalMaxMonthlyValue: Number(row.historical_max_monthly_value || 0),
+        historicalAvgMonthlyValue: Number(row.historical_avg_monthly_value || 0),
+        historicalTopRank: row.historical_top_rank == null ? '' : Number(row.historical_top_rank),
+        baselinePeriodLabel: row.baseline_period_label || '',
+        declineAlertPct: Number(row.decline_alert_pct || 25),
+        active: row.active !== false,
+        notes: row.notes || '',
+        updatedAt: row.updated_at || ''
+      };
+    });
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'sales_monthly_targets') || _supabaseRelationMissing_(err, 'sales_client_benchmarks')) {
+      throw new Error('Sales target setup schema is missing. Apply supabase/sales_live_command_center_20260615.sql first.');
+    }
+    throw err;
+  }
+
+  const salesRepMap = {};
+  (supabaseSelect('sales_orders', {
+    select: 'sales_rep',
+    order: 'sales_rep.asc',
+    limit: 5000
+  }) || []).forEach(function(row) {
+    const rep = String(row.sales_rep || '').trim();
+    if (rep) salesRepMap[rep] = true;
+  });
+  targets.forEach(function(row) { if (row.salesRep) salesRepMap[row.salesRep] = true; });
+
+  const clients = (supabaseSelect('clients', {
+    select: 'client_code,client_name,active',
+    order: 'client_name.asc',
+    limit: 5000
+  }) || []).map(function(row) {
+    return {
+      clientCode: row.client_code || '',
+      clientName: row.client_name || row.client_code || '',
+      active: row.active !== false
+    };
+  });
+
+  return {
+    ok: true,
+    targets: targets,
+    benchmarks: benchmarks,
+    salesReps: Object.keys(salesRepMap).sort(),
+    clients: clients
+  };
+}
+
+function adminSalesSaveMonthlyTarget(payload, token) {
+  _requireAdmin_(token);
+  const row = _adminSalesNormalizeTargetRow_(payload || {});
+  const id = String((payload && payload.id) || '').trim();
+  if (id) {
+    supabaseUpdateMinimal('sales_monthly_targets', { id: 'eq.' + id }, row);
+  } else {
+    row.created_at = new Date().toISOString();
+    supabaseUpsertMinimal('sales_monthly_targets', row, { onConflict: 'period_month,sales_rep' });
+  }
+  return { ok: true };
+}
+
+function adminSalesBulkSaveMonthlyTargets(payload, token) {
+  _requireAdmin_(token);
+  const rows = (payload && payload.rows) || [];
+  if (!Array.isArray(rows) || !rows.length) throw new Error('No target rows supplied');
+  rows.forEach(function(item) {
+    const row = _adminSalesNormalizeTargetRow_(item);
+    row.created_at = new Date().toISOString();
+    supabaseUpsertMinimal('sales_monthly_targets', row, { onConflict: 'period_month,sales_rep' });
+  });
+  return { ok: true, count: rows.length };
+}
+
+function adminSalesSaveClientBenchmark(payload, token) {
+  _requireAdmin_(token);
+  const row = _adminSalesNormalizeBenchmarkRow_(payload || {});
+  row.created_at = new Date().toISOString();
+  supabaseUpsertMinimal('sales_client_benchmarks', row, { onConflict: 'client_code' });
+  return { ok: true };
+}
+
+function adminSalesBulkSaveClientBenchmarks(payload, token) {
+  _requireAdmin_(token);
+  const rows = (payload && payload.rows) || [];
+  if (!Array.isArray(rows) || !rows.length) throw new Error('No benchmark rows supplied');
+  rows.forEach(function(item) {
+    const row = _adminSalesNormalizeBenchmarkRow_(item);
+    row.created_at = new Date().toISOString();
+    supabaseUpsertMinimal('sales_client_benchmarks', row, { onConflict: 'client_code' });
+  });
+  return { ok: true, count: rows.length };
 }
 
 /******************************************************
@@ -13593,8 +13948,8 @@ function _canAccessPage_(page, sessionUser, token) {
   if (String(sessionUser.role || '').toUpperCase() === 'ADMIN') return true;
   if (currentPage === 'menu') return true;
   if (currentPage === 'checklist') return true;
-  if (currentPage === 'masteradmin') return false;
-  if (currentPage === 'reports') return true;
+  if (currentPage === 'masteradmin' || currentPage === 'salestargets') return false;
+  if (currentPage === 'reports' || currentPage === 'salesdashboard') return true;
 
   const moduleCode = PAGE_MODULE_MAP[currentPage];
   if (!moduleCode) return true;
@@ -13620,7 +13975,7 @@ function doGet(e) {
 
     const sessionUser = getSessionUser(token);
     if (!sessionUser) {
-      return renderLoginRedirectPage();
+      return renderLoginRedirectPage(e && e.parameter);
     }
 
     return printWorkOrder(woNo);
@@ -13629,7 +13984,7 @@ function doGet(e) {
 
     const sessionUser = getSessionUser(token);
     if (!sessionUser) {
-      return renderLoginRedirectPage();
+      return renderLoginRedirectPage(e && e.parameter);
     }
 
     return printFlexoWorkOrder(woNo);
@@ -13638,7 +13993,7 @@ function doGet(e) {
 
     const sessionUser = getSessionUser(token);
     if (!sessionUser) {
-      return renderLoginRedirectPage();
+      return renderLoginRedirectPage(e && e.parameter);
     }
     if (!_canViewSalesOrderPrint_(token)) {
       return renderUnauthorizedPage();
@@ -13674,6 +14029,8 @@ const ROUTES = {
   printchallan: 'DeliveryChallanPrint',
   planning: 'Planning',
   reports: 'Reports',
+  salesdashboard: 'SalesDashboard',
+  salestargets: 'SalesTargetsAdmin',
   costing: 'Costing',
   npd: 'NPD',
   checklist: 'Checklist',
@@ -13692,7 +14049,7 @@ const ROUTES = {
   const sessionUser = getSessionUser(token);
 
   if (!sessionUser) {
-    return renderLoginRedirectPage();
+    return renderLoginRedirectPage(e && e.parameter);
   }
 
   const checklistBlock = _checklistGetBlockingStatusInternal_(sessionUser, token);
@@ -13744,13 +14101,7 @@ function doPost(e) {
       return renderLoginPage((res && res.msg) || 'Invalid credentials.');
     }
 
-    const tpl = HtmlService.createTemplateFromFile('Menu');
-    tpl.WEB_APP_URL = ScriptApp.getService().getUrl();
-    tpl.TOKEN = res.token;
-    tpl.CURRENT_USER = res.user || getSessionUser(res.token);
-
-    return tpl.evaluate()
-      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+    return renderPostLoginRedirectPage(res.token);
   } catch (err) {
     return renderLoginPage(err && err.message ? err.message : 'Login failed.');
   }
@@ -13776,8 +14127,72 @@ function renderLoginPage(message) {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-function renderLoginRedirectPage() {
+function renderPostLoginRedirectPage(token) {
+  const webUrl = ScriptApp.getService().getUrl();
+  const safeToken = String(token || '');
+  const html =
+    '<!doctype html><html><head><base target="_top"><meta charset="utf-8">' +
+    '<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#334155}.box{font-size:13px}</style>' +
+    '</head><body><div class="box">Opening PowerStik ERP...</div><script>' +
+    '(function(){' +
+    'var base=' + JSON.stringify(webUrl) + ';' +
+    'var token=' + JSON.stringify(safeToken) + ';' +
+    'try{localStorage.setItem("ERP_TOKEN",token);sessionStorage.setItem("ERP_TOKEN",token);localStorage.setItem("erp_token",token);sessionStorage.setItem("erp_token",token);}catch(err){}' +
+    'var url=new URL(base,window.location.href);url.searchParams.set("p","menu");url.searchParams.set("token",token);' +
+    'try{if(window.top&&window.top.location){window.top.location.replace(url.toString());return;}}catch(err){}' +
+    'try{window.location.replace(url.toString());}catch(err){window.location.href=url.toString();}' +
+    '})();' +
+    '</script></body></html>';
+
+  return HtmlService.createHtmlOutput(html)
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+function renderLoginRedirectPage(requestParams) {
+  const params = requestParams && typeof requestParams === 'object'
+    ? requestParams
+    : { p: requestParams || 'menu' };
+  const requestedPage = String(params.p || 'menu').toLowerCase();
+  const hadRequestToken = !!String(params.token || '');
+
+  if (!hadRequestToken && requestedPage && requestedPage !== 'login') {
+    return renderSessionRecoveryPage(params);
+  }
+
   return renderLoginPage('Your session has expired. Please sign in again.');
+}
+
+function renderSessionRecoveryPage(requestParams) {
+  const webUrl = ScriptApp.getService().getUrl();
+  const params = {};
+
+  Object.keys(requestParams || {}).forEach(function(key) {
+    if (!key || key === 'token') return;
+    const value = requestParams[key];
+    if (value == null || typeof value === 'object') return;
+    params[key] = String(value);
+  });
+  if (!params.p) params.p = 'menu';
+
+  const html =
+    '<!doctype html><html><head><base target="_top"><meta charset="utf-8">' +
+    '<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#334155}.box{font-size:13px}</style>' +
+    '</head><body><div class="box">Opening PowerStik ERP...</div><script>' +
+    '(function(){' +
+    'var base=' + JSON.stringify(webUrl) + ';' +
+    'var params=' + JSON.stringify(params) + ';' +
+    'function storedToken(){try{return localStorage.getItem("ERP_TOKEN")||sessionStorage.getItem("ERP_TOKEN")||localStorage.getItem("erp_token")||sessionStorage.getItem("erp_token")||"";}catch(err){return "";}}' +
+    'function go(url){try{if(window.top&&window.top.location){window.top.location.replace(url);return;}}catch(err){}try{window.location.replace(url);}catch(err){window.location.href=url;}}' +
+    'var token=storedToken();' +
+    'var url=new URL(base,window.location.href);' +
+    'Object.keys(params).forEach(function(key){url.searchParams.set(key,params[key]);});' +
+    'if(token){url.searchParams.set("token",token);go(url.toString());return;}' +
+    'var loginUrl=new URL(base,window.location.href);loginUrl.searchParams.set("p","login");go(loginUrl.toString());' +
+    '})();' +
+    '</script></body></html>';
+
+  return HtmlService.createHtmlOutput(html)
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
 /******************************************************
@@ -15521,12 +15936,80 @@ function unapproveArtworkGroup(artworkNo) {
  * READ — LINE-WISE Sales Orders for Approval
  * JSON ONLY (frontend-safe)
  */
+function _bumpSalesOrderApprovalVersion_() {
+  PropertiesService.getScriptProperties().setProperty('SO_APPROVAL_VERSION', String(Date.now()));
+}
+
+function _getApprovalClientCreditMap_(clientCodes) {
+  const out = {};
+  const codes = (clientCodes || []).map(function(code) {
+    return String(code || '').trim().toUpperCase();
+  }).filter(Boolean);
+  if (!codes.length) return out;
+
+  try {
+    _supabaseSelectByKeyInBatches_(
+      'v_sales_order_client_credit_exposure',
+      'client_code,client_name,credit_limit,current_balance,approved_pipeline_value,total_exposure,available_credit,has_credit_snapshot,credit_synced_at,credit_synced_by',
+      'client_code',
+      codes,
+      null,
+      40
+    ).forEach(function(row) {
+      out[String(row.client_code || '').trim().toUpperCase()] = row;
+    });
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_sales_order_client_credit_exposure')) throw err;
+  }
+  return out;
+}
+
+function _getApprovalLineExposureMap_(soNumbers) {
+  const out = {};
+  const numbers = (soNumbers || []).map(function(soNo) {
+    return String(soNo || '').trim();
+  }).filter(Boolean);
+  if (!numbers.length) return out;
+
+  try {
+    _supabaseSelectByKeyInBatches_(
+      'v_sales_order_credit_line_exposure',
+      'so_number,line_no,client_code,client_name,accounts_status,business_status,open_qty,open_line_value',
+      'so_number',
+      numbers,
+      null,
+      30
+    ).forEach(function(row) {
+      out[String(row.so_number || '') + '||' + String(row.line_no || '')] = row;
+    });
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_sales_order_credit_line_exposure')) throw err;
+  }
+  return out;
+}
+
+function _getLatestApprovalCreditSyncAt_() {
+  try {
+    const rows = supabaseSelect('client_credit_snapshot', {
+      select: 'synced_at',
+      order: 'synced_at.desc',
+      limit: 1
+    }) || [];
+    return rows[0] && rows[0].synced_at ? rows[0].synced_at : null;
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'client_credit_snapshot')) return null;
+    throw err;
+  }
+}
+
 function getSalesOrderLinesForApproval(fromDate, toDate, pendingOnly) {
 
 const normalizedFrom = /^\d{4}-\d{2}-\d{2}$/.test(String(fromDate || '').trim()) ? String(fromDate || '').trim() : '';
 const normalizedTo = /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '').trim()) ? String(toDate || '').trim() : '';
 const isPendingOnly = pendingOnly === true;
+const approvalVersion = PropertiesService.getScriptProperties().getProperty('SO_APPROVAL_VERSION') || '0';
 const paramsKey = JSON.stringify({
+  version: approvalVersion,
   fromDate: normalizedFrom,
   toDate: normalizedTo,
   pendingOnly: isPendingOnly
@@ -15549,10 +16032,12 @@ const baseQuery = {
   select: `
     so_number,
     so_date,
-    so_created_at:created_at,
+    so_created_at,
     line_no,
     sales_rep,
+    client_code,
     client_name,
+    division,
     product_name,
     category,
     qty,
@@ -15596,14 +16081,17 @@ try {
     msg.indexOf('header_status') !== -1 ||
     msg.indexOf('line_status') !== -1 ||
     msg.indexOf('is_line_active') !== -1 ||
+    msg.indexOf('division') !== -1 ||
     msg.indexOf('advance_payment_required') !== -1 ||
     msg.indexOf('advance_payment_received') !== -1;
   if (!missingEnhancedFields) throw err;
   const fallbackQuery = Object.assign({}, baseQuery, {
-    select: baseQuery.select + `,
+    select: baseQuery.select.replace(/,\s*division\s*,/, ',') + `,
       header_status,
       line_status,
-      is_line_active
+      is_line_active,
+      advance_payment_required,
+      advance_payment_received
     `
   });
   try {
@@ -15619,11 +16107,17 @@ try {
       fallbackMsg.indexOf('order_prefix') !== -1 ||
       fallbackMsg.indexOf('header_status') !== -1 ||
       fallbackMsg.indexOf('line_status') !== -1 ||
-      fallbackMsg.indexOf('is_line_active') !== -1;
+      fallbackMsg.indexOf('division') !== -1 ||
+      fallbackMsg.indexOf('is_line_active') !== -1 ||
+      fallbackMsg.indexOf('advance_payment_required') !== -1 ||
+      fallbackMsg.indexOf('advance_payment_received') !== -1;
     if (!missingFallbackFields) throw fallbackErr;
+    const legacyQuery = Object.assign({}, baseQuery, {
+      select: baseQuery.select.replace(/,\s*division\s*,/, ',')
+    });
     rows = _excludeClosedSalesOrderLines_(_excludeCancelledSalesOrdersByNumber_(_supabaseSelectAll_(
       'v_sales_order_lines_for_approval',
-      baseQuery
+      legacyQuery
     ) || [], 'so_number'), 'so_number', 'line_no');
   }
 }
@@ -15640,20 +16134,53 @@ if (usedEnhancedView) {
   });
 }
 
+const clientCodes = [...new Set(rows.map(function(r) {
+  return String(r.client_code || '').trim().toUpperCase();
+}).filter(Boolean))];
+const soNumbers = [...new Set(rows.map(function(r) {
+  return String(r.so_number || '').trim();
+}).filter(Boolean))];
+const creditMap = _getApprovalClientCreditMap_(clientCodes);
+const lineExposureMap = _getApprovalLineExposureMap_(soNumbers);
+const creditSyncedAt = Object.keys(creditMap).reduce(function(latest, key) {
+  const value = String(creditMap[key].credit_synced_at || '');
+  return value > latest ? value : latest;
+}, '') || _getLatestApprovalCreditSyncAt_();
+
 const result = {
   ok: true,
-  meta: { total: rows.length },
-  rows: rows.map(r => ({
+  meta: {
+    total: rows.length,
+    creditSyncedAt: creditSyncedAt || null
+  },
+  rows: rows.map(r => {
+    const clientCode = String(r.client_code || '').trim().toUpperCase();
+    const credit = creditMap[clientCode] || {};
+    const lineExposure = lineExposureMap[
+      String(r.so_number || '') + '||' + String(r.line_no || '')
+    ] || {};
+    return {
     soNo: String(r.so_number || ''),
     soDate: r.so_date || null,
     soCreatedAt: r.so_created_at || null,
     lineNo: String(r.line_no || ''),
     salesRep: String(r.sales_rep || ''),
+    clientCode: clientCode,
     client: String(r.client_name || ''),
+    division: String(r.division || ''),
     product: String(r.product_name || ''),
     category: String(r.category || ''),
     qty: Number(r.qty || 0),
     approvedRate: r.rate ?? '',
+    openLineValue: Number(lineExposure.open_line_value || 0),
+
+    creditLimit: credit.credit_limit == null ? null : Number(credit.credit_limit),
+    currentOutstanding: credit.current_balance == null ? null : Number(credit.current_balance),
+    approvedPipelineValue: Number(credit.approved_pipeline_value || 0),
+    totalExposure: credit.total_exposure == null ? null : Number(credit.total_exposure),
+    availableCredit: credit.available_credit == null ? null : Number(credit.available_credit),
+    hasCreditSnapshot: credit.has_credit_snapshot === true,
+    creditSyncedAt: credit.credit_synced_at || null,
 
     accountsStatus: r.accounts_status || 'PENDING',
     accountsAt: r.accounts_at || null,
@@ -15663,12 +16190,13 @@ const result = {
 
     advancePaymentRequired: r.advance_payment_required === true,
     advancePaymentReceived: r.advance_payment_received === true
-  }))
+    };
+  })
 };
 
   if (!rows || !rows.length) {
-    try { cache.put(cacheKey, JSON.stringify({ ok: true, rows: [] }), 30); } catch (err) {}
-    return { ok: true, rows: [] };
+    try { cache.put(cacheKey, JSON.stringify(result), 30); } catch (err) {}
+    return result;
   }
 
 try { cache.put(cacheKey, JSON.stringify(result), 30); } catch (err) {}
@@ -15737,6 +16265,337 @@ function _approvalSoIdCacheKey_(soNo) {
 
 function _approvalLineIdCacheKey_(soId, lineNo) {
   return 'so_approval:line_id:' + String(soId || '') + ':' + String(lineNo || '');
+}
+
+function _approvalRequireSession_(token, approvalType) {
+  const user = getSessionUser(token);
+  if (!user) throw new Error('Unauthorized');
+  if (String(user.role || '').toUpperCase() === 'ADMIN') return user;
+
+  const role = String(approvalType || '').trim().toUpperCase();
+  const action = role === 'BUSINESS' ? 'can_approve_business' : 'can_approve_accounts';
+  const roleCode = String(user.role || '').trim().toUpperCase();
+  const roleAllowed = role === 'BUSINESS'
+    ? ['BUSINESS', 'BUSINESS_HEAD', 'BUSINESS HEAD'].indexOf(roleCode) !== -1
+    : ['ACCOUNT', 'ACCOUNTS', 'ACCOUNT_HEAD', 'ACCOUNTS_HEAD'].indexOf(roleCode) !== -1;
+
+  if (roleAllowed || _userHasPermission_(user, 'SALES_ORDER_APPROVAL', action)) return user;
+  throw new Error('You do not have permission for this approval action');
+}
+
+function _normalizeCreditSheetHeader_(value) {
+  return String(value == null ? '' : value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function _parseCreditSheetAmount_(value, label, rowNumber, allowBlank) {
+  if (typeof value === 'number' && isFinite(value)) return Math.round(value * 100) / 100;
+
+  let text = String(value == null ? '' : value).trim();
+  if (!text || text === '-') {
+    if (allowBlank) return null;
+    throw new Error(label + ' is blank at sheet row ' + rowNumber);
+  }
+
+  let negative = false;
+  if (/^\(.*\)$/.test(text)) {
+    negative = true;
+    text = text.slice(1, -1);
+  }
+  if (/\bcr\.?$/i.test(text)) {
+    negative = true;
+    text = text.replace(/\bcr\.?$/i, '');
+  } else {
+    text = text.replace(/\bdr\.?$/i, '');
+  }
+
+  text = text.replace(/[,\s]/g, '').replace(/[^\d.+-]/g, '');
+  const number = Number(text);
+  if (!isFinite(number)) {
+    throw new Error('Invalid ' + label + ' at sheet row ' + rowNumber + ': ' + value);
+  }
+  return Math.round((negative ? -Math.abs(number) : number) * 100) / 100;
+}
+
+/**
+ * Run this once from the Apps Script editor as the web-app deployment owner
+ * after adding the Google Sheets OAuth scope.
+ */
+function authorizeClientCreditSheetAccess() {
+  const spreadsheet = SpreadsheetApp.openById(CLIENT_CREDIT_SPREADSHEET_ID);
+  const sheet = spreadsheet.getSheetByName(CLIENT_CREDIT_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + CLIENT_CREDIT_SHEET_NAME);
+
+  return {
+    ok: true,
+    spreadsheetName: spreadsheet.getName(),
+    sheetName: sheet.getName(),
+    effectiveUser: Session.getEffectiveUser().getEmail() || ''
+  };
+}
+
+function getClientCreditSheetAuthorizationStatus(token) {
+  const user = _approvalRequireSession_(token, 'ACCOUNTS');
+  const info = ScriptApp.getAuthorizationInfo(
+    ScriptApp.AuthMode.FULL,
+    [CLIENT_CREDIT_SHEETS_SCOPE]
+  );
+  const required = info.getAuthorizationStatus() === ScriptApp.AuthorizationStatus.REQUIRED;
+  return {
+    ok: true,
+    authorizationRequired: required,
+    authorizationUrl: required ? info.getAuthorizationUrl() : '',
+    effectiveUser: Session.getEffectiveUser().getEmail() || '',
+    erpUser: String(user.userId || user.displayName || user.fullName || '')
+  };
+}
+
+function _clientCreditGoogleAuthorizationRequiredResponse_(token) {
+  const auth = getClientCreditSheetAuthorizationStatus(token);
+  return {
+    ok: false,
+    requiresGoogleAuthorization: true,
+    authorizationUrl: auth.authorizationUrl,
+    message:
+      'This Google account has not authorized ERP to read Google Sheets yet. ' +
+      'Open the authorization link, approve access, then return here and click Sync Credit Data again.'
+  };
+}
+
+function syncClientCreditFromGoogleSheet(token) {
+  const user = _approvalRequireSession_(token, 'ACCOUNTS');
+  const auth = getClientCreditSheetAuthorizationStatus(token);
+  if (auth.authorizationRequired) {
+    return {
+      ok: false,
+      requiresGoogleAuthorization: true,
+      authorizationUrl: auth.authorizationUrl,
+      message:
+        'This Google account has not authorized ERP to read Google Sheets yet. ' +
+        'Open the authorization link, approve access, then return here and click Sync Credit Data again.'
+    };
+  }
+
+  let spreadsheet;
+  try {
+    spreadsheet = SpreadsheetApp.openById(CLIENT_CREDIT_SPREADSHEET_ID);
+  } catch (err) {
+    const message = String((err && err.message) || err || '');
+    if (
+      message.indexOf('permission to call SpreadsheetApp.openById') !== -1 ||
+      message.indexOf('Required permissions') !== -1 ||
+      message.indexOf('Authorization is required') !== -1
+    ) {
+      return _clientCreditGoogleAuthorizationRequiredResponse_(token);
+    }
+    if (
+      message.indexOf('You do not have permission') !== -1 ||
+      message.indexOf('No item with the given ID') !== -1 ||
+      message.indexOf('not found') !== -1
+    ) {
+      throw new Error(
+        'This Google account cannot access the client balance sheet. ' +
+        'Share the Google Sheet with the same Google account being used in this browser, then retry Sync Credit Data.'
+      );
+    }
+    throw err;
+  }
+  const sheet = spreadsheet.getSheetByName(CLIENT_CREDIT_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet not found: ' + CLIENT_CREDIT_SHEET_NAME);
+
+  const values = sheet.getDataRange().getValues();
+  if (!values || values.length < 2) {
+    throw new Error('No client credit data found in ' + CLIENT_CREDIT_SHEET_NAME);
+  }
+
+  const headerMap = {};
+  values[0].forEach(function(value, index) {
+    headerMap[_normalizeCreditSheetHeader_(value)] = index;
+  });
+
+  const requiredHeaders = {
+    clientCode: 'clientcode',
+    clientName: 'clientname',
+    creditLimit: 'creditlimit',
+    currentBalance: 'currentbalance'
+  };
+  Object.keys(requiredHeaders).forEach(function(key) {
+    if (typeof headerMap[requiredHeaders[key]] === 'undefined') {
+      throw new Error('Missing required header in ' + CLIENT_CREDIT_SHEET_NAME + ': ' + requiredHeaders[key]);
+    }
+  });
+
+  const seen = {};
+  const rows = [];
+  values.slice(1).forEach(function(sourceRow, index) {
+    const rowNumber = index + 2;
+    const clientCode = String(sourceRow[headerMap.clientcode] || '').trim().toUpperCase();
+    const clientName = String(sourceRow[headerMap.clientname] || '').trim();
+    const hasAnyValue = sourceRow.some(function(value) {
+      return String(value == null ? '' : value).trim() !== '';
+    });
+    if (!hasAnyValue) return;
+    if (!clientCode) throw new Error('Client code is blank at sheet row ' + rowNumber);
+    if (seen[clientCode]) {
+      throw new Error('Duplicate client code ' + clientCode + ' at sheet rows ' + seen[clientCode] + ' and ' + rowNumber);
+    }
+    seen[clientCode] = rowNumber;
+
+    rows.push({
+      client_code: clientCode,
+      client_name: clientName,
+      credit_limit: _parseCreditSheetAmount_(
+        sourceRow[headerMap.creditlimit],
+        'Credit Limit',
+        rowNumber,
+        true
+      ),
+      current_balance: _parseCreditSheetAmount_(
+        sourceRow[headerMap.currentbalance],
+        'Current Balance',
+        rowNumber,
+        true
+      ),
+      source_row_number: rowNumber
+    });
+  });
+
+  if (!rows.length) throw new Error('No client credit rows found below the headers');
+
+  const actor = String(user.userId || user.displayName || user.fullName || 'ERP User');
+  const response = supabaseRpc('replace_client_credit_snapshot', {
+    p_rows: rows,
+    p_source_spreadsheet_id: CLIENT_CREDIT_SPREADSHEET_ID,
+    p_source_sheet_name: CLIENT_CREDIT_SHEET_NAME,
+    p_synced_by: actor
+  });
+  const result = Array.isArray(response) ? (response[0] || {}) : (response || {});
+
+  _bumpSalesOrderApprovalVersion_();
+  return {
+    ok: true,
+    syncedCount: Number(result.synced_count || rows.length),
+    unmatchedClientCount: Number(result.unmatched_client_count || 0),
+    syncedAt: result.synced_at || new Date().toISOString(),
+    syncedBy: actor
+  };
+}
+
+function _approvalCreditWarnings_(normalizedPayload) {
+  const approvals = (normalizedPayload || []).filter(function(row) {
+    return row.decision === 'APPROVED';
+  });
+  if (!approvals.length) return [];
+
+  const soNumbers = [...new Set(approvals.map(function(row) {
+    return row.soNo;
+  }))];
+  const lineMap = _getApprovalLineExposureMap_(soNumbers);
+  const groups = {};
+
+  approvals.forEach(function(row) {
+    const line = lineMap[row.soNo + '||' + row.lineNo];
+    if (!line) {
+      throw new Error('Credit exposure data not found for ' + row.soNo + ' / ' + row.lineNo +
+        '. Deploy the sales order client credit control migration before approving.');
+    }
+
+    const clientCode = String(line.client_code || '').trim().toUpperCase();
+    if (!clientCode) throw new Error('Client code missing for ' + row.soNo + ' / ' + row.lineNo);
+    if (!groups[clientCode]) {
+      groups[clientCode] = {
+        clientCode: clientCode,
+        clientName: String(line.client_name || clientCode),
+        approvalType: row.approvalType,
+        currentOrderValueBeingApproved: 0,
+        selectedNewExposure: 0,
+        selectedLines: []
+      };
+    }
+
+    const openLineValue = Number(line.open_line_value || 0);
+    groups[clientCode].currentOrderValueBeingApproved += openLineValue;
+
+    const addsExposure =
+      row.approvalType === 'ACCOUNTS' &&
+      String(line.accounts_status || '').toUpperCase() !== 'APPROVED';
+    if (addsExposure) {
+      groups[clientCode].selectedNewExposure += openLineValue;
+    }
+    groups[clientCode].selectedLines.push({
+      soNo: row.soNo,
+      lineNo: row.lineNo,
+      openLineValue: openLineValue,
+      addsExposure: addsExposure
+    });
+  });
+
+  const clientCodes = Object.keys(groups);
+  const creditMap = _getApprovalClientCreditMap_(clientCodes);
+  return clientCodes.map(function(clientCode) {
+    const group = groups[clientCode];
+    const credit = creditMap[clientCode] || {};
+    const creditLimit = credit.credit_limit == null ? null : Number(credit.credit_limit);
+    const currentBalance = credit.current_balance == null ? null : Number(credit.current_balance);
+    const pipeline = Number(credit.approved_pipeline_value || 0);
+    const currentOrderValueBeingApproved = Math.round(group.currentOrderValueBeingApproved * 100) / 100;
+    const selectedNewExposure = Math.round(group.selectedNewExposure * 100) / 100;
+    const hasCompleteCreditData =
+      credit.has_credit_snapshot === true &&
+      creditLimit !== null &&
+      currentBalance !== null;
+    const currentExposure = currentBalance === null
+      ? null
+      : Math.round((currentBalance + pipeline) * 100) / 100;
+    const projectedExposure = currentExposure === null
+      ? null
+      : Math.round((currentExposure + selectedNewExposure) * 100) / 100;
+    const exceededBy =
+      projectedExposure !== null && creditLimit !== null
+        ? Math.max(Math.round((projectedExposure - creditLimit) * 100) / 100, 0)
+        : null;
+
+    if (hasCompleteCreditData && !(exceededBy > 0)) return null;
+    return {
+      clientCode: clientCode,
+      clientName: group.clientName,
+      approvalType: group.approvalType,
+      reason: hasCompleteCreditData ? 'CREDIT_LIMIT_EXCEEDED' : 'CREDIT_DATA_MISSING',
+      creditLimit: creditLimit,
+      currentOutstanding: currentBalance,
+      approvedPipelineValue: pipeline,
+      currentExposure: currentExposure,
+      currentOrderValueBeingApproved: currentOrderValueBeingApproved,
+      selectedNewExposure: selectedNewExposure,
+      projectedExposure: projectedExposure,
+      exceededBy: exceededBy,
+      creditSyncedAt: credit.credit_synced_at || null,
+      selectedLines: group.selectedLines
+    };
+  }).filter(Boolean);
+}
+
+function _recordApprovalCreditOverrides_(warnings, user, mode) {
+  if (!warnings || !warnings.length) return;
+  const actor = String(user.userId || user.displayName || user.fullName || 'ERP User');
+  supabaseBulkInsertMinimal('sales_order_credit_override_audit', warnings.map(function(warning) {
+    return {
+      approval_type: warning.approvalType,
+      approval_mode: mode,
+      client_code: warning.clientCode,
+      credit_limit: warning.creditLimit,
+      current_balance: warning.currentOutstanding,
+      approved_pipeline_value: warning.approvedPipelineValue,
+      selected_new_exposure: warning.selectedNewExposure,
+      projected_exposure: warning.projectedExposure,
+      exceeded_by: warning.exceededBy,
+      credit_snapshot_synced_at: warning.creditSyncedAt,
+      selected_lines: warning.selectedLines,
+      approved_by: actor
+    };
+  }));
 }
 
 function _normalizeApprovalPayload_(payload) {
@@ -15874,111 +16733,154 @@ function _updateSalesOrderAdvancePaymentRequiredBySoNo_(soNo, required) {
 function updateSalesOrderLineApproval(payload) {
 
   const normalized = _normalizeApprovalPayload_(payload);
-  const soIdByNumber = _getSalesOrderIdsByNumber_([normalized.soNo]);
-  const soId = soIdByNumber[normalized.soNo];
+  const user = _approvalRequireSession_(payload && payload.token, normalized.approvalType);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const creditWarnings = _approvalCreditWarnings_([normalized]);
+    if (creditWarnings.length && payload.creditOverride !== true) {
+      return {
+        ok: false,
+        requiresCreditOverride: true,
+        creditWarnings: creditWarnings
+      };
+    }
 
-  if (!soId) {
-    throw new Error('Sales Order not found: ' + normalized.soNo);
+    const soIdByNumber = _getSalesOrderIdsByNumber_([normalized.soNo]);
+    const soId = soIdByNumber[normalized.soNo];
+
+    if (!soId) {
+      throw new Error('Sales Order not found: ' + normalized.soNo);
+    }
+
+    const lineIds = _getSalesOrderLineIds_([{
+      soId: soId,
+      lineNo: normalized.lineNo
+    }]);
+    const lineId = lineIds[String(soId) + '||' + normalized.lineNo];
+
+    if (!lineId) {
+      throw new Error('Sales Order line not found: ' + normalized.soNo + ' / ' + normalized.lineNo);
+    }
+
+    const now = new Date().toISOString();
+    const update = {};
+
+    if (normalized.approvalType === 'ACCOUNTS') {
+      update.accounts_status = normalized.decision;
+      update.accounts_at = now;
+    } else {
+      update.business_status = normalized.decision;
+      update.business_at = now;
+    }
+
+    supabaseUpdateMinimal(
+      'sales_order_lines',
+      { id: 'eq.' + lineId },
+      update
+    );
+
+    if (
+      normalized.approvalType === 'ACCOUNTS' &&
+      normalized.decision === 'APPROVED' &&
+      typeof normalized.advancePaymentRequired === 'boolean'
+    ) {
+      _updateSalesOrderAdvancePaymentRequiredBySoNo_(normalized.soNo, normalized.advancePaymentRequired);
+    }
+
+    if (payload.creditOverride === true) {
+      _recordApprovalCreditOverrides_(creditWarnings, user, 'SINGLE');
+    }
+    _bumpSalesOrderApprovalVersion_();
+    return { ok:true, soNo: normalized.soNo, lineNo: normalized.lineNo };
+  } finally {
+    lock.releaseLock();
   }
-
-  const lineIds = _getSalesOrderLineIds_([{
-    soId: soId,
-    lineNo: normalized.lineNo
-  }]);
-  const lineId = lineIds[String(soId) + '||' + normalized.lineNo];
-
-  if (!lineId) {
-    throw new Error('Sales Order line not found: ' + normalized.soNo + ' / ' + normalized.lineNo);
-  }
-
-  const now = new Date().toISOString();
-  const update = {};
-
-  if (normalized.approvalType === 'ACCOUNTS') {
-    update.accounts_status = normalized.decision;
-    update.accounts_at = now;
-  } else {
-    update.business_status = normalized.decision;
-    update.business_at = now;
-  }
-
-  supabaseUpdateMinimal(
-    'sales_order_lines',
-    { id: 'eq.' + lineId },
-    update
-  );
-
-  if (
-    normalized.approvalType === 'ACCOUNTS' &&
-    normalized.decision === 'APPROVED' &&
-    typeof normalized.advancePaymentRequired === 'boolean'
-  ) {
-    _updateSalesOrderAdvancePaymentRequiredBySoNo_(normalized.soNo, normalized.advancePaymentRequired);
-  }
-
-  return { ok:true, soNo: normalized.soNo, lineNo: normalized.lineNo };
 }
 
 function bulkUpdateSalesOrderApproval(payload) {
 
-  if (!Array.isArray(payload) || !payload.length) {
+  const rows = Array.isArray(payload) ? payload : (payload && payload.rows);
+  if (!Array.isArray(rows) || !rows.length) {
     return { ok: true };
   }
 
-  const normalizedPayload = payload.map(_normalizeApprovalPayload_);
-  const now = new Date().toISOString();
-  const soNumbers = [...new Set(normalizedPayload.map(function(row) {
-    return row.soNo;
+  const normalizedPayload = rows.map(_normalizeApprovalPayload_);
+  const approvalTypes = [...new Set(normalizedPayload.map(function(row) {
+    return row.approvalType;
   }))];
-  const soIdByNumber = _getSalesOrderIdsByNumber_(soNumbers);
-  const lineIdMap = _getSalesOrderLineIds_(
-    normalizedPayload.map(function(row) {
+  if (approvalTypes.length !== 1) throw new Error('Bulk approval must use one approval type');
+  const user = _approvalRequireSession_(payload && payload.token, approvalTypes[0]);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const creditWarnings = _approvalCreditWarnings_(normalizedPayload);
+    if (creditWarnings.length && payload.creditOverride !== true) {
       return {
-        soId: soIdByNumber[row.soNo],
-        lineNo: row.lineNo
+        ok: false,
+        requiresCreditOverride: true,
+        creditWarnings: creditWarnings
       };
-    })
-  );
-
-  const updates = [];
-  normalizedPayload.forEach(function(p) {
-    const soId = soIdByNumber[p.soNo];
-    if (!soId) return;
-
-    const lineId = lineIdMap[String(soId) + '||' + String(p.lineNo)];
-    if (!lineId) return;
-
-    const update = { id: lineId };
-    if (p.approvalType === 'ACCOUNTS') {
-      update.accounts_status = p.decision;
-      update.accounts_at = now;
-    } else {
-      update.business_status = p.decision;
-      update.business_at = now;
     }
-    updates.push(update);
-  });
 
-  if (updates.length) {
+    const now = new Date().toISOString();
+    const soNumbers = [...new Set(normalizedPayload.map(function(row) {
+      return row.soNo;
+    }))];
+    const soIdByNumber = _getSalesOrderIdsByNumber_(soNumbers);
+    const lineIdMap = _getSalesOrderLineIds_(
+      normalizedPayload.map(function(row) {
+        return {
+          soId: soIdByNumber[row.soNo],
+          lineNo: row.lineNo
+        };
+      })
+    );
+
+    const updates = [];
+    normalizedPayload.forEach(function(p) {
+      const soId = soIdByNumber[p.soNo];
+      if (!soId) throw new Error('Sales Order not found: ' + p.soNo);
+
+      const lineId = lineIdMap[String(soId) + '||' + String(p.lineNo)];
+      if (!lineId) throw new Error('Sales Order line not found: ' + p.soNo + ' / ' + p.lineNo);
+
+      const update = { id: lineId };
+      if (p.approvalType === 'ACCOUNTS') {
+        update.accounts_status = p.decision;
+        update.accounts_at = now;
+      } else {
+        update.business_status = p.decision;
+        update.business_at = now;
+      }
+      updates.push(update);
+    });
+
     supabaseUpsertMinimal('sales_order_lines', updates, { onConflict: 'id' });
-  }
 
-  const advanceMap = {};
-  normalizedPayload.forEach(function(p) {
-    if (
-      p.approvalType === 'ACCOUNTS' &&
-      p.decision === 'APPROVED' &&
-      typeof p.advancePaymentRequired === 'boolean'
-    ) {
-      advanceMap[p.soNo] = p.advancePaymentRequired;
+    const advanceMap = {};
+    normalizedPayload.forEach(function(p) {
+      if (
+        p.approvalType === 'ACCOUNTS' &&
+        p.decision === 'APPROVED' &&
+        typeof p.advancePaymentRequired === 'boolean'
+      ) {
+        advanceMap[p.soNo] = p.advancePaymentRequired;
+      }
+    });
+
+    Object.keys(advanceMap).forEach(function(soNo) {
+      _updateSalesOrderAdvancePaymentRequiredBySoNo_(soNo, advanceMap[soNo]);
+    });
+
+    if (payload.creditOverride === true) {
+      _recordApprovalCreditOverrides_(creditWarnings, user, 'BULK');
     }
-  });
-
-  Object.keys(advanceMap).forEach(function(soNo) {
-    _updateSalesOrderAdvancePaymentRequiredBySoNo_(soNo, advanceMap[soNo]);
-  });
-
-  return { ok: true, updated: updates.length };
+    _bumpSalesOrderApprovalVersion_();
+    return { ok: true, updated: updates.length };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function updateSalesOrderAdvancePaymentRequired(payload) {
@@ -17546,11 +18448,21 @@ function normalizeStoredWOMaterialKey_(key) {
 
 function buildWOMaterialRequirementRows_(materials, issuedRows, returnedRows) {
   const approxEqual = (a, b) => Math.abs(Number(a || 0) - Number(b || 0)) <= 0.01;
+  const normalizeLabel = value => String(value || '').trim().toUpperCase();
+  const labelSet = function(values) {
+    const out = {};
+    (values || []).forEach(function(value) {
+      const key = normalizeLabel(value);
+      if (key) out[key] = true;
+    });
+    return out;
+  };
   const buildPools = rows => (rows || []).map(r => {
     const parsed = parseStoredWOMaterialKey_(r.remarks);
     return {
       remainingQty: Number(r.qty_out || r.qty_in || 0),
       parsed: parsed,
+      labelKey: normalizeLabel(parsed.label),
       exactKey: normalizeWOMaterialKey_(
         parsed.label,
         parsed.gsm,
@@ -17566,6 +18478,12 @@ function buildWOMaterialRequirementRows_(materials, issuedRows, returnedRows) {
   return (materials || []).map(m => {
     const stored = parseStoredWOMaterialKey_(m.material_key);
     const label = stored.label || m.item_name || '';
+    const aliases = labelSet([
+      label,
+      m.item_name,
+      m.item_code,
+      stored.label
+    ]);
     const deckle = Number(m.deckle ?? stored.deckle ?? 0);
     const cutSize = Number(m.cut_size ?? m.cutSize ?? stored.cutSize ?? 0);
     const uom = String(m.uom || stored.uom || '').trim();
@@ -17594,24 +18512,24 @@ function buildWOMaterialRequirementRows_(materials, issuedRows, returnedRows) {
 
       consume(pool => pool.exactKey === materialKey, false);
       consume(pool =>
-        pool.parsed.label === label &&
+        aliases[pool.labelKey] &&
         (!pool.parsed.gsm || pool.parsed.gsm === String(m.gsm || '').trim()) &&
         (!pool.parsed.deckle || approxEqual(pool.parsed.deckle, deckle)) &&
         (!pool.parsed.cutSize || approxEqual(pool.parsed.cutSize, cutSize)) &&
         (!pool.parsed.uom || pool.parsed.uom === uom),
         false
       );
-      consume(pool => pool.parsed.label === label, false);
+      consume(pool => aliases[pool.labelKey], false);
       consume(pool => pool.exactKey === materialKey, true);
       consume(pool =>
-        pool.parsed.label === label &&
+        aliases[pool.labelKey] &&
         (!pool.parsed.gsm || pool.parsed.gsm === String(m.gsm || '').trim()) &&
         (!pool.parsed.deckle || approxEqual(pool.parsed.deckle, deckle)) &&
         (!pool.parsed.cutSize || approxEqual(pool.parsed.cutSize, cutSize)) &&
         (!pool.parsed.uom || pool.parsed.uom === uom),
         true
       );
-      consume(pool => pool.parsed.label === label, true);
+      consume(pool => aliases[pool.labelKey], true);
       return totalQty;
     };
 
@@ -17641,7 +18559,7 @@ function buildWOMaterialFallbackMap_(snapshotJson) {
   const snap = snapshotJson || {};
   const isFlexo = resolveWOIssueDepartment_(snap) === 'Flexo';
 
-  const pushEntry = function(label, gsm, uom, deckle, cutSize, requiredQty) {
+  const pushEntry = function(label, gsm, uom, deckle, cutSize, requiredQty, itemCode) {
     const key = [
       String(label || '').trim().toUpperCase(),
       String(gsm || '').trim(),
@@ -17654,7 +18572,8 @@ function buildWOMaterialFallbackMap_(snapshotJson) {
       deckle: Number(deckle || 0),
       cutSize: Number(cutSize || 0),
       requiredQty: Number(requiredQty || 0),
-      uom: String(uom || '').trim().toUpperCase()
+      uom: String(uom || '').trim().toUpperCase(),
+      itemCode: String(itemCode || '').trim()
     };
   };
 
@@ -17665,7 +18584,8 @@ function buildWOMaterialFallbackMap_(snapshotJson) {
       'SHEET',
       row.deckle || 0,
       row.cutSize || row.cut_size || 0,
-      row.requiredQty || row.sheetsWithWaste || row.sheets || 0
+      row.requiredQty || row.sheetsWithWaste || row.sheets || 0,
+      row.itemCode || row.item_code || ''
     );
   });
   (snap.corrugation || []).forEach(function(row) {
@@ -17677,7 +18597,8 @@ function buildWOMaterialFallbackMap_(snapshotJson) {
       row.cutSize || row.cut_size || 0,
       isFlexo
         ? (row.runningMeter || row.runningMeters || row.rm || row.requiredQty || 0)
-        : (row.weightKg || row.requiredQty || 0)
+        : (row.weightKg || row.requiredQty || 0),
+      row.itemCode || row.item_code || ''
     );
   });
   (snap.extraMaterials || []).forEach(function(row) {
@@ -17687,7 +18608,8 @@ function buildWOMaterialFallbackMap_(snapshotJson) {
       row.uom || 'NOS',
       row.deckle || 0,
       row.cutSize || row.cut_size || 0,
-      row.requiredQty || row.qtyPerUnit || 0
+      row.requiredQty || row.qtyPerUnit || 0,
+      row.materialItemCode || row.itemCode || row.item_code || ''
     );
   });
 
@@ -19029,6 +19951,34 @@ function invFindMatchingPOReceiptRecord_(ledgerRow, itemCode, opts) {
   };
 
   const lineRows = Array.isArray(opts.lineRows) ? opts.lineRows : _purchaseListPOLines_();
+  const note = invParseReceiptNote_(ledgerRow && ledgerRow.remarks);
+  const explicitLineId = String(note.POLINE || note.PO_LINE || note.POLINEID || '').trim();
+  if (explicitLineId) {
+    const explicitLine = lineRows.find(function(line) {
+      return String(line.poNo || '').trim() === poNo &&
+        String(line.id || '').trim() === explicitLineId;
+    });
+    const explicitRows = (Array.isArray(opts.receiptRows) ? opts.receiptRows : _purchaseListPOReceipts_({ includeReversed: true }))
+      .filter(function(row) {
+        return String(row.poLineId || '').trim() === explicitLineId;
+      });
+    if (explicitLine && explicitRows.length) {
+      const rankedExplicit = explicitRows
+        .map(function(row) {
+          const createdAtMs = row.createdAt ? new Date(row.createdAt).getTime() : 0;
+          let score = 100000;
+          if (sameNumber(row.qty, ledgerQty)) score += 1000;
+          if (sameNumber(row.rate, ledgerRate)) score += 500;
+          if (createdAtMs && ledgerCreatedAtMs) score -= Math.abs(createdAtMs - ledgerCreatedAtMs) / 1000;
+          return { row: row, line: explicitLine, score: score };
+        })
+        .sort(function(a, b) {
+          return Number(b.score || 0) - Number(a.score || 0);
+        });
+      return rankedExplicit[0] || null;
+    }
+  }
+
   const candidateLines = lineRows.filter(function(line) {
     if (String(line.poNo || '').trim() !== poNo) return false;
     if (targetItemCode && String(line.itemCode || '').trim().toUpperCase() !== targetItemCode) return false;
@@ -19057,8 +20007,6 @@ function invFindMatchingPOReceiptRecord_(ledgerRow, itemCode, opts) {
   });
   if (!candidates.length) return null;
 
-  const note = invParseReceiptNote_(ledgerRow && ledgerRow.remarks);
-  const explicitLineId = String(note.POLINE || note.PO_LINE || note.POLINEID || '').trim();
   if (explicitLineId && lineMap[explicitLineId]) {
     const exactRow = candidates.find(function(row) {
       return String(row.poLineId || '').trim() === explicitLineId;
@@ -19084,6 +20032,51 @@ function invFindMatchingPOReceiptRecord_(ledgerRow, itemCode, opts) {
     });
 
   return ranked[0] || null;
+}
+
+function _purchaseFindPOLineForReceiptLedger_(ledgerRow, itemCode, lineRows) {
+  const poNo = String(ledgerRow?.ref_no || '').trim();
+  if (!poNo) return null;
+
+  const lines = (Array.isArray(lineRows) ? lineRows : _purchaseListPOLines_()).filter(function(line) {
+    return String(line.poNo || '').trim() === poNo;
+  });
+  if (!lines.length) return null;
+
+  const note = invParseReceiptNote_(ledgerRow && ledgerRow.remarks);
+  const explicitLineId = String(note.POLINE || note.PO_LINE || note.POLINEID || '').trim();
+  if (explicitLineId) {
+    const explicitLine = lines.find(function(line) {
+      return String(line.id || '').trim() === explicitLineId;
+    });
+    if (explicitLine) return explicitLine;
+  }
+
+  const targetItemCode = String(itemCode || '').trim().toUpperCase();
+  const ledgerDepartment = String(ledgerRow?.department || '').trim().toUpperCase();
+  const ledgerRate = Number(ledgerRow?.rate || 0);
+  const ledgerQty = Number(ledgerRow?.qty_in || 0);
+  const itemMatches = lines.filter(function(line) {
+    return targetItemCode
+      ? String(line.itemCode || '').trim().toUpperCase() === targetItemCode
+      : true;
+  });
+  const deptMatches = itemMatches.filter(function(line) {
+    return ledgerDepartment
+      ? String(line.department || '').trim().toUpperCase() === ledgerDepartment
+      : true;
+  });
+  const base = deptMatches.length ? deptMatches : itemMatches;
+  if (base.length === 1) return base[0];
+  const rateMatches = base.filter(function(line) {
+    return Math.abs(Number(line.rate || 0) - ledgerRate) <= 0.0001;
+  });
+  if (rateMatches.length === 1) return rateMatches[0];
+  const qtyMatches = rateMatches.filter(function(line) {
+    return Number(line.qty || 0) + 0.0001 >= ledgerQty;
+  });
+  if (qtyMatches.length === 1) return qtyMatches[0];
+  return lines.length === 1 ? lines[0] : null;
 }
 
 function invRestoreLotAllocations_(ledgerRow) {
@@ -19298,9 +20291,18 @@ function invReverseLedgerTransaction(ledgerId, reason) {
           receiptId: String(receiptMatch.row.id || '').trim()
         };
       } else {
+        const matchedLine = _purchaseFindPOLineForReceiptLedger_(ledger, itemCode);
+        const sourceType = String(matchedLine?.sourceType || '').trim().toUpperCase();
+        const linkedPrNo = String(matchedLine?.sourceRef || '').trim();
+        if (sourceType === 'INVENTORY_PR' && linkedPrNo) {
+          invAdjustPurchaseRequestReceipt_(linkedPrNo, -qtyIn);
+          purchaseCacheTouched = true;
+        }
         purchaseSync = {
           poNo: String(ledger.ref_no || '').trim(),
-          warning: 'Linked PO receipt row could not be matched for deletion'
+          warning: matchedLine
+            ? 'Linked PO receipt row could not be matched for deletion; PO line was matched from ledger'
+            : 'Linked PO receipt row could not be matched for deletion'
         };
       }
     }
@@ -19674,11 +20676,13 @@ function invListPurchaseRequestsJSON(opts = {}) {
     const requestedQty = Number(r.requested_qty || 0);
     const storedReceivedQty = Number(r.received_qty || 0);
     const actualReceivedQty = Number(actualReceiptByPr[r.pr_no] || 0);
-    const effectiveReceivedQty = Math.max(storedReceivedQty, actualReceivedQty);
     const storedStatus = String(r.status || 'OPEN').trim().toUpperCase() || 'OPEN';
     const terminalStatus = storedStatus === 'CANCELLED' || storedStatus === 'SHORT_CLOSED';
     const linked = Object.assign({}, directPoMap[r.pr_no] || {}, purchaseMap[r.pr_no] || {});
     const hasLinkedPO = (linked.poRefs || linked.refs || []).length > 0 || Number(linked.openPOQty || 0) > 0 || Number(linked.orderedQty || 0) > 0;
+    const effectiveReceivedQty = hasLinkedPO
+      ? actualReceivedQty
+      : Math.max(storedReceivedQty, actualReceivedQty);
     const effectiveStatus = terminalStatus
       ? storedStatus
       : (effectiveReceivedQty >= requestedQty && requestedQty > 0 ? 'CLOSED' : (hasLinkedPO || requestedQty > 0 ? 'OPEN' : storedStatus));
@@ -20730,6 +21734,7 @@ function _invPreparedWOIssueRowMatchLabelSet_(row, snapshotJson) {
     if (key) labels[key] = true;
   };
   add(parsed.label || row.item_label || row.itemLabel || '');
+  add(row.item_code || row.itemCode || '');
   if (_invIsPrimaryFlexoIssueMaterial_(parsed.label || row.item_label || row.itemLabel || '', snapshotJson)) {
     add(snapshotJson?.flexoDetails?.itemCode || '');
     add(snapshotJson?.flexoDetails?.itemName || '');
@@ -20907,7 +21912,9 @@ function _invNormalizeWorkOrderIssueListOpts_(opts) {
     status: normalizedStatus,
     search: search,
     limit: limit,
-    offset: offset
+    offset: offset,
+    fromDate: String(raw.fromDate || raw.dateFrom || '').trim(),
+    toDate: String(raw.toDate || raw.dateTo || '').trim()
   };
 }
 
@@ -21027,6 +22034,7 @@ function _invSnapshotFallbackMaterialRows_(snapshotJson, woId) {
     return {
       wo_id: woId || '',
       material_key: normalizeWOMaterialKey_(label, gsm, deckle, cutSize, uom),
+      item_code: fallback.itemCode || '',
       item_name: label,
       gsm: gsm,
       deckle: deckle,
@@ -21053,6 +22061,7 @@ function _invGroupWOMaterialRowsForIssue_(materials) {
     if (!grouped[materialKey]) {
       grouped[materialKey] = Object.assign({}, row, {
         material_key: materialKey,
+        item_code: String(row.item_code || row.itemCode || '').trim(),
         item_name: label,
         gsm: gsm,
         deckle: deckle,
@@ -21101,7 +22110,7 @@ function _invBuildWorkOrdersForIssueFallbackRows_(woNos) {
 
   const materials = _supabaseSelectByKeyInBatches_(
     'work_order_materials',
-    'wo_id,material_key,item_name,gsm,deckle,cut_size,uom,required_qty',
+    'wo_id,material_key,item_code,item_name,gsm,deckle,cut_size,uom,required_qty',
     'wo_id',
     woIds,
     null,
@@ -21264,11 +22273,14 @@ function invListWOIssueVarianceJSON(opts) {
   const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
   const rows = supabaseRpc('inv_wo_issue_variance_export_ui', {
     p_search: request.search || null,
+    p_date_from: request.fromDate || null,
+    p_date_to: request.toDate || null,
     p_limit: request.limit,
     p_offset: request.offset
   }) || [];
   const out = (Array.isArray(rows) ? rows : (rows.rows || [])).map(function(row) {
     return {
+      woDate: row.wo_date || row.woDate || '',
       woNo: String(row.wo_no || row.woNo || '').trim(),
       jobCardNo: row.job_card_no || row.jobCardNo || '',
       salesOrders: row.sales_orders || row.salesOrders || '',
@@ -21299,6 +22311,8 @@ function invListWOIssueVarianceJSON(opts) {
     ok: true,
     rows: out,
     meta: {
+      fromDate: request.fromDate,
+      toDate: request.toDate,
       limit: request.limit,
       offset: request.offset
     }
@@ -21315,7 +22329,7 @@ function invGetWorkOrderForIssue(woNo) {
   }
 
   const rows = supabaseSelect('inv_wo_issue_requirement_v', {
-    select: 'wo_number,issue_department,line_status,material_key,item_label,gsm,deckle_mm,cut_mm,uom,required_qty,issued_qty,returned_qty,net_issued_qty,remaining_qty,excess_qty',
+    select: 'wo_number,issue_department,line_status,material_key,item_label,gsm,deckle_mm,cut_mm,uom,required_qty,issued_qty,returned_qty,net_issued_qty,remaining_qty,excess_qty,item_code',
     filters: { wo_number: 'eq.' + key },
     order: 'item_label.asc,material_key.asc',
     limit: 500
@@ -24847,6 +25861,9 @@ function _billingTryDatasetV4_(params, includeRows) {
 function _billingBuildDatasetRows_(options) {
   const p = options || {};
   const mode = _billingNormalizeMode_(p.mode);
+  if (mode === 'DIRECT' && (!!String(p.soNumber || '').trim() || !!String(p.q || '').trim())) {
+    p.onlyOpen = false;
+  }
   const emptySummary = {
     totalLines: 0,
     dispatchBillableQty: 0,
@@ -25151,12 +26168,14 @@ function billingGetOpenJobsForInvoice(invoiceId, params, token) {
   if (!clientCode) throw new Error('Unable to resolve customer for this invoice. Add client_code to the invoice header or linked SO lines.');
 
   const p = params || {};
+  const requestedMode = _billingNormalizeMode_(p.mode || inv.billing_mode || 'DIRECT');
+  const hasExplicitLineFilter = !!String(p.soNumber || '').trim() || !!String(p.q || '').trim();
   return _billingBuildDatasetRows_({
     clientCode: clientCode,
     soNumber: String(p.soNumber || '').trim(),
-    mode: _billingNormalizeMode_(p.mode || inv.billing_mode || 'DIRECT'),
+    mode: requestedMode,
     q: String(p.q || '').trim(),
-    onlyOpen: true,
+    onlyOpen: !(requestedMode === 'DIRECT' && hasExplicitLineFilter),
     includeRows: true
   });
 }
@@ -25765,14 +26784,12 @@ function _billingCreateOrUpdateManualSalesOrder_(options) {
   const headerPayload = _billingManualSalesOrderHeaderPayload_(Object.assign({}, opts, { soNumber: soNumber }));
   let soId = String(opts.soId || '').trim();
   if (soId) {
-    _salesOrderUpdateHeader_({ id: 'eq.' + soId }, headerPayload);
-    supabaseDelete('sales_order_lines', { so_id: 'eq.' + soId });
-  } else {
-    const soInsert = _salesOrderInsertHeader_(headerPayload);
-    const soRow = soInsert && soInsert[0];
-    if (!soRow?.id) throw new Error('Manual sales order creation failed');
-    soId = String(soRow.id);
+    throw new Error('Manual billing placeholders cannot be reused. Create a fresh manual billing reference.');
   }
+  const soInsert = _salesOrderInsertHeader_(headerPayload);
+  const soRow = soInsert && soInsert[0];
+  if (!soRow?.id) throw new Error('Manual sales order creation failed');
+  soId = String(soRow.id);
 
   const lineRows = _billingManualSalesOrderLineRows_(opts.manualLines, opts.selectedBillTo?.state || '').map(function(row) {
     return Object.assign({ so_id: soId }, row);
@@ -25826,8 +26843,9 @@ function _billingExtractReusableManualSo_(invoiceLines) {
     return String(row.so_id || '').trim();
   }).filter(Boolean))];
   if (ids.length !== 1) return { soId: '', soNumber: '' };
-  const rows = _supabaseSelectByKeyInBatches_('sales_orders', 'id,so_number,order_prefix', 'id', ids) || [];
+  const rows = _supabaseSelectByKeyInBatches_('sales_orders', 'id,so_number,order_prefix,sales_type', 'id', ids) || [];
   const so = rows[0] || {};
+  if (!_billingIsSyntheticManualSalesOrder_(so)) return { soId: '', soNumber: '' };
   return {
     soId: String(so.id || '').trim(),
     soNumber: String(so.so_number || '').trim()
@@ -26753,6 +27771,13 @@ function billingExportDocumentRegisterExcel(params, token) {
   });
 }
 
+function _billingIsSyntheticManualSalesOrder_(row) {
+  const soNumber = String(row && (row.so_number || row.soNumber) || '').trim().toUpperCase();
+  const orderPrefix = String(row && (row.order_prefix || row.orderPrefix) || '').trim().toUpperCase();
+  const salesType = String(row && (row.sales_type || row.salesType) || '').trim().toUpperCase();
+  return /^MB[\/-]/.test(soNumber) && (orderPrefix === 'MB' || salesType === 'MANUAL_BILLING');
+}
+
 function _billingCollectSyntheticManualSalesOrders_(lines) {
   const manualSoIds = [...new Set((Array.isArray(lines) ? lines : []).map(function(row) {
     return String(row && row.so_id || '').trim();
@@ -26760,14 +27785,25 @@ function _billingCollectSyntheticManualSalesOrders_(lines) {
   const manualSoMap = {};
   if (!manualSoIds.length) return manualSoMap;
   (_supabaseSelectByKeyInBatches_('sales_orders', 'id,so_number,order_prefix,sales_type', 'id', manualSoIds) || []).forEach(function(row) {
-    const isManual = String(row.order_prefix || '').toUpperCase() === 'MB' || String(row.sales_type || '').toUpperCase() === 'MANUAL_BILLING';
-    if (isManual) manualSoMap[String(row.id || '')] = row;
+    if (_billingIsSyntheticManualSalesOrder_(row)) manualSoMap[String(row.id || '')] = row;
   });
   return manualSoMap;
 }
 
 function _billingDeleteSyntheticManualSalesOrders_(manualSoMap) {
   Object.keys(manualSoMap || {}).forEach(function(soId) {
+    const row = manualSoMap[soId] || {};
+    if (!_billingIsSyntheticManualSalesOrder_(row)) return;
+    try {
+      const linked = supabaseSelect('invoice_lines', {
+        select: 'id',
+        filters: { so_id: 'eq.' + soId },
+        limit: 1
+      }) || [];
+      if (linked.length) return;
+    } catch (err) {
+      return;
+    }
     try {
       supabaseDelete('sales_order_lines', { so_id: 'eq.' + soId });
     } catch (err) {}
@@ -27266,10 +28302,9 @@ function _billingUpdateManualInvoiceDraft_(invoiceId, inv, normalized, token) {
     ship_to_state: selectedShipTo.state || ''
   }, optionalHeaderFields);
 
-  const reusableManualSo = _billingExtractReusableManualSo_(_invLoadInvoice_(invoiceId).lines || []);
+  const previousInvoiceLines = _invLoadInvoice_(invoiceId).lines || [];
+  const previousManualSoMap = _billingCollectSyntheticManualSalesOrders_(previousInvoiceLines);
   const manualSo = _billingCreateOrUpdateManualSalesOrder_({
-    soId: reusableManualSo.soId,
-    soNumber: reusableManualSo.soNumber,
     normalized: normalized,
     invoiceNo: inv.invoice_no || '',
     invoiceDate: normalized.invoiceDate.toISOString().slice(0, 10),
@@ -27282,13 +28317,12 @@ function _billingUpdateManualInvoiceDraft_(invoiceId, inv, normalized, token) {
     igstTotal: igstTotal,
     grandTotal: grandTotal
   });
-  supabaseDelete('invoice_lines', { invoice_id: 'eq.' + invoiceId });
   const optionalLineFields = ['so_number','line_no','unit','gst_pct','division','taxable_amount','source_mode','dispatch_qty_snapshot','ordered_qty_snapshot','billed_qty_snapshot'];
-  manualSo.lines.forEach(function(row) {
+  const replacementLines = manualSo.lines.map(function(row) {
     const tax = isChallan
       ? { cgstPct:0, sgstPct:0, igstPct:0 }
       : _billingCalcTaxSplit_(selectedBillTo.state, row.gstPct, row.taxableAmount);
-    const linePayload = {
+    return {
       invoice_id: invoiceId,
       so_id: row.soId,
       so_line_id: row.soLineId || null,
@@ -27316,8 +28350,21 @@ function _billingUpdateManualInvoiceDraft_(invoiceId, inv, normalized, token) {
       ordered_qty_snapshot: row.qty,
       billed_qty_snapshot: 0
     };
-    _billingInsertWithFallback_('invoice_lines', linePayload, optionalLineFields);
   });
+  try {
+    _billingReplaceInvoiceLines_(invoiceId, replacementLines, optionalLineFields);
+  } catch (err) {
+    const failedManualSoMap = {};
+    failedManualSoMap[String(manualSo.soId || '')] = {
+      id: manualSo.soId,
+      so_number: manualSo.soNumber,
+      order_prefix: 'MB',
+      sales_type: 'MANUAL_BILLING'
+    };
+    _billingDeleteSyntheticManualSalesOrders_(failedManualSoMap);
+    throw err;
+  }
+  _billingDeleteSyntheticManualSalesOrders_(previousManualSoMap);
   return { ok:true, invoiceId: invoiceId, invoiceNo: inv.invoice_no || '', documentType: documentType, status:'DRAFT', printUrl:_billingBuildPrintUrl_(invoiceId, token, documentType) };
 }
 
@@ -30658,6 +31705,7 @@ this.purchaseShortClosePO = purchaseShortClosePO;
 this.purchaseShortClosePOLines = purchaseShortClosePOLines;
 this.purchaseReceivePOLine = purchaseReceivePOLine;
 this.purchaseReceiveArtworkPOLine = purchaseReceiveArtworkPOLine;
+this.purchaseUpdateArtworkPOReceipt = purchaseUpdateArtworkPOReceipt;
 this.purchaseReceiveArtworkPOBulk = purchaseReceiveArtworkPOBulk;
 this.purchaseGetPOPrintData = purchaseGetPOPrintData;
 this.purchaseDashboardSummaryJSON = purchaseDashboardSummaryJSON;
@@ -31138,6 +32186,11 @@ this.adminSaveRolePermissions = adminSaveRolePermissions;
 this.adminListMachineHourRates = adminListMachineHourRates;
 this.adminSaveMachineHourRate = adminSaveMachineHourRate;
 this.adminDeactivateMachineHourRate = adminDeactivateMachineHourRate;
+this.adminSalesListSetup = adminSalesListSetup;
+this.adminSalesSaveMonthlyTarget = adminSalesSaveMonthlyTarget;
+this.adminSalesBulkSaveMonthlyTargets = adminSalesBulkSaveMonthlyTargets;
+this.adminSalesSaveClientBenchmark = adminSalesSaveClientBenchmark;
+this.adminSalesBulkSaveClientBenchmarks = adminSalesBulkSaveClientBenchmarks;
 this.checklistGetMyTasks = checklistGetMyTasks;
 this.checklistMarkDone = checklistMarkDone;
 this.checklistGetBlockingStatus = checklistGetBlockingStatus;
@@ -32234,15 +33287,16 @@ function _reportsSectionJobProfitability_(token, params) {
   const filters = _reportsNormalizeFilters_(params);
   const processCostRows = _reportsJobProcessCostRows_(filters);
   const processCostMaps = _reportsBuildProcessCostMaps_(processCostRows);
-  const rows = _reportsSelectAll_('v_report_job_profitability_phase1', {
+  const rows = _reportsSelectAll_('v_report_job_profitability_complete', {
     filters: _reportsApplyDateFilterToQuery_(filters, 'so_date'),
     order: 'so_date.desc,so_number.desc,line_no.asc,job_reference.asc'
   }).map(function(row) {
-    const cost = processCostMaps.byJob[_reportsProcessCostKey_(row.so_line_id || '', row.job_key || '')] || {};
-    const processHours = _reportsSafeNumber_(cost.processHours);
-    const processCost = _reportsSafeNumber_(cost.processCost);
+    const processHours = _reportsSafeNumber_(row.process_hours);
+    const processCost = _reportsSafeNumber_(row.process_cost);
     const actualCostTillDate = _reportsSafeNumber_(row.actual_cost_till_date);
-    const completeCostTillDate = _reportsRoundNumber_(actualCostTillDate + processCost, 2);
+    const completeCostTillDate = row.complete_cost_till_date == null
+      ? _reportsRoundNumber_(actualCostTillDate + processCost, 2)
+      : _reportsSafeNumber_(row.complete_cost_till_date);
     const producedGoodsValue = _reportsSafeNumber_(row.produced_goods_value);
     const orderValue = _reportsSafeNumber_(row.order_value);
     const billedValue = _reportsSafeNumber_(row.billed_value);
@@ -32282,9 +33336,9 @@ function _reportsSectionJobProfitability_(token, params) {
       actualCostTillDate: actualCostTillDate,
       processHours: processHours,
       processCost: processCost,
-      processCostStatus: cost.processCostStatus || 'NO_COST',
-      processHoursSource: cost.processHoursSource || '',
-      processCostMachines: cost.machineList || '',
+      processCostStatus: row.process_cost_status || 'NO_COST',
+      processHoursSource: row.process_hours_source || '',
+      processCostMachines: row.process_cost_machines || '',
       completeCostTillDate: completeCostTillDate,
       latestProductionStage: row.latest_production_stage || '',
       latestProductionMachine: row.latest_production_machine || '',
@@ -32298,12 +33352,12 @@ function _reportsSectionJobProfitability_(token, params) {
       profitPctOnOrderValue: _reportsSafeNumber_(row.profit_pct_on_order_value),
       profitOnBilledValue: _reportsSafeNumber_(row.profit_on_billed_value),
       profitPctOnBilledValue: _reportsSafeNumber_(row.profit_pct_on_billed_value),
-      profitOnProducedComplete: _reportsRoundNumber_(producedGoodsValue - completeCostTillDate, 2),
-      profitPctOnProducedComplete: producedGoodsValue > 0 ? _reportsRoundNumber_(((producedGoodsValue - completeCostTillDate) / producedGoodsValue) * 100, 2) : 0,
-      profitOnOrderComplete: _reportsRoundNumber_(orderValue - completeCostTillDate, 2),
-      profitPctOnOrderComplete: orderValue > 0 ? _reportsRoundNumber_(((orderValue - completeCostTillDate) / orderValue) * 100, 2) : 0,
-      profitOnBilledComplete: _reportsRoundNumber_(billedValue - completeCostTillDate, 2),
-      profitPctOnBilledComplete: billedValue > 0 ? _reportsRoundNumber_(((billedValue - completeCostTillDate) / billedValue) * 100, 2) : 0,
+      profitOnProducedComplete: row.profit_on_produced_complete == null ? _reportsRoundNumber_(producedGoodsValue - completeCostTillDate, 2) : _reportsSafeNumber_(row.profit_on_produced_complete),
+      profitPctOnProducedComplete: row.profit_pct_on_produced_complete == null ? (producedGoodsValue > 0 ? _reportsRoundNumber_(((producedGoodsValue - completeCostTillDate) / producedGoodsValue) * 100, 2) : 0) : _reportsSafeNumber_(row.profit_pct_on_produced_complete),
+      profitOnOrderComplete: row.profit_on_order_complete == null ? _reportsRoundNumber_(orderValue - completeCostTillDate, 2) : _reportsSafeNumber_(row.profit_on_order_complete),
+      profitPctOnOrderComplete: row.profit_pct_on_order_complete == null ? (orderValue > 0 ? _reportsRoundNumber_(((orderValue - completeCostTillDate) / orderValue) * 100, 2) : 0) : _reportsSafeNumber_(row.profit_pct_on_order_complete),
+      profitOnBilledComplete: row.profit_on_billed_complete == null ? _reportsRoundNumber_(billedValue - completeCostTillDate, 2) : _reportsSafeNumber_(row.profit_on_billed_complete),
+      profitPctOnBilledComplete: row.profit_pct_on_billed_complete == null ? (billedValue > 0 ? _reportsRoundNumber_(((billedValue - completeCostTillDate) / billedValue) * 100, 2) : 0) : _reportsSafeNumber_(row.profit_pct_on_billed_complete),
       invoiceNos: row.invoice_nos || '',
       firstInvoiceDate: row.first_invoice_date || '',
       lastInvoiceDate: row.last_invoice_date || '',
@@ -36067,6 +37121,618 @@ function reportsExportWorkbookXlsx(payload, token) {
 this.reportsGetOverviewData = reportsGetOverviewData;
 this.reportsGetSectionData = reportsGetSectionData;
 this.reportsExportWorkbookXlsx = reportsExportWorkbookXlsx;
+
+// ===== LIVE SALES COMMAND CENTER =====
+function _salesCommandNumber_(value) {
+  const number = Number(value || 0);
+  return isFinite(number) ? number : 0;
+}
+
+function _salesCommandMapRep_(row) {
+  return {
+    salesRep: row.sales_rep || 'UNASSIGNED',
+    orderValueToday: _salesCommandNumber_(row.order_value_today),
+    orderValueWtd: _salesCommandNumber_(row.order_value_wtd),
+    orderValueMtd: _salesCommandNumber_(row.order_value_mtd),
+    priorOrderValue: _salesCommandNumber_(row.order_value_prior_month),
+    billingValueToday: _salesCommandNumber_(row.billing_value_today),
+    billingValueWtd: _salesCommandNumber_(row.billing_value_wtd),
+    billingValueMtd: _salesCommandNumber_(row.billing_value_mtd),
+    priorBillingValue: _salesCommandNumber_(row.billing_value_prior_month),
+    ordersToday: _salesCommandNumber_(row.orders_today),
+    ordersWtd: _salesCommandNumber_(row.orders_wtd),
+    ordersMtd: _salesCommandNumber_(row.orders_mtd),
+    activeClientsToday: _salesCommandNumber_(row.active_clients_today),
+    activeClientsWtd: _salesCommandNumber_(row.active_clients_wtd),
+    activeClientsMtd: _salesCommandNumber_(row.active_clients_mtd),
+    backlogValue: _salesCommandNumber_(row.backlog_value),
+    overdueValue: _salesCommandNumber_(row.overdue_value),
+    overdueLines: _salesCommandNumber_(row.overdue_lines),
+    orderTarget: _salesCommandNumber_(row.order_target_value),
+    billingTarget: _salesCommandNumber_(row.billing_target_value),
+    dailyOrderTarget: _salesCommandNumber_(row.daily_order_target_value),
+    wtdOrderTarget: _salesCommandNumber_(row.wtd_order_target_value),
+    mtdRunRateTarget: _salesCommandNumber_(row.mtd_run_rate_target_value),
+    orderTargetDeficit: _salesCommandNumber_(row.order_target_deficit),
+    billingTargetDeficit: _salesCommandNumber_(row.billing_target_deficit),
+    orderTargetPct: row.order_target_pct == null ? null : _salesCommandNumber_(row.order_target_pct),
+    billingTargetPct: row.billing_target_pct == null ? null : _salesCommandNumber_(row.billing_target_pct),
+    dailyOrderTargetHit: row.daily_order_target_hit === true || String(row.daily_order_target_hit || '').toLowerCase() === 'true',
+    wtdOrderTargetHit: row.wtd_order_target_hit === true || String(row.wtd_order_target_hit || '').toLowerCase() === 'true',
+    monthlyOrderTargetHit: row.monthly_order_target_hit === true || String(row.monthly_order_target_hit || '').toLowerCase() === 'true',
+    orderGrowthPct: row.order_growth_pct == null ? null : _salesCommandNumber_(row.order_growth_pct),
+    lastActivityAt: row.last_activity_at || ''
+  };
+}
+
+function _salesCommandMapClient_(row) {
+  return {
+    clientCode: row.client_code || '',
+    clientName: row.client_name || row.client_code || 'UNASSIGNED',
+    salesReps: row.sales_reps || '',
+    orderValueToday: _salesCommandNumber_(row.order_value_today),
+    orderValueWtd: _salesCommandNumber_(row.order_value_wtd),
+    orderValueMtd: _salesCommandNumber_(row.order_value_mtd),
+    priorOrderValue: _salesCommandNumber_(row.order_value_prior_month),
+    billingValueToday: _salesCommandNumber_(row.billing_value_today),
+    billingValueWtd: _salesCommandNumber_(row.billing_value_wtd),
+    billingValueMtd: _salesCommandNumber_(row.billing_value_mtd),
+    ordersToday: _salesCommandNumber_(row.orders_today),
+    ordersWtd: _salesCommandNumber_(row.orders_wtd),
+    ordersMtd: _salesCommandNumber_(row.orders_mtd),
+    backlogValue: _salesCommandNumber_(row.backlog_value),
+    overdueValue: _salesCommandNumber_(row.overdue_value),
+    overdueLines: _salesCommandNumber_(row.overdue_lines),
+    historicalMaxMonthlyValue: _salesCommandNumber_(row.historical_max_monthly_value),
+    historicalAvgMonthlyValue: _salesCommandNumber_(row.historical_avg_monthly_value),
+    historicalTopRank: row.historical_top_rank == null ? null : _salesCommandNumber_(row.historical_top_rank),
+    baselinePeriodLabel: row.baseline_period_label || '',
+    declineAlertPct: _salesCommandNumber_(row.decline_alert_pct || 25),
+    benchmarkActive: row.benchmark_active === true || String(row.benchmark_active || '').toLowerCase() === 'true',
+    newBenchmarkFlag: row.new_benchmark_flag === true || String(row.new_benchmark_flag || '').toLowerCase() === 'true',
+    runningAverageDeclineFlag: row.running_average_decline_flag === true || String(row.running_average_decline_flag || '').toLowerCase() === 'true',
+    vsAveragePct: row.vs_average_pct == null ? null : _salesCommandNumber_(row.vs_average_pct),
+    benchmarkGapValue: row.benchmark_gap_value == null ? null : _salesCommandNumber_(row.benchmark_gap_value),
+    orderGrowthPct: row.order_growth_pct == null ? null : _salesCommandNumber_(row.order_growth_pct),
+    lastActivityAt: row.last_activity_at || ''
+  };
+}
+
+function _salesCommandPeriodTotals_(reps, key) {
+  const suffix = String(key || 'Mtd');
+  const orderKey = 'orderValue' + suffix;
+  const billingKey = 'billingValue' + suffix;
+  const ordersKey = 'orders' + suffix;
+  return (reps || []).reduce(function(out, row) {
+    out.orderValue += _salesCommandNumber_(row[orderKey]);
+    out.billingValue += _salesCommandNumber_(row[billingKey]);
+    out.orderCount += _salesCommandNumber_(row[ordersKey]);
+    return out;
+  }, { orderValue: 0, billingValue: 0, orderCount: 0 });
+}
+
+function _salesCommandDivisionLabel_(value) {
+  const text = String(value || '').trim();
+  return text || 'UNASSIGNED';
+}
+
+function _salesCommandDateInRange_(dateText, fromDate, toDate) {
+  const text = String(dateText || '').slice(0, 10);
+  return !!text && text >= fromDate && text <= toDate;
+}
+
+function _salesCommandEmptyDivision_(name) {
+  return {
+    division: name,
+    orderValueToday: 0,
+    orderValueWtd: 0,
+    orderValueMtd: 0,
+    billingValueToday: 0,
+    billingValueWtd: 0,
+    billingValueMtd: 0,
+    ordersToday: 0,
+    ordersWtd: 0,
+    ordersMtd: 0,
+    billedLinesToday: 0,
+    billedLinesWtd: 0,
+    billedLinesMtd: 0,
+    backlogValue: 0,
+    openQty: 0,
+    openLines: 0
+  };
+}
+
+function _salesCommandBuildDivisions_(orderRows, billingRows, openRows, bounds) {
+  const map = {};
+  function get(name) {
+    const key = _salesCommandDivisionLabel_(name);
+    if (!map[key]) map[key] = _salesCommandEmptyDivision_(key);
+    return map[key];
+  }
+  (orderRows || []).forEach(function(row) {
+    const division = get(row.division);
+    const dateText = String(row.so_date || '').slice(0, 10);
+    const value = _salesCommandNumber_(row.order_value);
+    if (_salesCommandDateInRange_(dateText, bounds.today, bounds.today)) {
+      division.orderValueToday += value;
+      division.ordersToday += 1;
+    }
+    if (_salesCommandDateInRange_(dateText, bounds.weekStart, bounds.today)) {
+      division.orderValueWtd += value;
+      division.ordersWtd += 1;
+    }
+    if (_salesCommandDateInRange_(dateText, bounds.monthStart, bounds.today)) {
+      division.orderValueMtd += value;
+      division.ordersMtd += 1;
+    }
+  });
+  (billingRows || []).forEach(function(row) {
+    const division = get(row.division);
+    const dateText = String(row.invoice_date || '').slice(0, 10);
+    const value = _salesCommandNumber_(row.billed_value);
+    if (_salesCommandDateInRange_(dateText, bounds.today, bounds.today)) {
+      division.billingValueToday += value;
+      division.billedLinesToday += 1;
+    }
+    if (_salesCommandDateInRange_(dateText, bounds.weekStart, bounds.today)) {
+      division.billingValueWtd += value;
+      division.billedLinesWtd += 1;
+    }
+    if (_salesCommandDateInRange_(dateText, bounds.monthStart, bounds.today)) {
+      division.billingValueMtd += value;
+      division.billedLinesMtd += 1;
+    }
+  });
+  (openRows || []).forEach(function(row) {
+    const division = get(row.division);
+    division.backlogValue += _salesCommandNumber_(row.open_order_value);
+    division.openQty += _salesCommandNumber_(row.operational_open_qty);
+    division.openLines += 1;
+  });
+  return Object.keys(map).map(function(key) {
+    return map[key];
+  }).filter(function(row) {
+    return row.orderValueMtd || row.billingValueMtd || row.backlogValue || row.openLines;
+  }).sort(function(a, b) {
+    return _salesCommandNumber_(b.orderValueMtd) - _salesCommandNumber_(a.orderValueMtd) ||
+      _salesCommandNumber_(b.billingValueMtd) - _salesCommandNumber_(a.billingValueMtd) ||
+      a.division.localeCompare(b.division);
+  });
+}
+
+function _salesCommandBuildInsights_(reps, clients, totals) {
+  const insights = [];
+  const targetReps = reps.filter(function(row) { return row.orderTarget > 0; });
+  const biggestTargetGap = targetReps.slice().sort(function(a, b) {
+    return b.orderTargetDeficit - a.orderTargetDeficit;
+  })[0];
+  if (biggestTargetGap && biggestTargetGap.orderTargetDeficit > 0) {
+    insights.push({
+      severity: biggestTargetGap.orderTargetPct != null && biggestTargetGap.orderTargetPct < 60 ? 'critical' : 'warning',
+      title: 'Target recovery: ' + biggestTargetGap.salesRep,
+      detail: 'Largest order-booking gap at ' + Math.round(biggestTargetGap.orderTargetPct || 0) + '% of monthly target.',
+      value: biggestTargetGap.orderTargetDeficit,
+      valueType: 'money'
+    });
+  }
+
+  const biggestRepOverdue = reps.slice().sort(function(a, b) {
+    return b.overdueValue - a.overdueValue;
+  })[0];
+  if (biggestRepOverdue && biggestRepOverdue.overdueValue > 0) {
+    insights.push({
+      severity: 'critical',
+      title: 'Delivery and billing focus: ' + biggestRepOverdue.salesRep,
+      detail: biggestRepOverdue.overdueLines + ' overdue order lines need closure.',
+      value: biggestRepOverdue.overdueValue,
+      valueType: 'money'
+    });
+  }
+
+  const decliningClient = clients.filter(function(row) {
+    return row.priorOrderValue > 0 && row.orderGrowthPct != null && row.orderGrowthPct < -15;
+  }).sort(function(a, b) {
+    return a.orderGrowthPct - b.orderGrowthPct;
+  })[0];
+  if (decliningClient) {
+    insights.push({
+      severity: 'warning',
+      title: 'Client order slowdown: ' + decliningClient.clientName,
+      detail: 'Current month booking is ' + Math.abs(Math.round(decliningClient.orderGrowthPct)) + '% below the prior month.',
+      value: decliningClient.orderGrowthPct,
+      valueType: 'percent'
+    });
+  }
+
+  const topClient = clients.slice().sort(function(a, b) {
+    return b.orderValueMtd - a.orderValueMtd;
+  })[0];
+  const concentration = totals.orderValueMtd > 0 && topClient
+    ? topClient.orderValueMtd / totals.orderValueMtd * 100
+    : 0;
+  if (topClient && concentration >= 35) {
+    insights.push({
+      severity: 'info',
+      title: 'Client concentration',
+      detail: topClient.clientName + ' contributes ' + Math.round(concentration) + '% of current-month order booking.',
+      value: concentration,
+      valueType: 'percent'
+    });
+  }
+
+  if (!targetReps.length) {
+    insights.push({
+      severity: 'info',
+      title: 'Monthly targets not loaded',
+      detail: 'Add salesperson targets to activate target attainment and deficit ranking.',
+      value: 0,
+      valueType: 'none'
+    });
+  }
+
+  if (!insights.length) {
+    insights.push({
+      severity: 'good',
+      title: 'No major exception detected',
+      detail: 'Target, growth, and overdue checks are currently within the configured thresholds.',
+      value: 0,
+      valueType: 'none'
+    });
+  }
+  const todayLeader = reps.slice().sort(function(a, b) {
+    return b.orderValueToday - a.orderValueToday;
+  })[0];
+  if (todayLeader && todayLeader.orderValueToday > 0) {
+    insights.push({
+      severity: 'good',
+      title: 'Today momentum: ' + todayLeader.salesRep,
+      detail: todayLeader.ordersToday + ' orders booked today. Keep conversion follow-up active while the run rate is visible.',
+      value: todayLeader.orderValueToday,
+      valueType: 'money'
+    });
+  }
+
+  const highBacklogClient = clients.slice().sort(function(a, b) {
+    return b.backlogValue - a.backlogValue;
+  })[0];
+  if (highBacklogClient && highBacklogClient.backlogValue > 0) {
+    insights.push({
+      severity: highBacklogClient.overdueValue > 0 ? 'critical' : 'warning',
+      title: 'Client backlog watch: ' + highBacklogClient.clientName,
+      detail: 'Highest actionable open order value. Coordinate sales, dispatch, and billing closure.',
+      value: highBacklogClient.backlogValue,
+      valueType: 'money'
+    });
+  }
+
+  const recordClient = clients.filter(function(row) {
+    return row.newBenchmarkFlag;
+  }).sort(function(a, b) {
+    return b.orderValueMtd - a.orderValueMtd;
+  })[0];
+  if (recordClient) {
+    insights.push({
+      severity: 'good',
+      title: 'New client benchmark: ' + recordClient.clientName,
+      detail: 'This client has crossed the historical monthly max. Celebrate and protect service quality.',
+      value: recordClient.orderValueMtd,
+      valueType: 'money'
+    });
+  }
+
+  const declineClient = clients.filter(function(row) {
+    return row.runningAverageDeclineFlag;
+  }).sort(function(a, b) {
+    return (a.vsAveragePct || 0) - (b.vsAveragePct || 0);
+  })[0];
+  if (declineClient) {
+    insights.push({
+      severity: 'critical',
+      title: 'Running average decline: ' + declineClient.clientName,
+      detail: 'Current month is ' + Math.abs(Math.round(declineClient.vsAveragePct || 0)) + '% below historical average. Sales follow-up recommended.',
+      value: declineClient.vsAveragePct,
+      valueType: 'percent'
+    });
+  }
+
+  return insights.slice(0, 8);
+}
+
+function _salesCommandCelebrations_(reps, clients) {
+  const out = [];
+  (reps || []).forEach(function(row) {
+    if (row.dailyOrderTargetHit) {
+      out.push({
+        id: 'CELEBRATE:DAILY:' + row.salesRep,
+        type: 'CELEBRATION',
+        level: 'daily',
+        title: row.salesRep + ' hit the daily target',
+        detail: 'Daily score ' + row.orderValueToday + ' against target ' + row.dailyOrderTarget + '.',
+        value: row.orderValueToday,
+        subject: row.salesRep
+      });
+    }
+    if (row.wtdOrderTargetHit) {
+      out.push({
+        id: 'CELEBRATE:WTD:' + row.salesRep,
+        type: 'CELEBRATION',
+        level: 'weekly',
+        title: row.salesRep + ' crossed the WTD target',
+        detail: 'Week score ' + row.orderValueWtd + ' against WTD target ' + row.wtdOrderTarget + '.',
+        value: row.orderValueWtd,
+        subject: row.salesRep
+      });
+    }
+    if (row.monthlyOrderTargetHit) {
+      out.push({
+        id: 'CELEBRATE:MONTH:' + row.salesRep,
+        type: 'CELEBRATION',
+        level: 'monthly',
+        title: row.salesRep + ' achieved the monthly target',
+        detail: 'Monthly score ' + row.orderValueMtd + ' against target ' + row.orderTarget + '.',
+        value: row.orderValueMtd,
+        subject: row.salesRep
+      });
+    }
+  });
+  (clients || []).forEach(function(row) {
+    if (row.newBenchmarkFlag) {
+      out.push({
+        id: 'CELEBRATE:CLIENT_RECORD:' + row.clientCode,
+        type: 'CLIENT_RECORD',
+        level: 'record',
+        title: row.clientName + ' set a new monthly benchmark',
+        detail: 'Current score ' + row.orderValueMtd + ' crossed historical max ' + row.historicalMaxMonthlyValue + '.',
+        value: row.orderValueMtd,
+        subject: row.clientName
+      });
+    }
+  });
+  return out.sort(function(a, b) { return _salesCommandNumber_(b.value) - _salesCommandNumber_(a.value); }).slice(0, 16);
+}
+
+function salesCommandGetDashboard(params, token) {
+  _reportsRequireSession_(token);
+  const cacheKey = _reportsCacheKey_('SALES_COMMAND_CENTER_V3', {});
+  const cached = _getCachedJson_(cacheKey);
+  if (cached) return cached;
+
+  let repRows;
+  let clientRows;
+  let activityRows;
+  let overdueRows;
+  let flowRows;
+  let flowOpenRows;
+  let divisionOrderRows;
+  let divisionBillingRows;
+  const tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+  const now = new Date();
+  const today = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
+  const monthStartDate = new Date(now.getFullYear(), now.getMonth(), 1);
+  const weekStartDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  weekStartDate.setDate(weekStartDate.getDate() - ((weekStartDate.getDay() + 6) % 7));
+  const monthStart = Utilities.formatDate(monthStartDate, tz, 'yyyy-MM-dd');
+  const weekStart = Utilities.formatDate(weekStartDate, tz, 'yyyy-MM-dd');
+  const divisionQueryStart = weekStart < monthStart ? weekStart : monthStart;
+  try {
+    repRows = supabaseSelect('v_sales_dashboard_rep_summary', {
+      order: 'order_value_mtd.desc,sales_rep.asc',
+      limit: 100
+    }) || [];
+    clientRows = supabaseSelect('v_sales_dashboard_client_summary', {
+      order: 'order_value_mtd.desc,client_name.asc',
+      limit: 200
+    }) || [];
+    activityRows = supabaseSelect('v_sales_dashboard_activity_feed', {
+      order: 'event_at.desc',
+      limit: 40
+    }) || [];
+    overdueRows = supabaseSelect('v_sales_live_line_snapshot', {
+      select: 'so_number,line_no,sales_rep,client_name,product_name,due_date,overdue_days,open_order_value,operational_open_qty,last_activity_at',
+      filters: {
+        is_overdue: 'eq.true',
+        operational_open_qty: 'gt.0'
+      },
+      order: 'overdue_days.desc,open_order_value.desc',
+      limit: 30
+    }) || [];
+    flowOpenRows = _supabaseSelectAllUnbounded_('v_sales_live_line_snapshot', {
+      select: 'so_line_id,so_number,line_no,division,order_qty,operational_open_qty,dispatched_qty,billed_qty,open_order_value,closure_status',
+      filters: {
+        closure_status: 'eq.OPEN',
+        operational_open_qty: 'gt.0'
+      },
+      order: 'last_activity_at.desc'
+    }, 1000) || [];
+    flowRows = _reportsSelectAll_('v_report_order_line_traceability', {
+      select: 'so_line_id,so_number,line_no,order_qty,accounts_status,business_status,artwork_status,wo_count,packed_qty,dispatched_qty,billed_qty',
+      order: 'so_date.desc,so_number.desc,line_no.asc'
+    }) || [];
+    divisionOrderRows = _supabaseSelectAllUnbounded_('v_sales_live_line_snapshot', {
+      select: 'division,so_date,order_value',
+      filters: {
+        so_date: 'gte.' + divisionQueryStart
+      },
+      order: 'so_date.desc'
+    }, 1000) || [];
+    divisionBillingRows = _reportsSelectAll_('v_report_billing_register', {
+      select: 'division,invoice_date,billed_value,document_type,invoice_status,invoice_no',
+      filters: {
+        invoice_date: 'gte.' + divisionQueryStart,
+        invoice_status: 'eq.POSTED',
+        document_type: 'eq.INVOICE'
+      },
+      order: 'invoice_date.desc'
+    }) || [];
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'v_sales_dashboard_rep_summary') ||
+        _supabaseRelationMissing_(err, 'v_sales_dashboard_client_summary') ||
+        _supabaseRelationMissing_(err, 'v_sales_dashboard_activity_feed') ||
+        _supabaseRelationMissing_(err, 'v_sales_live_line_snapshot')) {
+      throw new Error('Live Sales Command Center schema is not installed. Apply supabase/sales_live_command_center_20260615.sql in Supabase first.');
+    }
+    throw err;
+  }
+
+  const reps = repRows.map(_salesCommandMapRep_);
+  const clients = clientRows.map(_salesCommandMapClient_);
+  const divisions = _salesCommandBuildDivisions_(
+    divisionOrderRows,
+    divisionBillingRows,
+    flowOpenRows,
+    { today: today, weekStart: weekStart, monthStart: monthStart }
+  );
+  const totals = reps.reduce(function(out, row) {
+    out.orderValueMtd += row.orderValueMtd;
+    out.billingValueMtd += row.billingValueMtd;
+    out.backlogValue += row.backlogValue;
+    out.overdueValue += row.overdueValue;
+    out.orderTarget += row.orderTarget;
+    out.orderTargetDeficit += row.orderTargetDeficit;
+    out.ordersMtd += row.ordersMtd;
+    return out;
+  }, {
+    orderValueMtd: 0,
+    billingValueMtd: 0,
+    backlogValue: 0,
+    overdueValue: 0,
+    orderTarget: 0,
+    orderTargetDeficit: 0,
+    ordersMtd: 0
+  });
+  totals.orderTargetPct = totals.orderTarget > 0
+    ? Math.round(totals.orderValueMtd / totals.orderTarget * 1000) / 10
+    : null;
+
+  const activities = activityRows.map(function(row) {
+    return {
+      id: row.event_id || '',
+      at: row.event_at || '',
+      type: row.event_type || '',
+      referenceNo: row.reference_no || '',
+      salesRep: row.sales_rep || 'UNASSIGNED',
+      clientName: row.client_name || row.client_code || 'UNASSIGNED',
+      value: _salesCommandNumber_(row.event_value),
+      headline: row.headline || ''
+    };
+  });
+  const overdueOrders = overdueRows.map(function(row) {
+    return {
+      soNumber: row.so_number || '',
+      lineNo: row.line_no == null ? '' : String(row.line_no),
+      salesRep: row.sales_rep || 'UNASSIGNED',
+      clientName: row.client_name || '',
+      productName: row.product_name || '',
+      dueDate: row.due_date || '',
+      overdueDays: _salesCommandNumber_(row.overdue_days),
+      openValue: _salesCommandNumber_(row.open_order_value),
+      billingGapQty: _salesCommandNumber_(row.operational_open_qty),
+      lastActivityAt: row.last_activity_at || ''
+    };
+  });
+  const flowOrder = [
+    { key: 'SALES_APPROVAL', label: 'Sales Approval' },
+    { key: 'ARTWORK', label: 'Artwork' },
+    { key: 'WO_PENDING', label: 'Work Order' },
+    { key: 'PRODUCTION_OR_PACKING', label: 'Production / Packing' },
+    { key: 'DISPATCH', label: 'Dispatch' },
+    { key: 'BILLING', label: 'Billing' },
+    { key: 'COMPLETED', label: 'Completed' }
+  ];
+  const flowMap = {};
+  flowOrder.forEach(function(stage) {
+    flowMap[stage.key] = { key: stage.key, label: stage.label, lineCount: 0, orderQty: 0 };
+  });
+  const openFlowMap = {};
+  (flowOpenRows || []).forEach(function(row) {
+    const idKey = String(row.so_line_id || '').trim();
+    const compositeKey = String(row.so_number || '').trim() + '||' + String(row.line_no == null ? '' : row.line_no).trim();
+    const mapped = {
+      orderQty: _salesCommandNumber_(row.order_qty),
+      operationalOpenQty: _salesCommandNumber_(row.operational_open_qty),
+      dispatchedQty: _salesCommandNumber_(row.dispatched_qty),
+      billedQty: _salesCommandNumber_(row.billed_qty),
+      openOrderValue: _salesCommandNumber_(row.open_order_value)
+    };
+    if (idKey) openFlowMap[idKey] = mapped;
+    if (compositeKey !== '||') openFlowMap[compositeKey] = mapped;
+  });
+  flowRows.forEach(function(row) {
+    const idKey = String(row.so_line_id || '').trim();
+    const compositeKey = String(row.so_number || '').trim() + '||' + String(row.line_no == null ? '' : row.line_no).trim();
+    const openLine = openFlowMap[idKey] || openFlowMap[compositeKey] || null;
+    if (!openLine || openLine.operationalOpenQty <= 0) return;
+    const state = _reportsLifecycleState_(Object.assign({}, row, {
+      order_qty: openLine.orderQty,
+      dispatched_qty: openLine.dispatchedQty,
+      billed_qty: openLine.billedQty
+    }));
+    if (!flowMap[state]) return;
+    flowMap[state].lineCount += 1;
+    flowMap[state].orderQty += openLine.operationalOpenQty;
+  });
+  const orderFlow = flowOrder.map(function(stage) {
+    return flowMap[stage.key];
+  });
+  const orderFlowMeta = {
+    scope: 'Open actionable order lines till date',
+    lineCount: (flowOpenRows || []).length,
+    orderQty: (flowOpenRows || []).reduce(function(sum, row) {
+      return sum + _salesCommandNumber_(row.operational_open_qty);
+    }, 0),
+    note: 'Excludes manual billing, cancelled, closed, short-closed and fully billed lines.'
+  };
+
+  const topRep = reps.slice().sort(function(a, b) {
+    return b.orderValueMtd - a.orderValueMtd;
+  })[0] || null;
+  const topClient = clients.slice().sort(function(a, b) {
+    return b.orderValueMtd - a.orderValueMtd;
+  })[0] || null;
+  const benchmarkTopClients = clients.filter(function(row) {
+    return row.benchmarkActive && row.historicalTopRank && row.historicalTopRank <= 20;
+  }).sort(function(a, b) {
+    return _salesCommandNumber_(a.historicalTopRank) - _salesCommandNumber_(b.historicalTopRank);
+  });
+  const celebrations = _salesCommandCelebrations_(reps, clients);
+  const result = {
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    periodLabel: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'MMMM yyyy'),
+    boardDateLabel: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd MMM yyyy'),
+    periods: {
+      today: _salesCommandPeriodTotals_(reps, 'Today'),
+      wtd: _salesCommandPeriodTotals_(reps, 'Wtd'),
+      mtd: _salesCommandPeriodTotals_(reps, 'Mtd')
+    },
+    totals: totals,
+    leaders: {
+      topSalesRep: topRep,
+      topClient: topClient
+    },
+    reps: reps,
+    clients: clients,
+    topClients: benchmarkTopClients.length ? benchmarkTopClients : clients.slice(0, 20),
+    currentTopClients: clients.slice(0, 20),
+    divisions: divisions,
+    celebrations: celebrations,
+    orderFlow: orderFlow,
+    orderFlowMeta: orderFlowMeta,
+    overdueOrders: overdueOrders,
+    activities: activities,
+    insights: _salesCommandBuildInsights_(reps, clients, totals)
+  };
+  result.snapshotId = _cacheKeyHash_('SALES_SNAPSHOT', JSON.stringify({
+    totals: result.totals,
+    reps: result.reps,
+    clients: result.clients,
+    activity: result.activities.slice(0, 10)
+  }));
+  _putCachedJson_(cacheKey, result, 10);
+  return result;
+}
+
+this.salesCommandGetDashboard = salesCommandGetDashboard;
 
 // ===== DEDICATED PLANNING MODULE =====
 function _planningCompositeKey_(soNumber, lineNo) {

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict NqMuXTpe0EaL4g7lCdt5PTPHNDWPfFt6snaptfBuxB9TU7BeGrwjjtaceor5Ktx
+\restrict d3XOIdxD2vwIauo1Igfz9MJzKnOXTcc27EZrOWbTBJAIk7m9YJRo2efCrCmPaVT
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.3
@@ -1873,6 +1873,153 @@ $$;
 
 
 --
+-- Name: delete_work_order_with_audit(text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.delete_work_order_with_audit(p_wo_number text, p_deleted_by text DEFAULT ''::text, p_reason text DEFAULT ''::text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $_$
+declare
+  v_wo public.work_orders%rowtype;
+  v_audit_id uuid;
+  v_so_numbers text[] := array[]::text[];
+  v_jobs jsonb := '[]'::jsonb;
+  v_materials jsonb := '[]'::jsonb;
+  v_routing jsonb := '[]'::jsonb;
+  v_production_entries jsonb := '[]'::jsonb;
+  v_inventory_reservations jsonb := '[]'::jsonb;
+  v_linked_samples jsonb := '[]'::jsonb;
+begin
+  select *
+  into v_wo
+  from public.work_orders
+  where wo_number = trim(coalesce(p_wo_number, ''))
+  for update;
+
+  if not found then
+    raise exception 'Work Order not found: %', p_wo_number;
+  end if;
+
+  if exists (
+    select 1
+    from public.inv_ledger il
+    where upper(coalesce(il.ref_type, '')) = 'ISSUE'
+      and trim(coalesce(il.ref_no, '')) = trim(v_wo.wo_number)
+      and coalesce(il.qty_out, 0) > 0
+  ) then
+    raise exception 'Work order % cannot be deleted because material has been issued against it.', v_wo.wo_number;
+  end if;
+
+  select
+    coalesce(array_agg(distinct woj.so_number) filter (where coalesce(woj.so_number, '') <> ''), array[]::text[]),
+    coalesce(jsonb_agg(to_jsonb(woj) order by woj.line_no, woj.id), '[]'::jsonb)
+  into v_so_numbers, v_jobs
+  from public.work_order_jobs woj
+  where woj.wo_id = v_wo.id;
+
+  select coalesce(jsonb_agg(to_jsonb(wom) order by wom.id), '[]'::jsonb)
+  into v_materials
+  from public.work_order_materials wom
+  where wom.wo_id = v_wo.id;
+
+  select coalesce(jsonb_agg(to_jsonb(wor) order by wor.sequence_no, wor.id), '[]'::jsonb)
+  into v_routing
+  from public.work_order_routing wor
+  where wor.wo_id = v_wo.id;
+
+  select coalesce(jsonb_agg(to_jsonb(pe) order by pe.created_at, pe.id), '[]'::jsonb)
+  into v_production_entries
+  from public.production_entries pe
+  where pe.wo_id = v_wo.id;
+
+  if to_regclass('public.inventory_reservations') is not null then
+    execute
+      'select coalesce(jsonb_agg(to_jsonb(ir)), ''[]''::jsonb)
+       from public.inventory_reservations ir
+       where ir.reference_type = ''WORK_ORDER'' and ir.reference_no = $1'
+      into v_inventory_reservations
+      using v_wo.wo_number;
+  end if;
+
+  if to_regclass('public.npd_sample_work_orders') is not null then
+    execute
+      'select coalesce(jsonb_agg(to_jsonb(nsw)), ''[]''::jsonb)
+       from public.npd_sample_work_orders nsw
+       where nsw.linked_wo_id = $1'
+      into v_linked_samples
+      using v_wo.id;
+  end if;
+
+  insert into public.work_order_deletion_audit_log (
+    wo_id,
+    wo_number,
+    wo_date,
+    wo_status,
+    work_order_type,
+    deleted_by,
+    deletion_reason,
+    deletion_status,
+    deleted_data,
+    so_numbers
+  )
+  values (
+    v_wo.id,
+    v_wo.wo_number,
+    v_wo.wo_date,
+    v_wo.status,
+    coalesce(v_wo.snapshot_json #>> '{jobDetails,type}', ''),
+    trim(coalesce(p_deleted_by, '')),
+    trim(coalesce(p_reason, '')),
+    'PENDING',
+    jsonb_build_object(
+      'work_order', to_jsonb(v_wo),
+      'jobs', v_jobs,
+      'materials', v_materials,
+      'routing', v_routing,
+      'production_entries', v_production_entries,
+      'inventory_reservations', v_inventory_reservations,
+      'linked_sample_work_orders', v_linked_samples
+    ),
+    v_so_numbers
+  )
+  returning id into v_audit_id;
+
+  if to_regclass('public.inventory_reservations') is not null then
+    execute
+      'delete from public.inventory_reservations
+       where reference_type = ''WORK_ORDER'' and reference_no = $1'
+      using v_wo.wo_number;
+  end if;
+
+  delete from public.work_order_routing where wo_id = v_wo.id;
+  delete from public.work_order_materials where wo_id = v_wo.id;
+  delete from public.work_order_jobs where wo_id = v_wo.id;
+  delete from public.work_orders where id = v_wo.id;
+
+  update public.work_order_deletion_audit_log
+  set deletion_status = 'COMPLETED',
+      completed_at = now()
+  where id = v_audit_id;
+
+  return jsonb_build_object(
+    'ok', true,
+    'woNo', v_wo.wo_number,
+    'auditId', v_audit_id,
+    'soNumbers', to_jsonb(v_so_numbers)
+  );
+end;
+$_$;
+
+
+--
+-- Name: FUNCTION delete_work_order_with_audit(p_wo_number text, p_deleted_by text, p_reason text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.delete_work_order_with_audit(p_wo_number text, p_deleted_by text, p_reason text) IS 'Blocks deletion after any material issue and atomically archives all work order data before deletion.';
+
+
+--
 -- Name: ensure_artwork_row_for_sales_order_line_trg(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2984,6 +3131,77 @@ $$;
 
 
 --
+-- Name: prevent_unaudited_work_order_delete(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.prevent_unaudited_work_order_delete() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+begin
+  if exists (
+    select 1
+    from public.inv_ledger il
+    where upper(coalesce(il.ref_type, '')) = 'ISSUE'
+      and trim(coalesce(il.ref_no, '')) = trim(old.wo_number)
+      and coalesce(il.qty_out, 0) > 0
+  ) then
+    raise exception 'Work order % cannot be deleted because material has been issued against it.', old.wo_number;
+  end if;
+
+  if not exists (
+    select 1
+    from public.work_order_deletion_audit_log al
+    where al.wo_id = old.id
+      and al.deletion_status = 'PENDING'
+  ) then
+    raise exception 'Direct work order deletion is not allowed. Use delete_work_order_with_audit.';
+  end if;
+
+  return old;
+end;
+$$;
+
+
+--
+-- Name: protect_work_order_deletion_audit_log(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.protect_work_order_deletion_audit_log() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+begin
+  if tg_op = 'DELETE' then
+    raise exception 'Work order deletion audit rows cannot be deleted.';
+  end if;
+
+  if old.deletion_status = 'COMPLETED' then
+    raise exception 'Completed work order deletion audit rows are immutable.';
+  end if;
+
+  if new.wo_id is distinct from old.wo_id
+    or new.wo_number is distinct from old.wo_number
+    or new.wo_date is distinct from old.wo_date
+    or new.wo_status is distinct from old.wo_status
+    or new.work_order_type is distinct from old.work_order_type
+    or new.deleted_by is distinct from old.deleted_by
+    or new.deletion_reason is distinct from old.deletion_reason
+    or new.deleted_data is distinct from old.deleted_data
+    or new.so_numbers is distinct from old.so_numbers
+    or new.created_at is distinct from old.created_at
+    or new.deletion_status <> 'COMPLETED'
+    or new.completed_at is null
+  then
+    raise exception 'Only completion of a pending work order deletion audit row is allowed.';
+  end if;
+
+  return new;
+end;
+$$;
+
+
+--
 -- Name: refresh_sales_order_line_status(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3147,6 +3365,138 @@ CREATE FUNCTION public.refresh_stock_mv() RETURNS void
 begin
   refresh materialized view public.inv_stock_mv;
   refresh materialized view public.inv_stock_analytics_mv;
+end;
+$$;
+
+
+--
+-- Name: replace_client_credit_snapshot(jsonb, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.replace_client_credit_snapshot(p_rows jsonb, p_source_spreadsheet_id text, p_source_sheet_name text, p_synced_by text DEFAULT NULL::text) RETURNS TABLE(sync_batch_id uuid, synced_at timestamp with time zone, synced_count integer, unmatched_client_count integer)
+    LANGUAGE plpgsql
+    AS $$
+declare
+  v_batch_id uuid := gen_random_uuid();
+  v_synced_at timestamp with time zone := now();
+  v_count integer := 0;
+  v_unmatched integer := 0;
+begin
+  if p_rows is null or jsonb_typeof(p_rows) <> 'array' then
+    raise exception 'Credit snapshot rows must be a JSON array';
+  end if;
+
+  create temporary table tmp_client_credit_snapshot (
+    client_code text primary key,
+    source_client_name text,
+    credit_limit numeric(18,2),
+    current_balance numeric(18,2),
+    source_row_number integer
+  ) on commit drop;
+
+  insert into tmp_client_credit_snapshot (
+    client_code,
+    source_client_name,
+    credit_limit,
+    current_balance,
+    source_row_number
+  )
+  select
+    upper(trim(x.client_code)),
+    nullif(trim(x.client_name), ''),
+    x.credit_limit,
+    x.current_balance,
+    x.source_row_number
+  from jsonb_to_recordset(p_rows) as x(
+    client_code text,
+    client_name text,
+    credit_limit numeric,
+    current_balance numeric,
+    source_row_number integer
+  )
+  where nullif(trim(x.client_code), '') is not null;
+
+  get diagnostics v_count = row_count;
+  if v_count = 0 then
+    raise exception 'No client credit rows were supplied';
+  end if;
+
+  insert into public.client_credit_snapshot (
+    client_code,
+    source_client_name,
+    credit_limit,
+    current_balance,
+    source_spreadsheet_id,
+    source_sheet_name,
+    source_row_number,
+    sync_batch_id,
+    synced_at,
+    synced_by
+  )
+  select
+    t.client_code,
+    t.source_client_name,
+    t.credit_limit,
+    t.current_balance,
+    p_source_spreadsheet_id,
+    p_source_sheet_name,
+    t.source_row_number,
+    v_batch_id,
+    v_synced_at,
+    p_synced_by
+  from tmp_client_credit_snapshot t
+  on conflict (client_code) do update set
+    source_client_name = excluded.source_client_name,
+    credit_limit = excluded.credit_limit,
+    current_balance = excluded.current_balance,
+    source_spreadsheet_id = excluded.source_spreadsheet_id,
+    source_sheet_name = excluded.source_sheet_name,
+    source_row_number = excluded.source_row_number,
+    sync_batch_id = excluded.sync_batch_id,
+    synced_at = excluded.synced_at,
+    synced_by = excluded.synced_by;
+
+  delete from public.client_credit_snapshot c
+  where not exists (
+    select 1
+    from tmp_client_credit_snapshot t
+    where t.client_code = c.client_code
+  );
+
+  insert into public.client_credit_snapshot_history (
+    sync_batch_id,
+    client_code,
+    source_client_name,
+    credit_limit,
+    current_balance,
+    source_spreadsheet_id,
+    source_sheet_name,
+    source_row_number,
+    synced_at,
+    synced_by
+  )
+  select
+    v_batch_id,
+    t.client_code,
+    t.source_client_name,
+    t.credit_limit,
+    t.current_balance,
+    p_source_spreadsheet_id,
+    p_source_sheet_name,
+    t.source_row_number,
+    v_synced_at,
+    p_synced_by
+  from tmp_client_credit_snapshot t;
+
+  select count(*)::integer
+    into v_unmatched
+  from tmp_client_credit_snapshot t
+  left join public.clients c
+    on upper(trim(c.client_code)) = t.client_code
+  where c.id is null;
+
+  return query
+  select v_batch_id, v_synced_at, v_count, v_unmatched;
 end;
 $$;
 
@@ -3625,119 +3975,114 @@ CREATE FUNCTION realtime.apply_rls(wal jsonb, max_record_bytes integer DEFAULT (
     LANGUAGE plpgsql
     AS $$
 declare
--- Regclass of the table e.g. public.notes
-entity_ regclass = (quote_ident(wal ->> 'schema') || '.' || quote_ident(wal ->> 'table'))::regclass;
+    -- Regclass of the table e.g. public.notes
+    entity_ regclass = (quote_ident(wal ->> 'schema') || '.' || quote_ident(wal ->> 'table'))::regclass;
 
--- I, U, D, T: insert, update ...
-action realtime.action = (
-    case wal ->> 'action'
-        when 'I' then 'INSERT'
-        when 'U' then 'UPDATE'
-        when 'D' then 'DELETE'
-        else 'ERROR'
-    end
-);
+    -- I, U, D, T: insert, update ...
+    action realtime.action = (
+        case wal ->> 'action'
+            when 'I' then 'INSERT'
+            when 'U' then 'UPDATE'
+            when 'D' then 'DELETE'
+            else 'ERROR'
+        end
+    );
 
--- Is row level security enabled for the table
-is_rls_enabled bool = relrowsecurity from pg_class where oid = entity_;
+    -- Is row level security enabled for the table
+    is_rls_enabled bool = relrowsecurity from pg_class where oid = entity_;
 
-subscriptions realtime.subscription[] = array_agg(subs)
-    from
-        realtime.subscription subs
-    where
-        subs.entity = entity_
-        -- Filter by action early - only get subscriptions interested in this action
-        -- action_filter column can be: '*' (all), 'INSERT', 'UPDATE', or 'DELETE'
-        and (subs.action_filter = '*' or subs.action_filter = action::text);
+    subscriptions realtime.subscription[] = array_agg(subs)
+        from
+            realtime.subscription subs
+        where
+            subs.entity = entity_
+            -- Filter by action early - only get subscriptions interested in this action
+            -- action_filter column can be: '*' (all), 'INSERT', 'UPDATE', or 'DELETE'
+            and (subs.action_filter = '*' or subs.action_filter = action::text);
 
--- Subscription vars
-roles regrole[] = array_agg(distinct us.claims_role::text)
-    from
-        unnest(subscriptions) us;
+    -- Subscription vars
+    working_role regrole;
+    working_selected_columns text[];
+    claimed_role regrole;
+    claims jsonb;
 
-working_role regrole;
-claimed_role regrole;
-claims jsonb;
+    subscription_id uuid;
+    subscription_has_access bool;
+    visible_to_subscription_ids uuid[] = '{}';
 
-subscription_id uuid;
-subscription_has_access bool;
-visible_to_subscription_ids uuid[] = '{}';
+    -- structured info for wal's columns
+    columns realtime.wal_column[];
+    -- previous identity values for update/delete
+    old_columns realtime.wal_column[];
 
--- structured info for wal's columns
-columns realtime.wal_column[];
--- previous identity values for update/delete
-old_columns realtime.wal_column[];
+    error_record_exceeds_max_size boolean = octet_length(wal::text) > max_record_bytes;
 
-error_record_exceeds_max_size boolean = octet_length(wal::text) > max_record_bytes;
+    -- Primary jsonb output for record
+    output jsonb;
 
--- Primary jsonb output for record
-output jsonb;
+    -- Loop record for iterating unique roles (outer loop)
+    role_record record;
+    -- Loop record for iterating unique selected_columns within a role (inner loop)
+    cols_record record;
+    -- Subscription ids visible at the role level (before fanning out by selected_columns)
+    visible_role_sub_ids uuid[] = '{}';
 
 begin
-perform set_config('role', null, true);
+    perform set_config('role', null, true);
 
-columns =
-    array_agg(
-        (
-            x->>'name',
-            x->>'type',
-            x->>'typeoid',
-            realtime.cast(
-                (x->'value') #>> '{}',
-                coalesce(
-                    (x->>'typeoid')::regtype, -- null when wal2json version <= 2.4
-                    (x->>'type')::regtype
-                )
-            ),
-            (pks ->> 'name') is not null,
-            true
-        )::realtime.wal_column
-    )
-    from
-        jsonb_array_elements(wal -> 'columns') x
-        left join jsonb_array_elements(wal -> 'pk') pks
-            on (x ->> 'name') = (pks ->> 'name');
-
-old_columns =
-    array_agg(
-        (
-            x->>'name',
-            x->>'type',
-            x->>'typeoid',
-            realtime.cast(
-                (x->'value') #>> '{}',
-                coalesce(
-                    (x->>'typeoid')::regtype, -- null when wal2json version <= 2.4
-                    (x->>'type')::regtype
-                )
-            ),
-            (pks ->> 'name') is not null,
-            true
-        )::realtime.wal_column
-    )
-    from
-        jsonb_array_elements(wal -> 'identity') x
-        left join jsonb_array_elements(wal -> 'pk') pks
-            on (x ->> 'name') = (pks ->> 'name');
-
-for working_role in select * from unnest(roles) loop
-
-    -- Update `is_selectable` for columns and old_columns
     columns =
         array_agg(
             (
-                c.name,
-                c.type_name,
-                c.type_oid,
-                c.value,
-                c.is_pkey,
-                pg_catalog.has_column_privilege(working_role, entity_, c.name, 'SELECT')
+                x->>'name',
+                x->>'type',
+                x->>'typeoid',
+                realtime.cast(
+                    (x->'value') #>> '{}',
+                    coalesce(
+                        (x->>'typeoid')::regtype, -- null when wal2json version <= 2.4
+                        (x->>'type')::regtype
+                    )
+                ),
+                (pks ->> 'name') is not null,
+                true
             )::realtime.wal_column
         )
         from
-            unnest(columns) c;
+            jsonb_array_elements(wal -> 'columns') x
+            left join jsonb_array_elements(wal -> 'pk') pks
+                on (x ->> 'name') = (pks ->> 'name');
 
     old_columns =
+        array_agg(
+            (
+                x->>'name',
+                x->>'type',
+                x->>'typeoid',
+                realtime.cast(
+                    (x->'value') #>> '{}',
+                    coalesce(
+                        (x->>'typeoid')::regtype, -- null when wal2json version <= 2.4
+                        (x->>'type')::regtype
+                    )
+                ),
+                (pks ->> 'name') is not null,
+                true
+            )::realtime.wal_column
+        )
+        from
+            jsonb_array_elements(wal -> 'identity') x
+            left join jsonb_array_elements(wal -> 'pk') pks
+                on (x ->> 'name') = (pks ->> 'name');
+
+    for role_record in
+        select claims_role
+        from (select distinct claims_role from unnest(subscriptions)) t
+        order by claims_role::text
+    loop
+        working_role := role_record.claims_role;
+
+        -- Update `is_selectable` for columns and old_columns (once per role)
+        columns =
             array_agg(
                 (
                     c.name,
@@ -3749,178 +4094,238 @@ for working_role in select * from unnest(roles) loop
                 )::realtime.wal_column
             )
             from
-                unnest(old_columns) c;
+                unnest(columns) c;
 
-    if action <> 'DELETE' and count(1) = 0 from unnest(columns) c where c.is_pkey then
-        return next (
-            jsonb_build_object(
-                'schema', wal ->> 'schema',
-                'table', wal ->> 'table',
-                'type', action
-            ),
-            is_rls_enabled,
-            -- subscriptions is already filtered by entity
-            (select array_agg(s.subscription_id) from unnest(subscriptions) as s where claims_role = working_role),
-            array['Error 400: Bad Request, no primary key']
-        )::realtime.wal_rls;
-
-    -- The claims role does not have SELECT permission to the primary key of entity
-    elsif action <> 'DELETE' and sum(c.is_selectable::int) <> count(1) from unnest(columns) c where c.is_pkey then
-        return next (
-            jsonb_build_object(
-                'schema', wal ->> 'schema',
-                'table', wal ->> 'table',
-                'type', action
-            ),
-            is_rls_enabled,
-            (select array_agg(s.subscription_id) from unnest(subscriptions) as s where claims_role = working_role),
-            array['Error 401: Unauthorized']
-        )::realtime.wal_rls;
-
-    else
-        output = jsonb_build_object(
-            'schema', wal ->> 'schema',
-            'table', wal ->> 'table',
-            'type', action,
-            'commit_timestamp', to_char(
-                ((wal ->> 'timestamp')::timestamptz at time zone 'utc'),
-                'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
-            ),
-            'columns', (
-                select
-                    jsonb_agg(
-                        jsonb_build_object(
-                            'name', pa.attname,
-                            'type', pt.typname
-                        )
-                        order by pa.attnum asc
-                    )
-                from
-                    pg_attribute pa
-                    join pg_type pt
-                        on pa.atttypid = pt.oid
-                where
-                    attrelid = entity_
-                    and attnum > 0
-                    and pg_catalog.has_column_privilege(working_role, entity_, pa.attname, 'SELECT')
-            )
-        )
-        -- Add "record" key for insert and update
-        || case
-            when action in ('INSERT', 'UPDATE') then
-                jsonb_build_object(
-                    'record',
+        old_columns =
+                array_agg(
                     (
+                        c.name,
+                        c.type_name,
+                        c.type_oid,
+                        c.value,
+                        c.is_pkey,
+                        pg_catalog.has_column_privilege(working_role, entity_, c.name, 'SELECT')
+                    )::realtime.wal_column
+                )
+                from
+                    unnest(old_columns) c;
+
+        if action <> 'DELETE' and count(1) = 0 from unnest(columns) c where c.is_pkey then
+            -- Fan out 400 error per distinct selected_columns for this role
+            for cols_record in
+                select selected_columns
+                from (select distinct selected_columns from unnest(subscriptions) s where s.claims_role = working_role) t
+                order by coalesce(array_to_string(selected_columns, ','), '')
+            loop
+                working_selected_columns := cols_record.selected_columns;
+                return next (
+                    jsonb_build_object(
+                        'schema', wal ->> 'schema',
+                        'table', wal ->> 'table',
+                        'type', action
+                    ),
+                    is_rls_enabled,
+                    (select array_agg(s.subscription_id) from unnest(subscriptions) as s where s.claims_role = working_role and (s.selected_columns is not distinct from working_selected_columns)),
+                    array['Error 400: Bad Request, no primary key']
+                )::realtime.wal_rls;
+            end loop;
+
+        -- The claims role does not have SELECT permission to the primary key of entity
+        elsif action <> 'DELETE' and sum(c.is_selectable::int) <> count(1) from unnest(columns) c where c.is_pkey then
+            -- Fan out 401 error per distinct selected_columns for this role
+            for cols_record in
+                select selected_columns
+                from (select distinct selected_columns from unnest(subscriptions) s where s.claims_role = working_role) t
+                order by coalesce(array_to_string(selected_columns, ','), '')
+            loop
+                working_selected_columns := cols_record.selected_columns;
+                return next (
+                    jsonb_build_object(
+                        'schema', wal ->> 'schema',
+                        'table', wal ->> 'table',
+                        'type', action
+                    ),
+                    is_rls_enabled,
+                    (select array_agg(s.subscription_id) from unnest(subscriptions) as s where s.claims_role = working_role and (s.selected_columns is not distinct from working_selected_columns)),
+                    array['Error 401: Unauthorized']
+                )::realtime.wal_rls;
+            end loop;
+
+        else
+            -- Create the prepared statement (once per role)
+            if is_rls_enabled and action <> 'DELETE' then
+                if (select 1 from pg_prepared_statements where name = 'walrus_rls_stmt' limit 1) > 0 then
+                    deallocate walrus_rls_stmt;
+                end if;
+                execute realtime.build_prepared_statement_sql('walrus_rls_stmt', entity_, columns);
+            end if;
+
+            -- Collect all visible subscription IDs for this role (filter check + RLS check)
+            visible_role_sub_ids = '{}';
+
+            for subscription_id, claims in (
+                    select
+                        subs.subscription_id,
+                        subs.claims
+                    from
+                        unnest(subscriptions) subs
+                    where
+                        subs.entity = entity_
+                        and subs.claims_role = working_role
+                        and (
+                            realtime.is_visible_through_filters(columns, subs.filters)
+                            or (
+                              action = 'DELETE'
+                              and realtime.is_visible_through_filters(old_columns, subs.filters)
+                            )
+                        )
+            ) loop
+
+                if not is_rls_enabled or action = 'DELETE' then
+                    visible_role_sub_ids = visible_role_sub_ids || subscription_id;
+                else
+                    -- Check if RLS allows the role to see the record
+                    perform
+                        -- Trim leading and trailing quotes from working_role because set_config
+                        -- doesn't recognize the role as valid if they are included
+                        set_config('role', trim(both '"' from working_role::text), true),
+                        set_config('request.jwt.claims', claims::text, true);
+
+                    execute 'execute walrus_rls_stmt' into subscription_has_access;
+
+                    if subscription_has_access then
+                        visible_role_sub_ids = visible_role_sub_ids || subscription_id;
+                    end if;
+                end if;
+            end loop;
+
+            perform set_config('role', null, true);
+
+            -- Inner loop: per distinct selected_columns for this role
+            for cols_record in
+                select selected_columns
+                from (select distinct selected_columns from unnest(subscriptions) s where s.claims_role = working_role) t
+                order by coalesce(array_to_string(selected_columns, ','), '')
+            loop
+                working_selected_columns := cols_record.selected_columns;
+
+                output = jsonb_build_object(
+                    'schema', wal ->> 'schema',
+                    'table', wal ->> 'table',
+                    'type', action,
+                    'commit_timestamp', to_char(
+                        ((wal ->> 'timestamp')::timestamptz at time zone 'utc'),
+                        'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+                    ),
+                    'columns', (
                         select
-                            jsonb_object_agg(
-                                -- if unchanged toast, get column name and value from old record
-                                coalesce((c).name, (oc).name),
-                                case
-                                    when (c).name is null then (oc).value
-                                    else (c).value
-                                end
+                            jsonb_agg(
+                                jsonb_build_object(
+                                    'name', pa.attname,
+                                    'type', pt.typname
+                                )
+                                order by pa.attnum asc
                             )
                         from
-                            unnest(columns) c
-                            full outer join unnest(old_columns) oc
-                                on (c).name = (oc).name
+                            pg_attribute pa
+                            join pg_type pt
+                                on pa.atttypid = pt.oid
+                            left join (
+                                select unnest(conkey) as pkey_attnum
+                                from pg_constraint
+                                where conrelid = entity_ and contype = 'p'
+                            ) pk on pk.pkey_attnum = pa.attnum
                         where
-                            coalesce((c).is_selectable, (oc).is_selectable)
-                            and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                            attrelid = entity_
+                            and attnum > 0
+                            and pg_catalog.has_column_privilege(working_role, entity_, pa.attname, 'SELECT')
+                            and (working_selected_columns is null or pa.attname = any(working_selected_columns) or pk.pkey_attnum is not null)
                     )
                 )
-            else '{}'::jsonb
-        end
-        -- Add "old_record" key for update and delete
-        || case
-            when action = 'UPDATE' then
-                jsonb_build_object(
-                        'old_record',
-                        (
-                            select jsonb_object_agg((c).name, (c).value)
-                            from unnest(old_columns) c
-                            where
-                                (c).is_selectable
-                                and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                -- Add "record" key for insert and update
+                || case
+                    when action in ('INSERT', 'UPDATE') then
+                        jsonb_build_object(
+                            'record',
+                            (
+                                select
+                                    jsonb_object_agg(
+                                        -- if unchanged toast, get column name and value from old record
+                                        coalesce((c).name, (oc).name),
+                                        case
+                                            when (c).name is null then (oc).value
+                                            else (c).value
+                                        end
+                                    )
+                                from
+                                    unnest(columns) c
+                                    full outer join unnest(old_columns) oc
+                                        on (c).name = (oc).name
+                                where
+                                    coalesce((c).is_selectable, (oc).is_selectable)
+                                    and (working_selected_columns is null or coalesce((c).name, (oc).name) = any(working_selected_columns) or coalesce((c).is_pkey, (oc).is_pkey))
+                                    and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                            )
                         )
-                    )
-            when action = 'DELETE' then
-                jsonb_build_object(
-                    'old_record',
+                    else '{}'::jsonb
+                end
+                -- Add "old_record" key for update and delete
+                || case
+                    when action = 'UPDATE' then
+                        jsonb_build_object(
+                                'old_record',
+                                (
+                                    select jsonb_object_agg((c).name, (c).value)
+                                    from unnest(old_columns) c
+                                    where
+                                        (c).is_selectable
+                                        and (working_selected_columns is null or (c).name = any(working_selected_columns) or (c).is_pkey)
+                                        and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                                )
+                            )
+                    when action = 'DELETE' then
+                        jsonb_build_object(
+                            'old_record',
+                            (
+                                select jsonb_object_agg((c).name, (c).value)
+                                from unnest(old_columns) c
+                                where
+                                    (c).is_selectable
+                                    and (working_selected_columns is null or (c).name = any(working_selected_columns) or (c).is_pkey)
+                                    and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
+                                    and ( not is_rls_enabled or (c).is_pkey ) -- if RLS enabled, we can't secure deletes so filter to pkey
+                            )
+                        )
+                    else '{}'::jsonb
+                end;
+
+                -- Filter visible_role_sub_ids to those matching the current selected_columns group
+                visible_to_subscription_ids = coalesce(
                     (
-                        select jsonb_object_agg((c).name, (c).value)
-                        from unnest(old_columns) c
-                        where
-                            (c).is_selectable
-                            and ( not error_record_exceeds_max_size or (octet_length((c).value::text) <= 64))
-                            and ( not is_rls_enabled or (c).is_pkey ) -- if RLS enabled, we can't secure deletes so filter to pkey
-                    )
-                )
-            else '{}'::jsonb
-        end;
+                        select array_agg(s.subscription_id)
+                        from unnest(subscriptions) s
+                        where s.claims_role = working_role
+                          and (s.selected_columns is not distinct from working_selected_columns)
+                          and s.subscription_id = any(visible_role_sub_ids)
+                    ),
+                    '{}'::uuid[]
+                );
 
-        -- Create the prepared statement
-        if is_rls_enabled and action <> 'DELETE' then
-            if (select 1 from pg_prepared_statements where name = 'walrus_rls_stmt' limit 1) > 0 then
-                deallocate walrus_rls_stmt;
-            end if;
-            execute realtime.build_prepared_statement_sql('walrus_rls_stmt', entity_, columns);
+                return next (
+                    output,
+                    is_rls_enabled,
+                    visible_to_subscription_ids,
+                    case
+                        when error_record_exceeds_max_size then array['Error 413: Payload Too Large']
+                        else '{}'
+                    end
+                )::realtime.wal_rls;
+            end loop;
+
         end if;
+    end loop;
 
-        visible_to_subscription_ids = '{}';
-
-        for subscription_id, claims in (
-                select
-                    subs.subscription_id,
-                    subs.claims
-                from
-                    unnest(subscriptions) subs
-                where
-                    subs.entity = entity_
-                    and subs.claims_role = working_role
-                    and (
-                        realtime.is_visible_through_filters(columns, subs.filters)
-                        or (
-                          action = 'DELETE'
-                          and realtime.is_visible_through_filters(old_columns, subs.filters)
-                        )
-                    )
-        ) loop
-
-            if not is_rls_enabled or action = 'DELETE' then
-                visible_to_subscription_ids = visible_to_subscription_ids || subscription_id;
-            else
-                -- Check if RLS allows the role to see the record
-                perform
-                    -- Trim leading and trailing quotes from working_role because set_config
-                    -- doesn't recognize the role as valid if they are included
-                    set_config('role', trim(both '"' from working_role::text), true),
-                    set_config('request.jwt.claims', claims::text, true);
-
-                execute 'execute walrus_rls_stmt' into subscription_has_access;
-
-                if subscription_has_access then
-                    visible_to_subscription_ids = visible_to_subscription_ids || subscription_id;
-                end if;
-            end if;
-        end loop;
-
-        perform set_config('role', null, true);
-
-        return next (
-            output,
-            is_rls_enabled,
-            visible_to_subscription_ids,
-            case
-                when error_record_exceeds_max_size then array['Error 413: Payload Too Large']
-                else '{}'
-            end
-        )::realtime.wal_rls;
-
-    end if;
-end loop;
-
-perform set_config('role', null, true);
+    perform set_config('role', null, true);
 end;
 $$;
 
@@ -4101,7 +4506,7 @@ CREATE FUNCTION realtime.list_changes(publication name, slot_name name, max_chan
         string_agg(
           realtime.quote_wal2json(format('%I.%I', schemaname, tablename)::regclass),
           ','
-        ) filter (WHERE ppt.tablename IS NOT NULL AND ppt.tablename NOT LIKE '% %'),
+        ) filter (WHERE ppt.tablename IS NOT NULL),
         ''
       ) AS w2j_add_tables
     FROM pg_publication pp
@@ -4125,13 +4530,11 @@ CREATE FUNCTION realtime.list_changes(publication name, slot_name name, max_chan
            'add-tables', pub.w2j_add_tables
          ) x
   ),
-  -- Count raw slot entries before apply_rls/subscription filter
   slot_count AS (
     SELECT count(*)::bigint AS cnt
     FROM w2j
     WHERE w2j.w2j_add_tables <> ''
   ),
-  -- Apply RLS and filter as before
   rls_filtered AS (
     SELECT xyz.wal, xyz.is_rls_enabled, xyz.subscription_ids, xyz.errors
     FROM w2j,
@@ -4142,14 +4545,11 @@ CREATE FUNCTION realtime.list_changes(publication name, slot_name name, max_chan
     WHERE w2j.w2j_add_tables <> ''
       AND xyz.subscription_ids[1] IS NOT NULL
   )
-  -- Real rows with slot count attached
   SELECT rf.wal, rf.is_rls_enabled, rf.subscription_ids, rf.errors, sc.cnt
   FROM rls_filtered rf, slot_count sc
 
   UNION ALL
 
-  -- Sentinel row: always returned when no real rows exist so Elixir can
-  -- always read slot_changes_count. Identified by wal IS NULL.
   SELECT null, null, null, null, sc.cnt
   FROM slot_count sc
   WHERE NOT EXISTS (SELECT 1 FROM rls_filtered)
@@ -4163,35 +4563,14 @@ $$;
 CREATE FUNCTION realtime.quote_wal2json(entity regclass) RETURNS text
     LANGUAGE sql IMMUTABLE STRICT
     AS $$
-      select
-        (
-          select string_agg('' || ch,'')
-          from unnest(string_to_array(nsp.nspname::text, null)) with ordinality x(ch, idx)
-          where
-            not (x.idx = 1 and x.ch = '"')
-            and not (
-              x.idx = array_length(string_to_array(nsp.nspname::text, null), 1)
-              and x.ch = '"'
-            )
-        )
-        || '.'
-        || (
-          select string_agg('' || ch,'')
-          from unnest(string_to_array(pc.relname::text, null)) with ordinality x(ch, idx)
-          where
-            not (x.idx = 1 and x.ch = '"')
-            and not (
-              x.idx = array_length(string_to_array(nsp.nspname::text, null), 1)
-              and x.ch = '"'
-            )
-          )
-      from
-        pg_class pc
-        join pg_namespace nsp
-          on pc.relnamespace = nsp.oid
-      where
-        pc.oid = entity
-    $$;
+  SELECT
+    realtime.wal2json_escape_identifier(nsp.nspname::text)
+    || '.'
+    || realtime.wal2json_escape_identifier(pc.relname::text)
+  FROM pg_class pc
+  JOIN pg_namespace nsp ON pc.relnamespace = nsp.oid
+  WHERE pc.oid = entity
+$$;
 
 
 --
@@ -4232,77 +4611,119 @@ $$;
 
 
 --
+-- Name: send_binary(bytea, text, text, boolean); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.send_binary(payload bytea, event text, topic text, private boolean DEFAULT true) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  generated_id uuid;
+BEGIN
+  BEGIN
+    generated_id := gen_random_uuid();
+
+    EXECUTE format('SET LOCAL realtime.topic TO %L', topic);
+
+    INSERT INTO realtime.messages (id, binary_payload, event, topic, private, extension)
+    VALUES (generated_id, payload, event, topic, private, 'broadcast');
+  EXCEPTION
+    WHEN OTHERS THEN
+      RAISE WARNING 'ErrorSendingBroadcastMessage: %', SQLERRM;
+  END;
+END;
+$$;
+
+
+--
 -- Name: subscription_check_filters(); Type: FUNCTION; Schema: realtime; Owner: -
 --
 
 CREATE FUNCTION realtime.subscription_check_filters() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-    /*
-    Validates that the user defined filters for a subscription:
-    - refer to valid columns that the claimed role may access
-    - values are coercable to the correct column type
-    */
-    declare
-        col_names text[] = coalesce(
-                array_agg(c.column_name order by c.ordinal_position),
-                '{}'::text[]
-            )
-            from
-                information_schema.columns c
-            where
-                format('%I.%I', c.table_schema, c.table_name)::regclass = new.entity
-                and pg_catalog.has_column_privilege(
-                    (new.claims ->> 'role'),
-                    format('%I.%I', c.table_schema, c.table_name)::regclass,
-                    c.column_name,
-                    'SELECT'
-                );
-        filter realtime.user_defined_filter;
-        col_type regtype;
-
-        in_val jsonb;
-    begin
-        for filter in select * from unnest(new.filters) loop
-            -- Filtered column is valid
-            if not filter.column_name = any(col_names) then
-                raise exception 'invalid column for filter %', filter.column_name;
-            end if;
-
-            -- Type is sanitized and safe for string interpolation
-            col_type = (
-                select atttypid::regtype
-                from pg_catalog.pg_attribute
-                where attrelid = new.entity
-                      and attname = filter.column_name
+declare
+    col_names text[] = coalesce(
+            array_agg(c.column_name order by c.ordinal_position),
+            '{}'::text[]
+        )
+        from
+            information_schema.columns c
+        where
+            format('%I.%I', c.table_schema, c.table_name)::regclass = new.entity
+            and pg_catalog.has_column_privilege(
+                (new.claims ->> 'role'),
+                format('%I.%I', c.table_schema, c.table_name)::regclass,
+                c.column_name,
+                'SELECT'
             );
-            if col_type is null then
-                raise exception 'failed to lookup type for column %', filter.column_name;
-            end if;
+    table_col_names text[] = coalesce(
+            array_agg(pa.attname),
+            '{}'::text[]
+        )
+        from
+            pg_attribute pa
+        where
+            pa.attrelid = new.entity
+            and pa.attnum > 0;
+    filter realtime.user_defined_filter;
+    col_type regtype;
+    in_val jsonb;
+    selected_col text;
+begin
+    for filter in select * from unnest(new.filters) loop
+        -- Filtered column is valid
+        if not filter.column_name = any(col_names) then
+            raise exception 'invalid column for filter %', filter.column_name;
+        end if;
 
-            -- Set maximum number of entries for in filter
-            if filter.op = 'in'::realtime.equality_op then
-                in_val = realtime.cast(filter.value, (col_type::text || '[]')::regtype);
-                if coalesce(jsonb_array_length(in_val), 0) > 100 then
-                    raise exception 'too many values for `in` filter. Maximum 100';
-                end if;
-            else
-                -- raises an exception if value is not coercable to type
-                perform realtime.cast(filter.value, col_type);
+        -- Type is sanitized and safe for string interpolation
+        col_type = (
+            select atttypid::regtype
+            from pg_catalog.pg_attribute
+            where attrelid = new.entity
+                  and attname = filter.column_name
+        );
+        if col_type is null then
+            raise exception 'failed to lookup type for column %', filter.column_name;
+        end if;
+        if filter.op = 'in'::realtime.equality_op then
+            in_val = realtime.cast(filter.value, (col_type::text || '[]')::regtype);
+            if coalesce(jsonb_array_length(in_val), 0) > 100 then
+                raise exception 'too many values for `in` filter. Maximum 100';
             end if;
+        else
+            -- raises an exception if value is not coercable to type
+            perform realtime.cast(filter.value, col_type);
+        end if;
+    end loop;
 
+    -- Validate that selected_columns reference columns the role can SELECT
+    if new.selected_columns is not null then
+        for selected_col in select * from unnest(new.selected_columns) loop
+            if not selected_col = any(col_names) then
+                raise exception 'invalid column for select %', selected_col;
+            end if;
         end loop;
+    end if;
 
-        -- Apply consistent order to filters so the unique constraint on
-        -- (subscription_id, entity, filters) can't be tricked by a different filter order
-        new.filters = coalesce(
-            array_agg(f order by f.column_name, f.op, f.value),
-            '{}'
-        ) from unnest(new.filters) f;
+    -- Apply consistent order to filters so the unique constraint on
+    -- (subscription_id, entity, filters) can't be tricked by a different filter order
+    new.filters = coalesce(
+        array_agg(f order by f.column_name, f.op, f.value),
+        '{}'
+    ) from unnest(new.filters) f;
 
-        return new;
-    end;
-    $$;
+    -- Normalize selected_columns order so ARRAY['a','b'] and ARRAY['b','a'] are
+    -- treated as the same subscription group in apply_rls
+    new.selected_columns = (
+        select array_agg(c order by c)
+        from unnest(new.selected_columns) c
+    );
+
+    return new;
+end;
+$$;
 
 
 --
@@ -4322,6 +4743,18 @@ CREATE FUNCTION realtime.topic() RETURNS text
     LANGUAGE sql STABLE
     AS $$
 select nullif(current_setting('realtime.topic', true), '')::text;
+$$;
+
+
+--
+-- Name: wal2json_escape_identifier(text); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.wal2json_escape_identifier(name text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT
+    AS $$
+  -- Prefix `\`, `,`, `.`, and any whitespace with `\`
+  SELECT regexp_replace(name, '([\\,.[:space:]])', '\\\1', 'g')
 $$;
 
 
@@ -6121,6 +6554,50 @@ CREATE TABLE public.checklist_weekly_offs (
     updated_by text DEFAULT ''::text,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT checklist_weekly_offs_day_chk CHECK (((day_of_week >= 0) AND (day_of_week <= 6)))
+);
+
+
+--
+-- Name: client_credit_snapshot; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.client_credit_snapshot (
+    client_code text NOT NULL,
+    source_client_name text,
+    credit_limit numeric(18,2),
+    current_balance numeric(18,2),
+    source_spreadsheet_id text NOT NULL,
+    source_sheet_name text NOT NULL,
+    source_row_number integer,
+    sync_batch_id uuid NOT NULL,
+    synced_at timestamp with time zone DEFAULT now() NOT NULL,
+    synced_by text
+);
+
+
+--
+-- Name: TABLE client_credit_snapshot; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.client_credit_snapshot IS 'Current client credit limit and outstanding balance synchronized on demand from the Accounts Google Sheet.';
+
+
+--
+-- Name: client_credit_snapshot_history; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.client_credit_snapshot_history (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sync_batch_id uuid NOT NULL,
+    client_code text NOT NULL,
+    source_client_name text,
+    credit_limit numeric(18,2),
+    current_balance numeric(18,2),
+    source_spreadsheet_id text NOT NULL,
+    source_sheet_name text NOT NULL,
+    source_row_number integer,
+    synced_at timestamp with time zone NOT NULL,
+    synced_by text
 );
 
 
@@ -8778,6 +9255,84 @@ CREATE TABLE public.roles (
     description text,
     active boolean DEFAULT true,
     created_at timestamp without time zone DEFAULT now()
+);
+
+
+--
+-- Name: sales_client_benchmarks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sales_client_benchmarks (
+    client_code text NOT NULL,
+    client_name text,
+    historical_max_monthly_value numeric(18,2) DEFAULT 0 NOT NULL,
+    historical_avg_monthly_value numeric(18,2) DEFAULT 0 NOT NULL,
+    historical_top_rank integer,
+    baseline_period_label text,
+    decline_alert_pct numeric(8,2) DEFAULT 25 NOT NULL,
+    active boolean DEFAULT true NOT NULL,
+    notes text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sales_client_benchmarks_decline_chk CHECK (((decline_alert_pct >= (0)::numeric) AND (decline_alert_pct <= (100)::numeric))),
+    CONSTRAINT sales_client_benchmarks_value_chk CHECK (((historical_max_monthly_value >= (0)::numeric) AND (historical_avg_monthly_value >= (0)::numeric)))
+);
+
+
+--
+-- Name: TABLE sales_client_benchmarks; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.sales_client_benchmarks IS 'Historical client monthly sales max, average, and top-client baseline used by the live sales command center.';
+
+
+--
+-- Name: sales_monthly_targets; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sales_monthly_targets (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    period_month date NOT NULL,
+    sales_rep text NOT NULL,
+    order_target_value numeric(18,2) DEFAULT 0 NOT NULL,
+    billing_target_value numeric(18,2) DEFAULT 0 NOT NULL,
+    notes text,
+    active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sales_monthly_targets_period_chk CHECK ((period_month = (date_trunc('month'::text, (period_month)::timestamp with time zone))::date)),
+    CONSTRAINT sales_monthly_targets_value_chk CHECK (((order_target_value >= (0)::numeric) AND (billing_target_value >= (0)::numeric)))
+);
+
+
+--
+-- Name: TABLE sales_monthly_targets; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.sales_monthly_targets IS 'Monthly salesperson order-booking and billing targets used by the live sales command center.';
+
+
+--
+-- Name: sales_order_credit_override_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sales_order_credit_override_audit (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    approval_type text NOT NULL,
+    approval_mode text NOT NULL,
+    client_code text NOT NULL,
+    credit_limit numeric(18,2),
+    current_balance numeric(18,2),
+    approved_pipeline_value numeric(18,2),
+    selected_new_exposure numeric(18,2),
+    projected_exposure numeric(18,2),
+    exceeded_by numeric(18,2),
+    credit_snapshot_synced_at timestamp with time zone,
+    selected_lines jsonb DEFAULT '[]'::jsonb NOT NULL,
+    approved_by text,
+    approved_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT sales_order_credit_override_approval_type_chk CHECK ((approval_type = ANY (ARRAY['ACCOUNTS'::text, 'BUSINESS'::text]))),
+    CONSTRAINT sales_order_credit_override_mode_chk CHECK ((approval_mode = ANY (ARRAY['SINGLE'::text, 'BULK'::text])))
 );
 
 
@@ -20638,6 +21193,452 @@ CREATE VIEW public.v_report_wip_stage_summary AS
 
 
 --
+-- Name: v_sales_dashboard_activity_feed; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_sales_dashboard_activity_feed WITH (security_invoker='on') AS
+ WITH order_values AS (
+         SELECT sales_order_lines.so_id,
+            sum(COALESCE(NULLIF(sales_order_lines.net_amount, (0)::numeric), NULLIF((sales_order_lines.amount - COALESCE(sales_order_lines.disc_amount, (0)::numeric)), (0)::numeric), NULLIF((sales_order_lines.qty * sales_order_lines.rate), (0)::numeric), NULLIF(sales_order_lines.total_amount, (0)::numeric), (0)::numeric)) AS order_value
+           FROM public.sales_order_lines
+          WHERE (upper(COALESCE(sales_order_lines.status, 'OPEN'::text)) <> 'CANCELLED'::text)
+          GROUP BY sales_order_lines.so_id
+        ), order_events AS (
+         SELECT ('ORDER:'::text || (so.id)::text) AS event_id,
+            (so.created_at AT TIME ZONE 'Asia/Kolkata'::text) AS event_at,
+            'ORDER'::text AS event_type,
+            so.so_number AS reference_no,
+            COALESCE(NULLIF(btrim(so.sales_rep), ''::text), 'UNASSIGNED'::text) AS sales_rep,
+            so.client_code,
+            COALESCE(c.client_name, so.client_code, 'UNASSIGNED'::text) AS client_name,
+            COALESCE(ov.order_value, NULLIF(so.subtotal, (0)::numeric), NULLIF(so.grand_total, (0)::numeric), (0)::numeric) AS event_value,
+            'New order booked'::text AS headline
+           FROM ((public.sales_orders so
+             LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+             LEFT JOIN order_values ov ON ((ov.so_id = so.id)))
+          WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(so.order_prefix, ''::text)) <> 'MB'::text) AND (upper(COALESCE(so.sales_type, ''::text)) <> 'MANUAL_BILLING'::text) AND (COALESCE(so.so_number, ''::text) !~* '^MB[/-]'::text))
+        ), dispatch_events AS (
+         SELECT ('DISPATCH:'::text || (dr.id)::text) AS event_id,
+            (dr.created_at AT TIME ZONE 'Asia/Kolkata'::text) AS event_at,
+            'DISPATCH'::text AS event_type,
+            COALESCE(dr.dispatch_no, dr.so_number) AS reference_no,
+            COALESCE(NULLIF(btrim(so.sales_rep), ''::text), 'UNASSIGNED'::text) AS sales_rep,
+            so.client_code,
+            COALESCE(c.client_name, so.client_code, 'UNASSIGNED'::text) AS client_name,
+            (COALESCE(dr.dispatch_qty, (0)::numeric) * COALESCE(sol.rate, (0)::numeric)) AS event_value,
+            'Goods dispatched'::text AS headline
+           FROM (((public.dispatch_records dr
+             LEFT JOIN public.sales_orders so ON ((so.id = dr.so_id)))
+             LEFT JOIN public.sales_order_lines sol ON ((sol.id = dr.so_line_id)))
+             LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+          WHERE (upper(COALESCE(dr.status, 'DISPATCHED'::text)) <> 'CANCELLED'::text)
+        ), invoice_events AS (
+         SELECT ((('INVOICE:'::text || (inv.id)::text) || ':'::text) || COALESCE(NULLIF(btrim(so.sales_rep), ''::text), 'UNASSIGNED'::text)) AS event_id,
+            max(COALESCE(inv.posted_at, (inv.created_at AT TIME ZONE 'Asia/Kolkata'::text))) AS event_at,
+            'INVOICE'::text AS event_type,
+            inv.invoice_no AS reference_no,
+            COALESCE(NULLIF(btrim(so.sales_rep), ''::text), 'UNASSIGNED'::text) AS sales_rep,
+            COALESCE(inv.client_code, so.client_code, 'UNASSIGNED'::text) AS client_code,
+            COALESCE(inv.client_name, c.client_name, inv.client_code, so.client_code, 'UNASSIGNED'::text) AS client_name,
+            sum(COALESCE(il.taxable_amount, il.line_amount, (il.qty * il.rate), (0)::numeric)) AS event_value,
+            'Invoice posted'::text AS headline
+           FROM (((public.invoices inv
+             JOIN public.invoice_lines il ON ((il.invoice_id = inv.id)))
+             LEFT JOIN public.sales_orders so ON ((so.id = il.so_id)))
+             LEFT JOIN public.clients c ON ((c.client_code = COALESCE(inv.client_code, so.client_code))))
+          WHERE ((upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          GROUP BY inv.id, inv.invoice_no, COALESCE(NULLIF(btrim(so.sales_rep), ''::text), 'UNASSIGNED'::text), COALESCE(inv.client_code, so.client_code, 'UNASSIGNED'::text), COALESCE(inv.client_name, c.client_name, inv.client_code, so.client_code, 'UNASSIGNED'::text)
+        )
+ SELECT order_events.event_id,
+    order_events.event_at,
+    order_events.event_type,
+    order_events.reference_no,
+    order_events.sales_rep,
+    order_events.client_code,
+    order_events.client_name,
+    order_events.event_value,
+    order_events.headline
+   FROM order_events
+UNION ALL
+ SELECT dispatch_events.event_id,
+    dispatch_events.event_at,
+    dispatch_events.event_type,
+    dispatch_events.reference_no,
+    dispatch_events.sales_rep,
+    dispatch_events.client_code,
+    dispatch_events.client_name,
+    dispatch_events.event_value,
+    dispatch_events.headline
+   FROM dispatch_events
+UNION ALL
+ SELECT invoice_events.event_id,
+    invoice_events.event_at,
+    invoice_events.event_type,
+    invoice_events.reference_no,
+    invoice_events.sales_rep,
+    invoice_events.client_code,
+    invoice_events.client_name,
+    invoice_events.event_value,
+    invoice_events.headline
+   FROM invoice_events;
+
+
+--
+-- Name: v_sales_live_line_snapshot; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_sales_live_line_snapshot WITH (security_invoker='on') AS
+ WITH dispatch_agg AS (
+         SELECT dr.so_line_id,
+            sum(COALESCE(dr.dispatch_qty, (0)::numeric)) AS dispatched_qty,
+            max(dr.dispatch_date) AS last_dispatch_date,
+            max(dr.created_at) AS last_dispatch_at
+           FROM public.dispatch_records dr
+          WHERE (upper(COALESCE(dr.status, 'DISPATCHED'::text)) <> 'CANCELLED'::text)
+          GROUP BY dr.so_line_id
+        ), billing_agg AS (
+         SELECT il.so_line_id,
+            sum(COALESCE(il.qty, (0)::numeric)) AS billed_qty,
+            sum(COALESCE(il.taxable_amount, il.line_amount, (il.qty * il.rate), (0)::numeric)) AS billed_value,
+            max(inv.invoice_date) AS last_invoice_date,
+            max(COALESCE(inv.posted_at, (inv.created_at AT TIME ZONE 'Asia/Kolkata'::text))) AS last_billed_at
+           FROM (public.invoice_lines il
+             JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+          WHERE ((upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          GROUP BY il.so_line_id
+        ), line_base AS (
+         SELECT so.id AS so_id,
+            sol.id AS so_line_id,
+            so.so_number,
+            so.so_date,
+            (so.created_at AT TIME ZONE 'Asia/Kolkata'::text) AS order_created_at,
+            COALESCE(NULLIF(btrim(so.sales_rep), ''::text), 'UNASSIGNED'::text) AS sales_rep,
+            so.client_code,
+            COALESCE(NULLIF(btrim(c_1.client_name), ''::text), so.client_code, 'UNASSIGNED'::text) AS client_name,
+            sol.line_no,
+            sol.product_code,
+            sol.product_name,
+            COALESCE(sol.division, ''::text) AS division,
+            COALESCE(sol.qty, (0)::numeric) AS order_qty,
+            COALESCE(sol.rate, (0)::numeric) AS rate,
+            COALESCE(NULLIF(sol.net_amount, (0)::numeric), NULLIF((sol.amount - COALESCE(sol.disc_amount, (0)::numeric)), (0)::numeric), NULLIF((sol.qty * sol.rate), (0)::numeric), NULLIF(sol.total_amount, (0)::numeric), (0)::numeric) AS order_value,
+            COALESCE(da.dispatched_qty, (0)::numeric) AS dispatched_qty,
+            COALESCE(ba.billed_qty, (0)::numeric) AS billed_qty,
+            COALESCE(ba.billed_value, (0)::numeric) AS billed_value,
+            COALESCE(sol.final_delivery, sol.expected_delivery) AS due_date,
+            so.status AS order_status,
+            sol.status AS line_status,
+            COALESCE(sol.closed_by, ''::text) AS closed_by,
+            sol.closed_at,
+            da.last_dispatch_date,
+            ba.last_invoice_date,
+            GREATEST((so.created_at AT TIME ZONE 'Asia/Kolkata'::text), sol.status_updated_at, (da.last_dispatch_at AT TIME ZONE 'Asia/Kolkata'::text), ba.last_billed_at) AS last_activity_at
+           FROM ((((public.sales_orders so
+             JOIN public.sales_order_lines sol ON ((sol.so_id = so.id)))
+             LEFT JOIN public.clients c_1 ON ((c_1.client_code = so.client_code)))
+             LEFT JOIN dispatch_agg da ON ((da.so_line_id = sol.id)))
+             LEFT JOIN billing_agg ba ON ((ba.so_line_id = sol.id)))
+          WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(so.order_prefix, ''::text)) <> 'MB'::text) AND (upper(COALESCE(so.sales_type, ''::text)) <> 'MANUAL_BILLING'::text) AND (COALESCE(so.so_number, ''::text) !~* '^MB[/-]'::text))
+        ), classified AS (
+         SELECT lb.so_id,
+            lb.so_line_id,
+            lb.so_number,
+            lb.so_date,
+            lb.order_created_at,
+            lb.sales_rep,
+            lb.client_code,
+            lb.client_name,
+            lb.line_no,
+            lb.product_code,
+            lb.product_name,
+            lb.division,
+            lb.order_qty,
+            lb.rate,
+            lb.order_value,
+            lb.dispatched_qty,
+            lb.billed_qty,
+            lb.billed_value,
+            lb.due_date,
+            lb.order_status,
+            lb.line_status,
+            lb.closed_by,
+            lb.closed_at,
+            lb.last_dispatch_date,
+            lb.last_invoice_date,
+            lb.last_activity_at,
+                CASE
+                    WHEN ((upper(COALESCE(lb.order_status, 'OPEN'::text)) = 'CANCELLED'::text) OR (upper(COALESCE(lb.line_status, 'OPEN'::text)) = 'CANCELLED'::text)) THEN 'CANCELLED'::text
+                    WHEN (upper(COALESCE(lb.order_status, 'OPEN'::text)) = 'CLOSED'::text) THEN 'CLOSED'::text
+                    WHEN ((lb.order_qty > (0)::numeric) AND (lb.billed_qty >= lb.order_qty)) THEN 'CLOSED'::text
+                    WHEN ((upper(COALESCE(lb.line_status, 'OPEN'::text)) = 'SHORT_CLOSED'::text) OR (upper(COALESCE(lb.closed_by, ''::text)) ~~ '%SHORT%CLOSE%'::text) OR (upper(COALESCE(lb.closed_by, ''::text)) ~~ '%SHORT_CLOSE%'::text)) THEN 'SHORT_CLOSED'::text
+                    WHEN ((upper(COALESCE(lb.line_status, 'OPEN'::text)) = 'CLOSED'::text) OR (upper(COALESCE(lb.closed_by, ''::text)) ~~ '%MANUAL CLOSE%'::text) OR (upper(COALESCE(lb.closed_by, ''::text)) ~~ '%MANUAL BILLING%'::text) OR (upper(COALESCE(lb.closed_by, ''::text)) ~~ '%LEGACY%'::text)) THEN 'CLOSED'::text
+                    ELSE 'OPEN'::text
+                END AS closure_status
+           FROM line_base lb
+        )
+ SELECT so_id,
+    so_line_id,
+    so_number,
+    so_date,
+    order_created_at,
+    sales_rep,
+    client_code,
+    client_name,
+    line_no,
+    product_code,
+    product_name,
+    division,
+    order_qty,
+    rate,
+    order_value,
+    dispatched_qty,
+    billed_qty,
+    billed_value,
+    due_date,
+    order_status,
+    line_status,
+    closed_by,
+    closed_at,
+    last_dispatch_date,
+    last_invoice_date,
+    last_activity_at,
+    closure_status,
+    GREATEST((order_qty - dispatched_qty), (0)::numeric) AS dispatch_gap_qty,
+    GREATEST((order_qty - billed_qty), (0)::numeric) AS billing_gap_qty,
+    GREATEST((order_value - billed_value), (0)::numeric) AS billing_gap_value,
+        CASE
+            WHEN (closure_status = ANY (ARRAY['CLOSED'::text, 'CANCELLED'::text, 'SHORT_CLOSED'::text])) THEN (0)::numeric
+            WHEN (order_qty > (0)::numeric) THEN (GREATEST((order_qty - billed_qty), (0)::numeric) * (order_value / order_qty))
+            ELSE GREATEST((order_value - billed_value), (0)::numeric)
+        END AS open_order_value,
+        CASE
+            WHEN (closure_status = ANY (ARRAY['CLOSED'::text, 'CANCELLED'::text, 'SHORT_CLOSED'::text])) THEN (0)::numeric
+            ELSE GREATEST((order_qty - billed_qty), (0)::numeric)
+        END AS operational_open_qty,
+        CASE
+            WHEN ((due_date < CURRENT_DATE) AND (closure_status = 'OPEN'::text)) THEN (CURRENT_DATE - due_date)
+            ELSE 0
+        END AS overdue_days,
+        CASE
+            WHEN ((due_date < CURRENT_DATE) AND (closure_status = 'OPEN'::text)) THEN true
+            ELSE false
+        END AS is_overdue
+   FROM classified c;
+
+
+--
+-- Name: v_sales_dashboard_client_summary; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_sales_dashboard_client_summary WITH (security_invoker='on') AS
+ WITH bounds AS (
+         SELECT CURRENT_DATE AS today,
+            (date_trunc('week'::text, (CURRENT_DATE)::timestamp with time zone))::date AS week_start,
+            (date_trunc('month'::text, (CURRENT_DATE)::timestamp with time zone))::date AS month_start,
+            ((date_trunc('month'::text, (CURRENT_DATE)::timestamp with time zone) - '1 mon'::interval))::date AS prior_start,
+            ((date_trunc('month'::text, (CURRENT_DATE)::timestamp with time zone) + '1 mon'::interval))::date AS next_start
+        ), orders AS (
+         SELECT s.client_code,
+            s.client_name,
+            string_agg(DISTINCT s.sales_rep, ', '::text ORDER BY s.sales_rep) AS sales_reps,
+            sum(s.order_value) FILTER (WHERE (s.so_date = b.today)) AS order_value_today,
+            sum(s.order_value) FILTER (WHERE ((s.so_date >= b.week_start) AND (s.so_date <= b.today))) AS order_value_wtd,
+            sum(s.order_value) FILTER (WHERE ((s.so_date >= b.month_start) AND (s.so_date < b.next_start))) AS order_value_mtd,
+            sum(s.order_value) FILTER (WHERE ((s.so_date >= b.prior_start) AND (s.so_date < b.month_start))) AS order_value_prior_month,
+            count(DISTINCT s.so_id) FILTER (WHERE (s.so_date = b.today)) AS orders_today,
+            count(DISTINCT s.so_id) FILTER (WHERE ((s.so_date >= b.week_start) AND (s.so_date <= b.today))) AS orders_wtd,
+            count(DISTINCT s.so_id) FILTER (WHERE ((s.so_date >= b.month_start) AND (s.so_date < b.next_start))) AS orders_mtd,
+            sum(s.open_order_value) FILTER (WHERE (s.operational_open_qty > (0)::numeric)) AS backlog_value,
+            sum(s.open_order_value) FILTER (WHERE s.is_overdue) AS overdue_value,
+            count(*) FILTER (WHERE s.is_overdue) AS overdue_lines,
+            max(s.last_activity_at) AS last_activity_at
+           FROM (public.v_sales_live_line_snapshot s
+             CROSS JOIN bounds b)
+          GROUP BY s.client_code, s.client_name
+        ), billing AS (
+         SELECT COALESCE(inv.client_code, so.client_code, 'UNASSIGNED'::text) AS client_code,
+            sum(COALESCE(il.taxable_amount, il.line_amount, (il.qty * il.rate), (0)::numeric)) FILTER (WHERE (inv.invoice_date = b.today)) AS billing_value_today,
+            sum(COALESCE(il.taxable_amount, il.line_amount, (il.qty * il.rate), (0)::numeric)) FILTER (WHERE ((inv.invoice_date >= b.week_start) AND (inv.invoice_date <= b.today))) AS billing_value_wtd,
+            sum(COALESCE(il.taxable_amount, il.line_amount, (il.qty * il.rate), (0)::numeric)) FILTER (WHERE ((inv.invoice_date >= b.month_start) AND (inv.invoice_date < b.next_start))) AS billing_value_mtd
+           FROM (((public.invoice_lines il
+             JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+             LEFT JOIN public.sales_orders so ON ((so.id = il.so_id)))
+             CROSS JOIN bounds b)
+          WHERE ((upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          GROUP BY COALESCE(inv.client_code, so.client_code, 'UNASSIGNED'::text)
+        )
+ SELECT o.client_code,
+    o.client_name,
+    o.sales_reps,
+    COALESCE(o.order_value_today, (0)::numeric) AS order_value_today,
+    COALESCE(o.order_value_wtd, (0)::numeric) AS order_value_wtd,
+    COALESCE(o.order_value_mtd, (0)::numeric) AS order_value_mtd,
+    COALESCE(o.order_value_prior_month, (0)::numeric) AS order_value_prior_month,
+    COALESCE(bl.billing_value_today, (0)::numeric) AS billing_value_today,
+    COALESCE(bl.billing_value_wtd, (0)::numeric) AS billing_value_wtd,
+    COALESCE(bl.billing_value_mtd, (0)::numeric) AS billing_value_mtd,
+    COALESCE(o.orders_today, (0)::bigint) AS orders_today,
+    COALESCE(o.orders_wtd, (0)::bigint) AS orders_wtd,
+    COALESCE(o.orders_mtd, (0)::bigint) AS orders_mtd,
+    COALESCE(o.backlog_value, (0)::numeric) AS backlog_value,
+    COALESCE(o.overdue_value, (0)::numeric) AS overdue_value,
+    COALESCE(o.overdue_lines, (0)::bigint) AS overdue_lines,
+    COALESCE(cb.historical_max_monthly_value, (0)::numeric) AS historical_max_monthly_value,
+    COALESCE(cb.historical_avg_monthly_value, (0)::numeric) AS historical_avg_monthly_value,
+    cb.historical_top_rank,
+    COALESCE(cb.baseline_period_label, ''::text) AS baseline_period_label,
+    COALESCE(cb.decline_alert_pct, (25)::numeric) AS decline_alert_pct,
+    COALESCE(cb.active, false) AS benchmark_active,
+        CASE
+            WHEN ((COALESCE(cb.historical_max_monthly_value, (0)::numeric) > (0)::numeric) AND (COALESCE(o.order_value_mtd, (0)::numeric) > cb.historical_max_monthly_value)) THEN true
+            ELSE false
+        END AS new_benchmark_flag,
+        CASE
+            WHEN ((COALESCE(cb.historical_avg_monthly_value, (0)::numeric) > (0)::numeric) AND (COALESCE(o.order_value_mtd, (0)::numeric) < (cb.historical_avg_monthly_value * ((1)::numeric - (COALESCE(cb.decline_alert_pct, (25)::numeric) / 100.0))))) THEN true
+            ELSE false
+        END AS running_average_decline_flag,
+        CASE
+            WHEN (COALESCE(cb.historical_avg_monthly_value, (0)::numeric) > (0)::numeric) THEN round((((100)::numeric * (COALESCE(o.order_value_mtd, (0)::numeric) - cb.historical_avg_monthly_value)) / cb.historical_avg_monthly_value), 1)
+            ELSE NULL::numeric
+        END AS vs_average_pct,
+        CASE
+            WHEN (COALESCE(cb.historical_max_monthly_value, (0)::numeric) > (0)::numeric) THEN GREATEST((cb.historical_max_monthly_value - COALESCE(o.order_value_mtd, (0)::numeric)), (0)::numeric)
+            ELSE NULL::numeric
+        END AS benchmark_gap_value,
+        CASE
+            WHEN (COALESCE(o.order_value_prior_month, (0)::numeric) > (0)::numeric) THEN round((((100)::numeric * (COALESCE(o.order_value_mtd, (0)::numeric) - o.order_value_prior_month)) / o.order_value_prior_month), 1)
+            ELSE NULL::numeric
+        END AS order_growth_pct,
+    o.last_activity_at
+   FROM ((orders o
+     LEFT JOIN billing bl ON ((bl.client_code = o.client_code)))
+     LEFT JOIN public.sales_client_benchmarks cb ON (((cb.client_code = o.client_code) AND cb.active)));
+
+
+--
+-- Name: v_sales_dashboard_rep_summary; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_sales_dashboard_rep_summary WITH (security_invoker='on') AS
+ WITH bounds AS (
+         SELECT CURRENT_DATE AS today,
+            (date_trunc('week'::text, (CURRENT_DATE)::timestamp with time zone))::date AS week_start,
+            (date_trunc('month'::text, (CURRENT_DATE)::timestamp with time zone))::date AS month_start,
+            ((date_trunc('month'::text, (CURRENT_DATE)::timestamp with time zone) - '1 mon'::interval))::date AS prior_start,
+            ((date_trunc('month'::text, (CURRENT_DATE)::timestamp with time zone) + '1 mon'::interval))::date AS next_start,
+            EXTRACT(day FROM CURRENT_DATE) AS month_day_no,
+            EXTRACT(day FROM ((date_trunc('month'::text, (CURRENT_DATE)::timestamp with time zone) + '1 mon -1 days'::interval))::date) AS month_days,
+            (((CURRENT_DATE - GREATEST((date_trunc('week'::text, (CURRENT_DATE)::timestamp with time zone))::date, (date_trunc('month'::text, (CURRENT_DATE)::timestamp with time zone))::date)) + 1))::numeric AS week_elapsed_days
+        ), orders AS (
+         SELECT s.sales_rep,
+            sum(s.order_value) FILTER (WHERE (s.so_date = b_1.today)) AS order_value_today,
+            sum(s.order_value) FILTER (WHERE ((s.so_date >= b_1.week_start) AND (s.so_date <= b_1.today))) AS order_value_wtd,
+            sum(s.order_value) FILTER (WHERE ((s.so_date >= b_1.month_start) AND (s.so_date < b_1.next_start))) AS order_value_mtd,
+            sum(s.order_value) FILTER (WHERE ((s.so_date >= b_1.prior_start) AND (s.so_date < b_1.month_start))) AS order_value_prior_month,
+            count(DISTINCT s.so_id) FILTER (WHERE (s.so_date = b_1.today)) AS orders_today,
+            count(DISTINCT s.so_id) FILTER (WHERE ((s.so_date >= b_1.week_start) AND (s.so_date <= b_1.today))) AS orders_wtd,
+            count(DISTINCT s.so_id) FILTER (WHERE ((s.so_date >= b_1.month_start) AND (s.so_date < b_1.next_start))) AS orders_mtd,
+            count(DISTINCT s.client_code) FILTER (WHERE (s.so_date = b_1.today)) AS active_clients_today,
+            count(DISTINCT s.client_code) FILTER (WHERE ((s.so_date >= b_1.week_start) AND (s.so_date <= b_1.today))) AS active_clients_wtd,
+            count(DISTINCT s.client_code) FILTER (WHERE ((s.so_date >= b_1.month_start) AND (s.so_date < b_1.next_start))) AS active_clients_mtd,
+            sum(s.open_order_value) FILTER (WHERE (s.operational_open_qty > (0)::numeric)) AS backlog_value,
+            sum(s.open_order_value) FILTER (WHERE s.is_overdue) AS overdue_value,
+            count(*) FILTER (WHERE s.is_overdue) AS overdue_lines,
+            max(s.last_activity_at) AS last_activity_at
+           FROM (public.v_sales_live_line_snapshot s
+             CROSS JOIN bounds b_1)
+          GROUP BY s.sales_rep
+        ), billing AS (
+         SELECT COALESCE(NULLIF(btrim(so.sales_rep), ''::text), 'UNASSIGNED'::text) AS sales_rep,
+            sum(COALESCE(il.taxable_amount, il.line_amount, (il.qty * il.rate), (0)::numeric)) FILTER (WHERE (inv.invoice_date = b_1.today)) AS billing_value_today,
+            sum(COALESCE(il.taxable_amount, il.line_amount, (il.qty * il.rate), (0)::numeric)) FILTER (WHERE ((inv.invoice_date >= b_1.week_start) AND (inv.invoice_date <= b_1.today))) AS billing_value_wtd,
+            sum(COALESCE(il.taxable_amount, il.line_amount, (il.qty * il.rate), (0)::numeric)) FILTER (WHERE ((inv.invoice_date >= b_1.month_start) AND (inv.invoice_date < b_1.next_start))) AS billing_value_mtd,
+            sum(COALESCE(il.taxable_amount, il.line_amount, (il.qty * il.rate), (0)::numeric)) FILTER (WHERE ((inv.invoice_date >= b_1.prior_start) AND (inv.invoice_date < b_1.month_start))) AS billing_value_prior_month
+           FROM (((public.invoice_lines il
+             JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+             LEFT JOIN public.sales_orders so ON ((so.id = il.so_id)))
+             CROSS JOIN bounds b_1)
+          WHERE ((upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          GROUP BY COALESCE(NULLIF(btrim(so.sales_rep), ''::text), 'UNASSIGNED'::text)
+        ), rep_keys AS (
+         SELECT orders.sales_rep
+           FROM orders
+        UNION
+         SELECT billing.sales_rep
+           FROM billing
+        UNION
+         SELECT COALESCE(NULLIF(btrim(t_1.sales_rep), ''::text), 'UNASSIGNED'::text) AS "coalesce"
+           FROM (public.sales_monthly_targets t_1
+             CROSS JOIN bounds b_1)
+          WHERE ((t_1.period_month = b_1.month_start) AND t_1.active)
+        )
+ SELECT rk.sales_rep,
+    COALESCE(o.order_value_today, (0)::numeric) AS order_value_today,
+    COALESCE(o.order_value_wtd, (0)::numeric) AS order_value_wtd,
+    COALESCE(o.order_value_mtd, (0)::numeric) AS order_value_mtd,
+    COALESCE(o.order_value_prior_month, (0)::numeric) AS order_value_prior_month,
+    COALESCE(bl.billing_value_today, (0)::numeric) AS billing_value_today,
+    COALESCE(bl.billing_value_wtd, (0)::numeric) AS billing_value_wtd,
+    COALESCE(bl.billing_value_mtd, (0)::numeric) AS billing_value_mtd,
+    COALESCE(bl.billing_value_prior_month, (0)::numeric) AS billing_value_prior_month,
+    COALESCE(o.orders_today, (0)::bigint) AS orders_today,
+    COALESCE(o.orders_wtd, (0)::bigint) AS orders_wtd,
+    COALESCE(o.orders_mtd, (0)::bigint) AS orders_mtd,
+    COALESCE(o.active_clients_today, (0)::bigint) AS active_clients_today,
+    COALESCE(o.active_clients_wtd, (0)::bigint) AS active_clients_wtd,
+    COALESCE(o.active_clients_mtd, (0)::bigint) AS active_clients_mtd,
+    COALESCE(o.backlog_value, (0)::numeric) AS backlog_value,
+    COALESCE(o.overdue_value, (0)::numeric) AS overdue_value,
+    COALESCE(o.overdue_lines, (0)::bigint) AS overdue_lines,
+    COALESCE(t.order_target_value, (0)::numeric) AS order_target_value,
+    COALESCE(t.billing_target_value, (0)::numeric) AS billing_target_value,
+        CASE
+            WHEN ((COALESCE(t.order_target_value, (0)::numeric) > (0)::numeric) AND (b.month_days > (0)::numeric)) THEN round((t.order_target_value / b.month_days), 2)
+            ELSE (0)::numeric
+        END AS daily_order_target_value,
+        CASE
+            WHEN ((COALESCE(t.order_target_value, (0)::numeric) > (0)::numeric) AND (b.month_days > (0)::numeric)) THEN round(((t.order_target_value / b.month_days) * b.week_elapsed_days), 2)
+            ELSE (0)::numeric
+        END AS wtd_order_target_value,
+        CASE
+            WHEN ((COALESCE(t.order_target_value, (0)::numeric) > (0)::numeric) AND (b.month_days > (0)::numeric)) THEN round(((t.order_target_value / b.month_days) * b.month_day_no), 2)
+            ELSE (0)::numeric
+        END AS mtd_run_rate_target_value,
+    GREATEST((COALESCE(t.order_target_value, (0)::numeric) - COALESCE(o.order_value_mtd, (0)::numeric)), (0)::numeric) AS order_target_deficit,
+    GREATEST((COALESCE(t.billing_target_value, (0)::numeric) - COALESCE(bl.billing_value_mtd, (0)::numeric)), (0)::numeric) AS billing_target_deficit,
+        CASE
+            WHEN (COALESCE(t.order_target_value, (0)::numeric) > (0)::numeric) THEN round((((100)::numeric * COALESCE(o.order_value_mtd, (0)::numeric)) / t.order_target_value), 1)
+            ELSE NULL::numeric
+        END AS order_target_pct,
+        CASE
+            WHEN ((COALESCE(t.order_target_value, (0)::numeric) > (0)::numeric) AND (b.month_days > (0)::numeric)) THEN (COALESCE(o.order_value_today, (0)::numeric) >= (t.order_target_value / b.month_days))
+            ELSE false
+        END AS daily_order_target_hit,
+        CASE
+            WHEN ((COALESCE(t.order_target_value, (0)::numeric) > (0)::numeric) AND (b.month_days > (0)::numeric)) THEN (COALESCE(o.order_value_wtd, (0)::numeric) >= ((t.order_target_value / b.month_days) * b.week_elapsed_days))
+            ELSE false
+        END AS wtd_order_target_hit,
+        CASE
+            WHEN (COALESCE(t.order_target_value, (0)::numeric) > (0)::numeric) THEN (COALESCE(o.order_value_mtd, (0)::numeric) >= t.order_target_value)
+            ELSE false
+        END AS monthly_order_target_hit,
+        CASE
+            WHEN (COALESCE(t.billing_target_value, (0)::numeric) > (0)::numeric) THEN round((((100)::numeric * COALESCE(bl.billing_value_mtd, (0)::numeric)) / t.billing_target_value), 1)
+            ELSE NULL::numeric
+        END AS billing_target_pct,
+        CASE
+            WHEN (COALESCE(o.order_value_prior_month, (0)::numeric) > (0)::numeric) THEN round((((100)::numeric * (COALESCE(o.order_value_mtd, (0)::numeric) - o.order_value_prior_month)) / o.order_value_prior_month), 1)
+            ELSE NULL::numeric
+        END AS order_growth_pct,
+    o.last_activity_at
+   FROM ((((rep_keys rk
+     LEFT JOIN orders o ON ((o.sales_rep = rk.sales_rep)))
+     LEFT JOIN billing bl ON ((bl.sales_rep = rk.sales_rep)))
+     CROSS JOIN bounds b)
+     LEFT JOIN public.sales_monthly_targets t ON (((t.period_month = b.month_start) AND (lower(btrim(t.sales_rep)) = lower(btrim(rk.sales_rep))) AND t.active)));
+
+
+--
 -- Name: v_sales_order_advance_payment_clearance; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -20672,6 +21673,77 @@ CREATE VIEW public.v_sales_order_advance_payment_clearance WITH (security_invoke
      LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
   WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> ALL (ARRAY['CANCELLED'::text, 'CLOSED'::text])) AND (upper(COALESCE(l.status, 'OPEN'::text)) <> ALL (ARRAY['CANCELLED'::text, 'CLOSED'::text])) AND (COALESCE(so.advance_payment_required, false) = true))
   GROUP BY so.id, so.so_number, so.so_date, so.created_at, so.client_code, c.client_name, so.sales_rep, so.advance_payment_required, so.advance_payment_received;
+
+
+--
+-- Name: v_sales_order_credit_line_exposure; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_sales_order_credit_line_exposure WITH (security_invoker='on') AS
+ WITH posted_billing AS (
+         SELECT il.so_line_id,
+            (sum(COALESCE(il.qty, (0)::numeric)))::numeric(18,3) AS posted_billed_qty
+           FROM (public.invoice_lines il
+             JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+          WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          GROUP BY il.so_line_id
+        )
+ SELECT so.id AS so_id,
+    l.id AS so_line_id,
+    so.so_number,
+    so.so_date,
+    upper(TRIM(BOTH FROM COALESCE(so.client_code, ''::text))) AS client_code,
+    COALESCE(c.client_name, so.client_code, ''::text) AS client_name,
+    l.line_no,
+    upper(COALESCE(l.accounts_status, 'PENDING'::text)) AS accounts_status,
+    upper(COALESCE(l.business_status, 'PENDING'::text)) AS business_status,
+    (COALESCE(l.qty, (0)::numeric))::numeric(18,3) AS order_qty,
+    (COALESCE(pb.posted_billed_qty, (0)::numeric))::numeric(18,3) AS posted_billed_qty,
+    (GREATEST((COALESCE(l.qty, (0)::numeric) - COALESCE(pb.posted_billed_qty, (0)::numeric)), (0)::numeric))::numeric(18,3) AS open_qty,
+    (COALESCE(l.line_total, l.total_amount, l.net_amount, l.amount, (COALESCE(l.qty, (0)::numeric) * COALESCE(l.rate, (0)::numeric)), (0)::numeric))::numeric(18,2) AS ordered_line_value,
+    (round(
+        CASE
+            WHEN (COALESCE(l.qty, (0)::numeric) > (0)::numeric) THEN ((GREATEST((COALESCE(l.qty, (0)::numeric) - COALESCE(pb.posted_billed_qty, (0)::numeric)), (0)::numeric) * COALESCE(l.line_total, l.total_amount, l.net_amount, l.amount, (COALESCE(l.qty, (0)::numeric) * COALESCE(l.rate, (0)::numeric)), (0)::numeric)) / NULLIF(l.qty, (0)::numeric))
+            ELSE (0)::numeric
+        END, 2))::numeric(18,2) AS open_line_value
+   FROM (((public.sales_order_lines l
+     JOIN public.sales_orders so ON ((so.id = l.so_id)))
+     LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+     LEFT JOIN posted_billing pb ON ((pb.so_line_id = l.id)))
+  WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> ALL (ARRAY['CANCELLED'::text, 'CLOSED'::text])) AND (upper(COALESCE(l.status, 'OPEN'::text)) <> ALL (ARRAY['CANCELLED'::text, 'CLOSED'::text])) AND (upper(COALESCE(so.sales_type, ''::text)) <> 'MANUAL_BILLING'::text) AND (upper(COALESCE(so.order_prefix, ''::text)) <> 'MB'::text) AND (COALESCE(so.so_number, ''::text) !~* '^MB[/-]'::text));
+
+
+--
+-- Name: v_sales_order_client_credit_exposure; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_sales_order_client_credit_exposure WITH (security_invoker='on') AS
+ WITH pipeline AS (
+         SELECT v_sales_order_credit_line_exposure.client_code,
+            (round(sum(v_sales_order_credit_line_exposure.open_line_value), 2))::numeric(18,2) AS approved_pipeline_value
+           FROM public.v_sales_order_credit_line_exposure
+          WHERE ((v_sales_order_credit_line_exposure.accounts_status = 'APPROVED'::text) AND (v_sales_order_credit_line_exposure.open_qty > (0)::numeric))
+          GROUP BY v_sales_order_credit_line_exposure.client_code
+        )
+ SELECT upper(TRIM(BOTH FROM c.client_code)) AS client_code,
+    c.client_name,
+    s.credit_limit,
+    s.current_balance,
+    (COALESCE(p.approved_pipeline_value, (0)::numeric))::numeric(18,2) AS approved_pipeline_value,
+        CASE
+            WHEN (s.current_balance IS NULL) THEN NULL::numeric
+            ELSE (round((s.current_balance + COALESCE(p.approved_pipeline_value, (0)::numeric)), 2))::numeric(18,2)
+        END AS total_exposure,
+        CASE
+            WHEN ((s.credit_limit IS NULL) OR (s.current_balance IS NULL)) THEN NULL::numeric
+            ELSE (round((s.credit_limit - (s.current_balance + COALESCE(p.approved_pipeline_value, (0)::numeric))), 2))::numeric(18,2)
+        END AS available_credit,
+    (s.client_code IS NOT NULL) AS has_credit_snapshot,
+    s.synced_at AS credit_synced_at,
+    s.synced_by AS credit_synced_by
+   FROM ((public.clients c
+     LEFT JOIN public.client_credit_snapshot s ON ((s.client_code = upper(TRIM(BOTH FROM c.client_code)))))
+     LEFT JOIN pipeline p ON ((p.client_code = upper(TRIM(BOTH FROM c.client_code)))));
 
 
 --
@@ -20837,7 +21909,8 @@ CREATE VIEW public.v_sales_order_lines_for_approval WITH (security_invoker='on')
             ELSE true
         END AS is_line_active,
     COALESCE(so.advance_payment_required, false) AS advance_payment_required,
-    COALESCE(so.advance_payment_received, false) AS advance_payment_received
+    COALESCE(so.advance_payment_received, false) AS advance_payment_received,
+    COALESCE(l.division, ''::text) AS division
    FROM ((public.sales_order_lines l
      JOIN public.sales_orders so ON ((so.id = l.so_id)))
      LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
@@ -21430,6 +22503,35 @@ CREATE TABLE public.wo_sequence (
 
 
 --
+-- Name: work_order_deletion_audit_log; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.work_order_deletion_audit_log (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    wo_id uuid NOT NULL,
+    wo_number text NOT NULL,
+    wo_date date,
+    wo_status text,
+    work_order_type text,
+    deleted_by text DEFAULT ''::text NOT NULL,
+    deletion_reason text DEFAULT ''::text NOT NULL,
+    deletion_status text DEFAULT 'PENDING'::text NOT NULL,
+    deleted_data jsonb DEFAULT '{}'::jsonb NOT NULL,
+    so_numbers text[] DEFAULT ARRAY[]::text[] NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT work_order_deletion_audit_status_chk CHECK ((deletion_status = ANY (ARRAY['PENDING'::text, 'COMPLETED'::text])))
+);
+
+
+--
+-- Name: TABLE work_order_deletion_audit_log; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.work_order_deletion_audit_log IS 'Immutable snapshot archive created before an eligible work order is deleted.';
+
+
+--
 -- Name: messages; Type: TABLE; Schema: realtime; Owner: -
 --
 
@@ -21441,7 +22543,8 @@ CREATE TABLE realtime.messages (
     private boolean DEFAULT false,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     inserted_at timestamp without time zone DEFAULT now() NOT NULL,
-    id uuid DEFAULT gen_random_uuid() NOT NULL
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    binary_payload bytea
 )
 PARTITION BY RANGE (inserted_at);
 
@@ -21469,6 +22572,7 @@ CREATE TABLE realtime.subscription (
     claims_role regrole GENERATED ALWAYS AS (realtime.to_regrole((claims ->> 'role'::text))) STORED NOT NULL,
     created_at timestamp without time zone DEFAULT timezone('utc'::text, now()) NOT NULL,
     action_filter text DEFAULT '*'::text,
+    selected_columns text[],
     CONSTRAINT subscription_action_filter_check CHECK ((action_filter = ANY (ARRAY['*'::text, 'INSERT'::text, 'UPDATE'::text, 'DELETE'::text])))
 );
 
@@ -22021,6 +23125,22 @@ ALTER TABLE ONLY public.checklist_weekly_offs
 
 ALTER TABLE ONLY public.checklist_weekly_offs
     ADD CONSTRAINT checklist_weekly_offs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: client_credit_snapshot_history client_credit_snapshot_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.client_credit_snapshot_history
+    ADD CONSTRAINT client_credit_snapshot_history_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: client_credit_snapshot client_credit_snapshot_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.client_credit_snapshot
+    ADD CONSTRAINT client_credit_snapshot_pkey PRIMARY KEY (client_code);
 
 
 --
@@ -22648,6 +23768,30 @@ ALTER TABLE ONLY public.roles
 
 
 --
+-- Name: sales_client_benchmarks sales_client_benchmarks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sales_client_benchmarks
+    ADD CONSTRAINT sales_client_benchmarks_pkey PRIMARY KEY (client_code);
+
+
+--
+-- Name: sales_monthly_targets sales_monthly_targets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sales_monthly_targets
+    ADD CONSTRAINT sales_monthly_targets_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: sales_order_credit_override_audit sales_order_credit_override_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sales_order_credit_override_audit
+    ADD CONSTRAINT sales_order_credit_override_audit_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: sales_order_lines sales_order_lines_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -22720,6 +23864,14 @@ ALTER TABLE ONLY public.wo_sequence
 
 
 --
+-- Name: work_order_deletion_audit_log work_order_deletion_audit_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_order_deletion_audit_log
+    ADD CONSTRAINT work_order_deletion_audit_log_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: work_order_jobs work_order_jobs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -22757,6 +23909,14 @@ ALTER TABLE ONLY public.work_orders
 
 ALTER TABLE ONLY public.work_orders
     ADD CONSTRAINT work_orders_wo_number_key UNIQUE (wo_number);
+
+
+--
+-- Name: messages messages_payload_exclusive; Type: CHECK CONSTRAINT; Schema: realtime; Owner: -
+--
+
+ALTER TABLE realtime.messages
+    ADD CONSTRAINT messages_payload_exclusive CHECK (((payload IS NULL) OR (binary_payload IS NULL))) NOT VALID;
 
 
 --
@@ -23413,6 +24573,13 @@ CREATE INDEX idx_artworks_tooling_lookup ON public.artworks USING btree (so_id, 
 --
 
 CREATE INDEX idx_billing_division_bulk_fix_invoice_no ON public.billing_division_bulk_fix USING btree (invoice_no);
+
+
+--
+-- Name: idx_client_credit_snapshot_history_client; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_client_credit_snapshot_history_client ON public.client_credit_snapshot_history USING btree (client_code, synced_at DESC);
 
 
 --
@@ -24403,6 +25570,34 @@ CREATE INDEX idx_routing_wo ON public.work_order_routing USING btree (wo_id);
 
 
 --
+-- Name: idx_sales_client_benchmarks_rank; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sales_client_benchmarks_rank ON public.sales_client_benchmarks USING btree (active, historical_top_rank);
+
+
+--
+-- Name: idx_sales_dashboard_dispatch_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sales_dashboard_dispatch_date ON public.dispatch_records USING btree (dispatch_date, so_line_id);
+
+
+--
+-- Name: idx_sales_dashboard_invoice_date_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sales_dashboard_invoice_date_status ON public.invoices USING btree (invoice_date, status, posted_at);
+
+
+--
+-- Name: idx_sales_dashboard_so_date_rep; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_sales_dashboard_so_date_rep ON public.sales_orders USING btree (so_date, sales_rep, client_code);
+
+
+--
 -- Name: idx_sales_order_lines_active; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -24617,6 +25812,20 @@ CREATE INDEX idx_vpb_wo ON public.work_order_routing USING btree (wo_id);
 --
 
 CREATE INDEX idx_wo_sequence_lastno ON public.wo_sequence USING btree (last_no);
+
+
+--
+-- Name: idx_work_order_deletion_audit_wo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_order_deletion_audit_wo ON public.work_order_deletion_audit_log USING btree (wo_number, created_at DESC);
+
+
+--
+-- Name: idx_work_order_deletion_audit_wo_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_order_deletion_audit_wo_id ON public.work_order_deletion_audit_log USING btree (wo_id, created_at DESC);
 
 
 --
@@ -24942,6 +26151,20 @@ CREATE UNIQUE INDEX uq_purchase_order_lines_po_line ON public.purchase_order_lin
 
 
 --
+-- Name: uq_sales_monthly_targets_rep_period; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_sales_monthly_targets_rep_period ON public.sales_monthly_targets USING btree (period_month, lower(btrim(sales_rep)));
+
+
+--
+-- Name: uq_sales_monthly_targets_rep_period_exact; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_sales_monthly_targets_rep_period_exact ON public.sales_monthly_targets USING btree (period_month, sales_rep);
+
+
+--
 -- Name: uq_wom_material; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -24970,10 +26193,10 @@ CREATE INDEX messages_inserted_at_topic_index ON ONLY realtime.messages USING bt
 
 
 --
--- Name: subscription_subscription_id_entity_filters_action_filter_key; Type: INDEX; Schema: realtime; Owner: -
+-- Name: subscription_subscription_id_entity_filters_action_filter_selec; Type: INDEX; Schema: realtime; Owner: -
 --
 
-CREATE UNIQUE INDEX subscription_subscription_id_entity_filters_action_filter_key ON realtime.subscription USING btree (subscription_id, entity, filters, action_filter);
+CREATE UNIQUE INDEX subscription_subscription_id_entity_filters_action_filter_selec ON realtime.subscription USING btree (subscription_id, entity, filters, action_filter, COALESCE(selected_columns, '{}'::text[]));
 
 
 --
@@ -25121,6 +26344,20 @@ CREATE TRIGGER trg_npd_requests_updated_at BEFORE UPDATE ON public.npd_requests 
 --
 
 CREATE TRIGGER trg_npd_sample_work_orders_updated_at BEFORE UPDATE ON public.npd_sample_work_orders FOR EACH ROW EXECUTE FUNCTION public.set_updated_at_timestamp();
+
+
+--
+-- Name: work_orders trg_prevent_unaudited_work_order_delete; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_prevent_unaudited_work_order_delete BEFORE DELETE ON public.work_orders FOR EACH ROW EXECUTE FUNCTION public.prevent_unaudited_work_order_delete();
+
+
+--
+-- Name: work_order_deletion_audit_log trg_protect_work_order_deletion_audit_log; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_protect_work_order_deletion_audit_log BEFORE DELETE OR UPDATE ON public.work_order_deletion_audit_log FOR EACH ROW EXECUTE FUNCTION public.protect_work_order_deletion_audit_log();
 
 
 --
@@ -26104,6 +27341,18 @@ ALTER TABLE public.checklist_task_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.checklist_weekly_offs ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: client_credit_snapshot; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.client_credit_snapshot ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: client_credit_snapshot_history; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.client_credit_snapshot_history ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: client_parties; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -26452,6 +27701,24 @@ ALTER TABLE public.role_permissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.roles ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: sales_client_benchmarks; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.sales_client_benchmarks ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: sales_monthly_targets; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.sales_monthly_targets ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: sales_order_credit_override_audit; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.sales_order_credit_override_audit ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: sales_order_lines; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -26480,6 +27747,12 @@ ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.wo_sequence ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: work_order_deletion_audit_log; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.work_order_deletion_audit_log ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: work_order_jobs; Type: ROW SECURITY; Schema: public; Owner: -
@@ -26622,5 +27895,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict NqMuXTpe0EaL4g7lCdt5PTPHNDWPfFt6snaptfBuxB9TU7BeGrwjjtaceor5Ktx
+\unrestrict d3XOIdxD2vwIauo1Igfz9MJzKnOXTcc27EZrOWbTBJAIk7m9YJRo2efCrCmPaVT
 
