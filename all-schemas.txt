@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict d3XOIdxD2vwIauo1Igfz9MJzKnOXTcc27EZrOWbTBJAIk7m9YJRo2efCrCmPaVT
+\restrict 4ntKuEuQn8fLfZWUAHekOPZJaN3kRn0A2TNjvwS18Vvc4Vw7XcKGBkSHmP0W9uN
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.3
@@ -1348,9 +1348,11 @@ CREATE FUNCTION public.billing_job_dataset_v4(p_client_code text, p_so_number te
       from public.sales_orders so
       where so.client_code = p_client_code
         and upper(coalesce(so.status, 'OPEN')) <> 'CANCELLED'
+        and upper(coalesce(so.order_prefix, '')) <> 'MB'
+        and upper(coalesce(so.sales_type, '')) <> 'MANUAL_BILLING'
+        and coalesce(so.so_number, '') !~* '^MB[/-]'
         and (coalesce(trim(p_so_number), '') = '' or so.so_number = trim(p_so_number))
       order by so.so_date desc nulls last, so.so_number desc
-      limit 500
     ) x
   ),
   job_rows as (
@@ -4585,7 +4587,6 @@ DECLARE
   final_payload jsonb;
 BEGIN
   BEGIN
-    -- Generate a new UUID for the id
     generated_id := gen_random_uuid();
 
     -- Check if payload has an 'id' key, if not, add the generated UUID
@@ -4598,13 +4599,11 @@ BEGIN
     -- Set the topic configuration
     EXECUTE format('SET LOCAL realtime.topic TO %L', topic);
 
-    -- Attempt to insert the message
     INSERT INTO realtime.messages (id, payload, event, topic, private, extension)
     VALUES (generated_id, final_payload, event, topic, private, 'broadcast');
   EXCEPTION
     WHEN OTHERS THEN
-      -- Capture and notify the error
-      RAISE WARNING 'ErrorSendingBroadcastMessage: %', SQLERRM;
+      RAISE WARNING 'WarnSendingBroadcastMessage: %', SQLERRM;
   END;
 END;
 $$;
@@ -4629,7 +4628,7 @@ BEGIN
     VALUES (generated_id, payload, event, topic, private, 'broadcast');
   EXCEPTION
     WHEN OTHERS THEN
-      RAISE WARNING 'ErrorSendingBroadcastMessage: %', SQLERRM;
+      RAISE WARNING 'WarnSendingBroadcastMessage: %', SQLERRM;
   END;
 END;
 $$;
@@ -4644,40 +4643,31 @@ CREATE FUNCTION realtime.subscription_check_filters() RETURNS trigger
     AS $$
 declare
     col_names text[] = coalesce(
-            array_agg(c.column_name order by c.ordinal_position),
+            array_agg(a.attname order by a.attnum),
             '{}'::text[]
         )
         from
-            information_schema.columns c
+            pg_catalog.pg_attribute a
         where
-            format('%I.%I', c.table_schema, c.table_name)::regclass = new.entity
+            a.attrelid = new.entity
+            and a.attnum > 0
+            and not a.attisdropped
             and pg_catalog.has_column_privilege(
                 (new.claims ->> 'role'),
-                format('%I.%I', c.table_schema, c.table_name)::regclass,
-                c.column_name,
+                a.attrelid,
+                a.attnum,
                 'SELECT'
             );
-    table_col_names text[] = coalesce(
-            array_agg(pa.attname),
-            '{}'::text[]
-        )
-        from
-            pg_attribute pa
-        where
-            pa.attrelid = new.entity
-            and pa.attnum > 0;
     filter realtime.user_defined_filter;
     col_type regtype;
     in_val jsonb;
     selected_col text;
 begin
     for filter in select * from unnest(new.filters) loop
-        -- Filtered column is valid
         if not filter.column_name = any(col_names) then
             raise exception 'invalid column for filter %', filter.column_name;
         end if;
 
-        -- Type is sanitized and safe for string interpolation
         col_type = (
             select atttypid::regtype
             from pg_catalog.pg_attribute
@@ -4687,18 +4677,17 @@ begin
         if col_type is null then
             raise exception 'failed to lookup type for column %', filter.column_name;
         end if;
+
         if filter.op = 'in'::realtime.equality_op then
             in_val = realtime.cast(filter.value, (col_type::text || '[]')::regtype);
             if coalesce(jsonb_array_length(in_val), 0) > 100 then
                 raise exception 'too many values for `in` filter. Maximum 100';
             end if;
         else
-            -- raises an exception if value is not coercable to type
             perform realtime.cast(filter.value, col_type);
         end if;
     end loop;
 
-    -- Validate that selected_columns reference columns the role can SELECT
     if new.selected_columns is not null then
         for selected_col in select * from unnest(new.selected_columns) loop
             if not selected_col = any(col_names) then
@@ -4707,15 +4696,11 @@ begin
         end loop;
     end if;
 
-    -- Apply consistent order to filters so the unique constraint on
-    -- (subscription_id, entity, filters) can't be tricked by a different filter order
     new.filters = coalesce(
         array_agg(f order by f.column_name, f.op, f.value),
         '{}'
     ) from unnest(new.filters) f;
 
-    -- Normalize selected_columns order so ARRAY['a','b'] and ARRAY['b','a'] are
-    -- treated as the same subscription group in apply_rls
     new.selected_columns = (
         select array_agg(c order by c)
         from unnest(new.selected_columns) c
@@ -8460,7 +8445,7 @@ CREATE TABLE public.invoice_lines (
     product_name text,
     hsn text,
     qty numeric(14,3) NOT NULL,
-    rate numeric(14,2) NOT NULL,
+    rate numeric(14,3) NOT NULL,
     line_amount numeric(14,2) NOT NULL,
     cgst_pct numeric(6,2) DEFAULT 0,
     sgst_pct numeric(6,2) DEFAULT 0,
@@ -11251,6 +11236,35 @@ COMMENT ON VIEW public.v_flexo_work_order_jobs IS 'Fast Flexo Work Order queue: 
 
 
 --
+-- Name: v_inventory_item_purchase_rate_history; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_inventory_item_purchase_rate_history AS
+ SELECT (l.id)::text AS receipt_id,
+    l.created_at AS receipt_at,
+    (l.created_at)::date AS receipt_date,
+    COALESCE(NULLIF("substring"(COALESCE(l.remarks, ''::text), 'GRN:([^|]+)'::text), ''::text), ''::text) AS grn_no,
+    COALESCE(l.ref_no, ''::text) AS po_no,
+    COALESCE(NULLIF("substring"(COALESCE(l.remarks, ''::text), 'POLine:([^ |]+)'::text), ''::text), ''::text) AS po_line_id,
+    COALESCE(i.item_code, ''::text) AS item_code,
+    COALESCE(i.item_name, ''::text) AS item_name,
+    (COALESCE(l.qty_in, (0)::numeric))::numeric(14,4) AS qty,
+    (COALESCE(l.rate, (0)::numeric))::numeric(18,4) AS rate,
+    (COALESCE(l.value, (0)::numeric))::numeric(18,2) AS value,
+    COALESCE(l.location, ''::text) AS location,
+    COALESCE(l.department, ''::text) AS department,
+    TRIM(BOTH FROM COALESCE(NULLIF("substring"(COALESCE(l.remarks, ''::text), 'Vendor:([^|]+)'::text), ''::text), ''::text)) AS vendor_name,
+    TRIM(BOTH FROM COALESCE(NULLIF("substring"(COALESCE(l.remarks, ''::text), 'INV:([^|]+)'::text), ''::text), ''::text)) AS invoice_no,
+    TRIM(BOTH FROM COALESCE(NULLIF("substring"(COALESCE(l.remarks, ''::text), 'ChallanNo:([^|]+)'::text), ''::text), ''::text)) AS challan_no,
+    COALESCE(l.remarks, ''::text) AS remarks
+   FROM (public.inv_ledger l
+     LEFT JOIN public.inv_items i ON ((i.id = l.item_id)))
+  WHERE ((upper(COALESCE(l.ref_type, ''::text)) = 'PO-RECEIPT'::text) AND (COALESCE(l.qty_in, (0)::numeric) > (0)::numeric) AND (COALESCE(l.rate, (0)::numeric) > (0)::numeric) AND (NOT (EXISTS ( SELECT 1
+           FROM public.inv_ledger rev
+          WHERE ((rev.ref_no = (l.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))));
+
+
+--
 -- Name: v_npd_request_register; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -12405,22 +12419,86 @@ CREATE VIEW public.v_purchase_order_summary AS
 
 
 --
+-- Name: v_purchase_po_active_receipts; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_purchase_po_active_receipts AS
+ WITH active_receipt_ledger AS (
+         SELECT (l.id)::text AS receipt_id,
+            l.ref_no AS po_no,
+            NULLIF("substring"(COALESCE(l.remarks, ''::text), 'POLine:([^ |]+)'::text), ''::text) AS po_line_id,
+            l.created_at,
+            l.qty_in,
+            l.rate,
+            l.department,
+            l.remarks
+           FROM public.inv_ledger l
+          WHERE ((upper(COALESCE(l.ref_type, ''::text)) = 'PO-RECEIPT'::text) AND (COALESCE(l.qty_in, (0)::numeric) > (0)::numeric) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.inv_ledger rev
+                  WHERE ((rev.ref_no = (l.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
+        )
+ SELECT receipt_id,
+    po_no,
+    po_line_id,
+    (created_at)::date AS receipt_date,
+    created_at,
+    (COALESCE(qty_in, (0)::numeric))::numeric(14,4) AS qty,
+    (COALESCE(rate, (0)::numeric))::numeric(18,2) AS rate,
+    COALESCE(department, ''::text) AS department,
+    COALESCE(remarks, ''::text) AS remarks
+   FROM active_receipt_ledger;
+
+
+--
 -- Name: v_purchase_requests_open; Type: VIEW; Schema: public; Owner: -
 --
 
 CREATE VIEW public.v_purchase_requests_open AS
- WITH po_alloc_base AS (
+ WITH receipt_by_line AS (
+         SELECT v_purchase_po_active_receipts.po_line_id,
+            (sum(COALESCE(v_purchase_po_active_receipts.qty, (0)::numeric)))::numeric(14,4) AS received_qty
+           FROM public.v_purchase_po_active_receipts
+          GROUP BY v_purchase_po_active_receipts.po_line_id
+        ), po_line_alloc AS (
+         SELECT pol.id,
+            pol.po_id,
+            pol.po_no,
+            pol.line_no,
+            pol.source_type,
+            pol.source_ref,
+            pol.item_code,
+            pol.item_name,
+            pol.qty,
+            pol.rate,
+            pol.amount,
+            pol.department,
+            pol.job_ref,
+            pol.remarks,
+            pol.created_at,
+            pol.tax_pct,
+            pol.tax_amount,
+            pol.total_amount,
+            (COALESCE(r.received_qty, (0)::numeric))::numeric(14,4) AS received_qty,
+            (
+                CASE
+                    WHEN (COALESCE(pol.remarks, ''::text) ~* '\[PO_SHORT_CLOSE'::text) THEN LEAST(GREATEST((COALESCE(pol.qty, (0)::numeric) - COALESCE(r.received_qty, (0)::numeric)), (0)::numeric), COALESCE((NULLIF("substring"(COALESCE(pol.remarks, ''::text), '\[PO_SHORT_CLOSE[^\]]*qty=([0-9.]+)'::text), ''::text))::numeric, GREATEST((COALESCE(pol.qty, (0)::numeric) - COALESCE(r.received_qty, (0)::numeric)), (0)::numeric)))
+                    ELSE (0)::numeric
+                END)::numeric(14,4) AS short_closed_qty
+           FROM (public.purchase_order_lines pol
+             LEFT JOIN receipt_by_line r ON ((r.po_line_id = (pol.id)::text)))
+        ), po_alloc_base AS (
          SELECT pol.source_ref AS pr_no,
             (sum(COALESCE(pol.qty, (0)::numeric)))::numeric(14,4) AS ordered_qty,
-            (sum(GREATEST((COALESCE(pol.qty, (0)::numeric) - COALESCE(r.received_qty, (0)::numeric)), (0)::numeric)))::numeric(14,4) AS open_po_qty,
+            (sum(COALESCE(pol.short_closed_qty, (0)::numeric)))::numeric(14,4) AS short_closed_qty,
+            (sum(GREATEST(((COALESCE(pol.qty, (0)::numeric) - COALESCE(pol.received_qty, (0)::numeric)) - COALESCE(pol.short_closed_qty, (0)::numeric)), (0)::numeric)))::numeric(14,4) AS open_po_qty,
             (max(pol.rate))::numeric(18,2) AS po_rate,
+            (max(pol.tax_pct))::numeric(18,2) AS tax_pct,
+            min(po_1.order_date) AS first_po_date,
+            max(po_1.order_date) AS latest_po_date,
             string_agg(DISTINCT pol.po_no, ', '::text ORDER BY pol.po_no) FILTER (WHERE (COALESCE(pol.po_no, ''::text) <> ''::text)) AS po_refs
-           FROM (public.purchase_order_lines pol
-             LEFT JOIN ( SELECT purchase_po_receipts.po_line_id,
-                    (sum(COALESCE(purchase_po_receipts.qty, (0)::numeric)))::numeric(14,4) AS received_qty
-                   FROM public.purchase_po_receipts
-                  GROUP BY purchase_po_receipts.po_line_id) r ON ((r.po_line_id = pol.id)))
-          WHERE (upper(COALESCE(pol.source_type, ''::text)) = 'INVENTORY_PR'::text)
+           FROM (po_line_alloc pol
+             JOIN public.purchase_orders po_1 ON ((po_1.id = pol.po_id)))
+          WHERE ((upper(COALESCE(pol.source_type, ''::text)) = 'INVENTORY_PR'::text) AND (upper(COALESCE(po_1.status, 'OPEN'::text)) <> 'CANCELLED'::text))
           GROUP BY pol.source_ref
         )
  SELECT pr.pr_no,
@@ -12432,13 +12510,18 @@ CREATE VIEW public.v_purchase_requests_open AS
     COALESCE(pr.department, ''::text) AS department,
     COALESCE(pr.job_ref, ''::text) AS job_ref,
     COALESCE(pr.remarks, ''::text) AS remarks,
-    COALESCE(pr.status, 'OPEN'::text) AS status,
+        CASE
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = ANY (ARRAY['CLOSED'::text, 'SHORT_CLOSED'::text, 'CANCELLED'::text])) THEN COALESCE(pr.status, 'OPEN'::text)
+            WHEN ((COALESCE(po.short_closed_qty, (0)::numeric) > (0)::numeric) AND (COALESCE(po.open_po_qty, (0)::numeric) <= 0.0001)) THEN 'SHORT_CLOSED'::text
+            ELSE COALESCE(pr.status, 'OPEN'::text)
+        END AS status,
     COALESCE(po.ordered_qty, (0)::numeric) AS pending_qty,
     (COALESCE(po.open_po_qty, (0)::numeric))::numeric(14,4) AS open_po_qty,
     (COALESCE(po.po_rate, (0)::numeric))::numeric(18,2) AS po_rate,
-    (0)::numeric(18,2) AS tax_pct,
+    (COALESCE(po.tax_pct, (0)::numeric))::numeric(18,2) AS tax_pct,
     (GREATEST(((COALESCE(pr.requested_qty, (0)::numeric) - COALESCE(pr.received_qty, (0)::numeric)) - COALESCE(po.open_po_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS available_to_order_qty,
-    COALESCE(po.po_refs, ''::text) AS po_refs
+    COALESCE(po.po_refs, ''::text) AS po_refs,
+    (COALESCE(po.short_closed_qty, (0)::numeric))::numeric(14,4) AS short_closed_qty
    FROM (public.inv_purchase_requests pr
      LEFT JOIN po_alloc_base po ON ((po.pr_no = pr.pr_no)))
   WHERE (upper(COALESCE(pr.status, 'OPEN'::text)) <> 'CLOSED'::text);
@@ -12495,13 +12578,32 @@ CREATE VIEW public.v_purchase_lead_time_items AS
 --
 
 CREATE VIEW public.v_purchase_orders_read_model AS
- WITH receipt_by_line AS (
-         SELECT r.po_line_id,
-            (sum(COALESCE(r.qty, (0)::numeric)))::numeric(14,4) AS received_qty,
-            max(r.receipt_date) AS latest_receipt_date,
-            jsonb_agg(jsonb_build_object('id', (r.id)::text, 'poId', COALESCE((r.po_id)::text, ''::text), 'poNo', COALESCE(r.po_no, ''::text), 'poLineId', COALESCE((r.po_line_id)::text, ''::text), 'lineNo', COALESCE(r.line_no, 0), 'sourceType', COALESCE(r.source_type, ''::text), 'receiptDate', r.receipt_date, 'challanNo', COALESCE(r.challan_no, ''::text), 'qty', COALESCE(r.qty, (0)::numeric), 'rate', COALESCE(r.rate, (0)::numeric), 'remarks', COALESCE(r.remarks, ''::text), 'createdAt', r.created_at) ORDER BY r.receipt_date DESC, r.created_at DESC, r.id DESC) AS receipt_entries
-           FROM public.purchase_po_receipts r
-          GROUP BY r.po_line_id
+ WITH receipt_source AS (
+         SELECT (r.po_line_id)::text AS po_line_id,
+            (COALESCE(r.qty, (0)::numeric))::numeric(14,4) AS qty,
+            r.receipt_date,
+            r.created_at,
+            (r.id)::text AS receipt_id,
+            jsonb_build_object('id', (r.id)::text, 'poId', COALESCE((r.po_id)::text, ''::text), 'poNo', COALESCE(r.po_no, ''::text), 'poLineId', COALESCE((r.po_line_id)::text, ''::text), 'lineNo', COALESCE(r.line_no, 0), 'sourceType', COALESCE(r.source_type, ''::text), 'receiptDate', r.receipt_date, 'challanNo', COALESCE(r.challan_no, ''::text), 'qty', COALESCE(r.qty, (0)::numeric), 'rate', COALESCE(r.rate, (0)::numeric), 'remarks', COALESCE(r.remarks, ''::text), 'createdAt', r.created_at) AS entry
+           FROM (public.purchase_po_receipts r
+             LEFT JOIN public.purchase_order_lines pol_1 ON ((pol_1.id = r.po_line_id)))
+          WHERE (upper(COALESCE(pol_1.source_type, r.source_type, ''::text)) = ANY (ARRAY['ARTWORK_PLATE'::text, 'ARTWORK_DIE'::text, 'DIRECT_PLATE'::text, 'DIRECT_DIE'::text]))
+        UNION ALL
+         SELECT ar.po_line_id,
+            (COALESCE(ar.qty, (0)::numeric))::numeric(14,4) AS qty,
+            ar.receipt_date,
+            ar.created_at,
+            ar.receipt_id,
+            jsonb_build_object('id', ar.receipt_id, 'poId', '', 'poNo', COALESCE(ar.po_no, ''::text), 'poLineId', COALESCE(ar.po_line_id, ''::text), 'lineNo', 0, 'sourceType', 'INVENTORY_PR', 'receiptDate', ar.receipt_date, 'challanNo', '', 'qty', COALESCE(ar.qty, (0)::numeric), 'rate', COALESCE(ar.rate, (0)::numeric), 'remarks', COALESCE(ar.remarks, ''::text), 'createdAt', ar.created_at) AS entry
+           FROM public.v_purchase_po_active_receipts ar
+          WHERE (COALESCE(ar.po_line_id, ''::text) <> ''::text)
+        ), receipt_by_line AS (
+         SELECT receipt_source.po_line_id,
+            (sum(receipt_source.qty))::numeric(14,4) AS received_qty,
+            max(receipt_source.receipt_date) AS latest_receipt_date,
+            jsonb_agg(receipt_source.entry ORDER BY receipt_source.receipt_date DESC, receipt_source.created_at DESC, receipt_source.receipt_id DESC) AS receipt_entries
+           FROM receipt_source
+          GROUP BY receipt_source.po_line_id
         )
  SELECT (po.id)::text AS po_id,
     po.po_no,
@@ -12549,7 +12651,58 @@ CREATE VIEW public.v_purchase_orders_read_model AS
    FROM (((public.purchase_orders po
      JOIN public.purchase_order_lines pol ON ((pol.po_id = po.id)))
      LEFT JOIN public.purchase_vendors v ON ((v.id = po.vendor_id)))
-     LEFT JOIN receipt_by_line rb ON ((rb.po_line_id = pol.id)));
+     LEFT JOIN receipt_by_line rb ON ((rb.po_line_id = (pol.id)::text)));
+
+
+--
+-- Name: v_purchase_orders_read_model_v2; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_purchase_orders_read_model_v2 AS
+ SELECT po_id,
+    po_no,
+    order_date,
+    vendor_id,
+    vendor_name,
+    vendor_gstin,
+    vendor_email,
+    vendor_phone,
+    vendor_address,
+    payment_terms,
+    freight_terms,
+    freight_value,
+    delivery_terms,
+    notes,
+    status,
+    total_qty,
+    basic_total,
+    tax_total,
+    total_value,
+    created_by,
+    created_at,
+    updated_at,
+    line_id,
+    line_no,
+    source_type,
+    source_ref,
+    item_code,
+    item_name,
+    qty,
+    rate,
+    tax_pct,
+    amount,
+    tax_amount,
+    total_amount,
+    department,
+    job_ref,
+    remarks,
+    line_created_at,
+    received_qty,
+    pending_qty,
+    over_received_qty,
+    latest_receipt_date,
+    receipt_entries
+   FROM public.v_purchase_orders_read_model;
 
 
 --
@@ -12618,6 +12771,90 @@ CREATE VIEW public.v_purchase_po_print_lines AS
      JOIN public.purchase_order_lines pol ON ((pol.po_id = po.id)))
      LEFT JOIN public.purchase_vendors v ON ((v.id = po.vendor_id)))
      LEFT JOIN public.inv_items i ON ((i.item_code = pol.item_code)));
+
+
+--
+-- Name: v_purchase_requests_read_model; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_purchase_requests_read_model AS
+ WITH receipt_by_line AS (
+         SELECT ar.po_line_id,
+            (sum(COALESCE(ar.qty, (0)::numeric)))::numeric(14,4) AS received_qty
+           FROM public.v_purchase_po_active_receipts ar
+          WHERE (COALESCE(ar.po_line_id, ''::text) <> ''::text)
+          GROUP BY ar.po_line_id
+        ), po_line_alloc AS (
+         SELECT pol.id,
+            pol.po_id,
+            pol.po_no,
+            pol.line_no,
+            pol.source_type,
+            pol.source_ref,
+            pol.item_code,
+            pol.item_name,
+            pol.qty,
+            pol.rate,
+            pol.amount,
+            pol.department,
+            pol.job_ref,
+            pol.remarks,
+            pol.created_at,
+            pol.tax_pct,
+            pol.tax_amount,
+            pol.total_amount,
+            (COALESCE(r.received_qty, (0)::numeric))::numeric(14,4) AS received_qty,
+            (
+                CASE
+                    WHEN (COALESCE(pol.remarks, ''::text) ~* '\[PO_SHORT_CLOSE'::text) THEN LEAST(GREATEST((COALESCE(pol.qty, (0)::numeric) - COALESCE(r.received_qty, (0)::numeric)), (0)::numeric), COALESCE((NULLIF("substring"(COALESCE(pol.remarks, ''::text), '\[PO_SHORT_CLOSE[^\]]*qty=([0-9.]+)'::text), ''::text))::numeric, GREATEST((COALESCE(pol.qty, (0)::numeric) - COALESCE(r.received_qty, (0)::numeric)), (0)::numeric)))
+                    ELSE (0)::numeric
+                END)::numeric(14,4) AS short_closed_qty
+           FROM (public.purchase_order_lines pol
+             LEFT JOIN receipt_by_line r ON ((r.po_line_id = (pol.id)::text)))
+        ), po_alloc_base AS (
+         SELECT pol.source_ref AS pr_no,
+            (sum(COALESCE(pol.qty, (0)::numeric)))::numeric(14,4) AS ordered_qty,
+            (sum(COALESCE(pol.short_closed_qty, (0)::numeric)))::numeric(14,4) AS short_closed_qty,
+            (sum(GREATEST(((COALESCE(pol.qty, (0)::numeric) - COALESCE(pol.received_qty, (0)::numeric)) - COALESCE(pol.short_closed_qty, (0)::numeric)), (0)::numeric)))::numeric(14,4) AS open_po_qty,
+            (max(pol.rate))::numeric(18,2) AS po_rate,
+            (max(pol.tax_pct))::numeric(18,2) AS tax_pct,
+            min(po_1.order_date) AS first_po_date,
+            max(po_1.order_date) AS latest_po_date,
+            string_agg(DISTINCT pol.po_no, ', '::text ORDER BY pol.po_no) FILTER (WHERE (COALESCE(pol.po_no, ''::text) <> ''::text)) AS po_refs
+           FROM (po_line_alloc pol
+             JOIN public.purchase_orders po_1 ON ((po_1.id = pol.po_id)))
+          WHERE ((upper(COALESCE(pol.source_type, ''::text)) = 'INVENTORY_PR'::text) AND (upper(COALESCE(po_1.status, 'OPEN'::text)) <> 'CANCELLED'::text))
+          GROUP BY pol.source_ref
+        )
+ SELECT pr.pr_no,
+    pr.created_at,
+    (pr.item_id)::text AS item_id,
+    COALESCE(pr.item_code, ''::text) AS item_code,
+    COALESCE(pr.item_name, ''::text) AS item_name,
+    COALESCE(i.uom, ''::text) AS uom,
+    (COALESCE(pr.requested_qty, (0)::numeric))::numeric(14,4) AS requested_qty,
+    (COALESCE(pr.received_qty, (0)::numeric))::numeric(14,4) AS stored_received_qty,
+    (GREATEST((COALESCE(pr.requested_qty, (0)::numeric) - COALESCE(pr.received_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS pending_receipt_qty,
+    COALESCE(pr.department, ''::text) AS department,
+    COALESCE(pr.job_ref, ''::text) AS job_ref,
+    COALESCE(pr.remarks, ''::text) AS remarks,
+        CASE
+            WHEN (upper(COALESCE(pr.status, 'OPEN'::text)) = ANY (ARRAY['CLOSED'::text, 'SHORT_CLOSED'::text, 'CANCELLED'::text])) THEN COALESCE(pr.status, 'OPEN'::text)
+            WHEN ((COALESCE(po.short_closed_qty, (0)::numeric) > (0)::numeric) AND (COALESCE(po.open_po_qty, (0)::numeric) <= 0.0001)) THEN 'SHORT_CLOSED'::text
+            ELSE COALESCE(pr.status, 'OPEN'::text)
+        END AS stored_status,
+    (COALESCE(po.ordered_qty, (0)::numeric))::numeric(14,4) AS ordered_qty,
+    (COALESCE(po.open_po_qty, (0)::numeric))::numeric(14,4) AS open_po_qty,
+    (COALESCE(po.po_rate, (0)::numeric))::numeric(18,2) AS po_rate,
+    (COALESCE(po.tax_pct, (0)::numeric))::numeric(18,2) AS tax_pct,
+    COALESCE((po.first_po_date)::text, ''::text) AS first_po_date,
+    COALESCE((po.latest_po_date)::text, ''::text) AS latest_po_date,
+    (GREATEST(((COALESCE(pr.requested_qty, (0)::numeric) - COALESCE(pr.received_qty, (0)::numeric)) - COALESCE(po.open_po_qty, (0)::numeric)), (0)::numeric))::numeric(14,4) AS available_to_order_qty,
+    COALESCE(po.po_refs, ''::text) AS po_refs,
+    (COALESCE(po.short_closed_qty, (0)::numeric))::numeric(14,4) AS short_closed_qty
+   FROM ((public.inv_purchase_requests pr
+     LEFT JOIN public.inv_items i ON ((i.item_code = pr.item_code)))
+     LEFT JOIN po_alloc_base po ON ((po.pr_no = pr.pr_no)));
 
 
 --
@@ -14714,7 +14951,7 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
                     ELSE (0)::numeric
                 END) AS die_shared_manual_cost
            FROM (line_base lb
-             LEFT JOIN manual_tooling_base mt ON (((lb.artwork_no <> ''::text) AND ((mt.artwork_key = lb.artwork_no) OR (mt.artwork_no = lb.artwork_no)) AND ((mt.event_date >= lb.so_date) AND (mt.event_date <= (lb.so_date + '120 days'::interval))))))
+             LEFT JOIN manual_tooling_base mt ON (((lb.artwork_no <> ''::text) AND ((mt.artwork_key = lb.artwork_no) OR (mt.artwork_no = lb.artwork_no)) AND (mt.event_date >= lb.so_date) AND (mt.event_date <= (lb.so_date + '120 days'::interval)))))
           GROUP BY lb.so_line_id
         ), line_tooling AS (
          SELECT lb.so_line_id,
@@ -27895,5 +28132,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict d3XOIdxD2vwIauo1Igfz9MJzKnOXTcc27EZrOWbTBJAIk7m9YJRo2efCrCmPaVT
+\unrestrict 4ntKuEuQn8fLfZWUAHekOPZJaN3kRn0A2TNjvwS18Vvc4Vw7XcKGBkSHmP0W9uN
 
