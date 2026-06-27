@@ -401,6 +401,108 @@ function supabaseUpdateMinimal(table, filters, data) {
   );
 }
 
+const AUDIT_EVENTS_TABLE = 'audit_events';
+
+function _auditEventsSuppressed_() {
+  try {
+    return CacheService.getScriptCache().get('audit_events_missing') === '1';
+  } catch (err) {
+    return false;
+  }
+}
+
+function _auditActor_(candidate) {
+  const raw = candidate && typeof candidate === 'object'
+    ? (candidate.userId || candidate.displayName || candidate.fullName || candidate.email)
+    : candidate;
+  const explicit = String(raw || '').trim();
+  if (explicit) return explicit;
+  try {
+    return String(Session.getActiveUser?.().getEmail?.() || '').trim() || 'system';
+  } catch (err) {
+    return 'system';
+  }
+}
+
+function _auditSafeJson_(value, maxChars) {
+  if (value === null || typeof value === 'undefined') return null;
+  const cap = Math.max(10000, Number(maxChars || 250000));
+  try {
+    const text = JSON.stringify(value);
+    if (!text) return null;
+    if (text.length <= cap) return JSON.parse(text);
+    return {
+      truncated: true,
+      original_chars: text.length,
+      preview_json: text.slice(0, cap)
+    };
+  } catch (err) {
+    return {
+      serialization_error: String((err && err.message) || err || ''),
+      value_type: typeof value
+    };
+  }
+}
+
+function _auditTryInsertEvent_(entry) {
+  const e = entry || {};
+  const cache = CacheService.getScriptCache();
+  if (_auditEventsSuppressed_()) return false;
+
+  const row = {
+    entity_type: String(e.entityType || '').trim(),
+    entity_id: e.entityId == null ? null : String(e.entityId),
+    entity_key: e.entityKey == null ? null : String(e.entityKey),
+    action: String(e.action || '').trim().toUpperCase(),
+    source_module: String(e.sourceModule || '').trim(),
+    actor: _auditActor_(e.actor),
+    reason: String(e.reason || '').trim(),
+    request_id: e.requestId == null ? null : String(e.requestId),
+    before_json: _auditSafeJson_(e.beforeJson),
+    after_json: _auditSafeJson_(e.afterJson),
+    metadata: _auditSafeJson_(e.metadata || {}, 100000) || {}
+  };
+
+  if (!row.entity_type || !row.action || !row.source_module) return false;
+
+  try {
+    supabaseInsertMinimal(AUDIT_EVENTS_TABLE, row);
+    return true;
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, AUDIT_EVENTS_TABLE)) {
+      cache.put('audit_events_missing', '1', 300);
+    }
+    Logger.log('Audit event insert skipped: ' + ((err && err.message) || err));
+    return false;
+  }
+}
+
+function _auditSnapshotError_(scope, err) {
+  return {
+    snapshot_error: true,
+    scope: String(scope || ''),
+    message: String((err && err.message) || err || '')
+  };
+}
+
+function _auditSelectRowsSafe_(table, opts) {
+  if (_auditEventsSuppressed_()) return [_auditSnapshotError_(table, 'audit_events unavailable')];
+  try {
+    return supabaseSelect(table, opts || {}) || [];
+  } catch (err) {
+    return [_auditSnapshotError_(table, err)];
+  }
+}
+
+function _auditSelectByKeyInBatchesSafe_(table, select, key, values, order, chunkSize) {
+  if (_auditEventsSuppressed_()) return [_auditSnapshotError_(table, 'audit_events unavailable')];
+  try {
+    return _supabaseSelectByKeyInBatches_(table, select, key, values, order, chunkSize) || [];
+  } catch (err) {
+    return [_auditSnapshotError_(table, err)];
+  }
+}
+
 function _supabaseInFilter_(values) {
   const list = (values || [])
     .filter(v => v !== null && typeof v !== 'undefined' && String(v) !== '')
@@ -499,7 +601,10 @@ const M_PREFIX_TRADING_ITEMS = [
   { itemCode: 'MTR018', itemName: 'T Shirt', category: 'T Shirt', hsnGroup: 'T SHIRT', gstPct: 5, unit: 'Pcs' },
   { itemCode: 'MTR019', itemName: 'Table Matt', category: 'Table Matt', hsnGroup: 'TABLE MATT', gstPct: 18, unit: 'Pcs' },
   { itemCode: 'MTR020', itemName: 'Designing Charges', category: 'Designing Charges', hsnGroup: 'DESIGNING CHARGES', gstPct: 18, unit: 'Pcs' },
-  { itemCode: 'MTR021', itemName: 'Stepney Cover', category: 'Stepney Cover', hsnGroup: 'STEPNEY COVER', gstPct: 18, unit: 'Pcs' }
+  { itemCode: 'MTR021', itemName: 'Stepney Cover', category: 'Stepney Cover', hsnGroup: 'STEPNEY COVER', gstPct: 18, unit: 'Pcs' },
+  { itemCode: 'MTR022', itemName: 'Helmet', category: 'Helmet', hsnGroup: 'HELMET', gstPct: 18, unit: 'Pcs' },
+  { itemCode: 'MTR023', itemName: 'Shoes', category: 'Shoes', hsnGroup: 'SHOES', gstPct: 18, unit: 'Pcs' },
+  { itemCode: 'MTR024', itemName: 'Gloves', category: 'Gloves', hsnGroup: 'GLOVES', gstPct: 18, unit: 'Pcs' }
 ];
 
 const SL_PREFIX_COMMON_ITEMS = [
@@ -708,6 +813,7 @@ const PAGE_MODULE_MAP = {
   'masters':'MASTERS',
   'plates':'PURCHASE',
   'purchase':'PURCHASE',
+  'materialindent':'MATERIAL_INDENT',
   'itemmaster':'ITEMMASTER',
   'wow':'WOW',
   'flexowo':'WOW',
@@ -1237,10 +1343,12 @@ function _clientPartySelectRowsByClientIds_(clientIds, order) {
 function _mastersParsePartyJson_(value) {
   if (Array.isArray(value)) return value;
   if (!value) return [];
+  if (typeof value === 'object') return [value];
   if (typeof value === 'string') {
     try {
       const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed : [];
+      if (Array.isArray(parsed)) return parsed;
+      return parsed && typeof parsed === 'object' ? [parsed] : [];
     } catch (e) {
       return [];
     }
@@ -1272,6 +1380,20 @@ function _mastersPartyPayloadFromView_(party) {
 
 function _mastersClientPayloadFromView_(row) {
   const src = row || {};
+  const fullParties = _mastersParsePartyJson_(src.parties).map(_mastersPartyPayloadFromView_);
+  const previewParties = fullParties.length ? fullParties : []
+    .concat(_mastersParsePartyJson_(src.default_bill_to_party))
+    .concat(_mastersParsePartyJson_(src.default_ship_to_party))
+    .map(_mastersPartyPayloadFromView_)
+    .filter(function(party) {
+      return party.id || party.partyName || party.label || party.addressType;
+    });
+  const billToCount = typeof src.bill_to_count !== 'undefined'
+    ? Number(src.bill_to_count || 0)
+    : fullParties.filter(function(party){ return party.addressType === 'BILL_TO'; }).length;
+  const shipToCount = typeof src.ship_to_count !== 'undefined'
+    ? Number(src.ship_to_count || 0)
+    : fullParties.filter(function(party){ return party.addressType === 'SHIP_TO'; }).length;
   return {
     id: src.id,
     clientCode: src.client_code || '',
@@ -1283,9 +1405,10 @@ function _mastersClientPayloadFromView_(row) {
     category: src.category || '',
     paymentTerms: src.payment_terms || '',
     active: src.active !== false,
-    billToCount: Number(src.bill_to_count || 0),
-    shipToCount: Number(src.ship_to_count || 0),
-    parties: _mastersParsePartyJson_(src.parties).map(_mastersPartyPayloadFromView_)
+    billToCount: billToCount,
+    shipToCount: shipToCount,
+    parties: previewParties,
+    partiesLoaded: fullParties.length > 0
   };
 }
 
@@ -1295,6 +1418,57 @@ function _mastersGetBootstrapFromView_() {
     limit: 3000
   }) || [];
   return rows.map(_mastersClientPayloadFromView_);
+}
+
+function _mastersClientPayloadFromRows_(row, parties) {
+  const partyRows = (parties || []).map(function(party) {
+    return {
+      id: party.id,
+      partyName: party.party_name || '',
+      addressType: party.address_type || '',
+      label: party.label || '',
+      addressLine1: party.address_line1 || '',
+      addressLine2: party.address_line2 || '',
+      city: party.city || '',
+      state: party.state || '',
+      pincode: party.pincode || '',
+      gstin: party.gstin || '',
+      panNo: party.pan_no || '',
+      paymentTerms: party.payment_terms || '',
+      contactPerson: party.contact_person || '',
+      contactPhone: party.contact_phone || '',
+      isDefault: party.is_default === true,
+      active: party.active !== false
+    };
+  });
+  return {
+    id: row.id,
+    clientCode: row.client_code || '',
+    clientName: row.client_name || '',
+    state: row.state || '',
+    gstin: row.gstin || '',
+    panNo: row.pan_no || '',
+    creditDays: Number(row.credit_days || 0),
+    category: row.category || '',
+    paymentTerms: row.payment_terms || '',
+    active: row.active !== false,
+    billToCount: partyRows.filter(function(party){ return party.addressType === 'BILL_TO'; }).length,
+    shipToCount: partyRows.filter(function(party){ return party.addressType === 'SHIP_TO'; }).length,
+    parties: partyRows,
+    partiesLoaded: true
+  };
+}
+
+function _mastersGetClientDetails_(clientId) {
+  const id = String(clientId || '').trim();
+  if (!id) throw new Error('Client id is required.');
+  const row = (_clientSelectRows_({
+    filters: { id: 'eq.' + id },
+    limit: 1
+  }) || [])[0];
+  if (!row) throw new Error('Client not found.');
+  const parties = _clientPartySelectRowsByClientIds_([id], 'address_type.asc,is_default.desc,label.asc,party_name.asc') || [];
+  return _mastersClientPayloadFromRows_(row, parties);
 }
 
 function _mastersCacheVersion_() {
@@ -1419,42 +1593,19 @@ function mastersGetBootstrap(token) {
     source: 'fallback',
     clients: clients.map(function(row) {
       const parties = partyMap[String(row.id || '')] || [];
-      return {
-        id: row.id,
-        clientCode: row.client_code || '',
-        clientName: row.client_name || '',
-        state: row.state || '',
-        gstin: row.gstin || '',
-        panNo: row.pan_no || '',
-        creditDays: Number(row.credit_days || 0),
-        category: row.category || '',
-        paymentTerms: row.payment_terms || '',
-        active: row.active !== false,
-        parties: parties.map(function(party) {
-          return {
-            id: party.id,
-            partyName: party.party_name || '',
-            addressType: party.address_type || '',
-            label: party.label || '',
-            addressLine1: party.address_line1 || '',
-            addressLine2: party.address_line2 || '',
-            city: party.city || '',
-            state: party.state || '',
-            pincode: party.pincode || '',
-            gstin: party.gstin || '',
-            panNo: party.pan_no || '',
-            paymentTerms: party.payment_terms || '',
-            contactPerson: party.contact_person || '',
-            contactPhone: party.contact_phone || '',
-            isDefault: party.is_default === true,
-            active: party.active !== false
-          };
-        })
-      };
+      return _mastersClientPayloadFromRows_(row, parties);
     })
   };
   _putCachedJson_(cacheKey, result, 180);
   return result;
+}
+
+function mastersGetClient(clientId, token) {
+  _requireModuleAccess_(token, 'MASTERS', 'can_view');
+  return {
+    ok: true,
+    client: _mastersGetClientDetails_(clientId)
+  };
 }
 
 function mastersSaveClient(payload, token) {
@@ -1494,13 +1645,13 @@ function mastersSaveClient(payload, token) {
   };
 
   if (existing && existing.id) {
-    supabaseUpdate('clients', { id: 'eq.' + existing.id }, dbRow);
-    supabaseDelete('client_parties', { client_id: 'eq.' + existing.id });
+    supabaseUpdateMinimal('clients', { id: 'eq.' + existing.id }, dbRow);
+    supabaseDeleteMinimal('client_parties', { client_id: 'eq.' + existing.id });
   } else {
-    supabaseInsert('clients', dbRow);
+    supabaseInsertMinimal('clients', dbRow);
   }
 
-  supabaseBulkInsert('client_parties', partyRows.map(function(row) {
+  supabaseBulkInsertMinimal('client_parties', partyRows.map(function(row) {
     return {
       id: row.id,
       client_id: row.client_id,
@@ -1524,16 +1675,17 @@ function mastersSaveClient(payload, token) {
   }));
 
   _touchMastersCacheVersion_();
-  return { ok: true };
+  return { ok: true, client: _mastersGetClientDetails_(record.id) };
 }
 
 function mastersToggleClientStatus(clientId, active, token) {
   _requireMastersWriteAccess_(token, 'can_edit');
   const id = String(clientId || '').trim();
   if (!id) throw new Error('Client id is required.');
-  supabaseUpdate('clients', { id: 'eq.' + id }, { active: active === true });
+  const nextActive = active === true;
+  supabaseUpdateMinimal('clients', { id: 'eq.' + id }, { active: nextActive });
   _touchMastersCacheVersion_();
-  return { ok: true };
+  return { ok: true, clientId: id, active: nextActive };
 }
 
 /******************************************************
@@ -2299,11 +2451,12 @@ function _purchaseBuildActivePRPoLineMap_(prNos, receiptSeed) {
       }, 0);
       const shortClosedQty = _purchasePOLineShortClosedQty_(line, allocated);
       if (!result[prNo]) {
-        result[prNo] = { orderedQty: 0, openPOQty: 0, refs: [], latestRate: 0, latestTaxPct: 0, firstPoDate: '', latestPoDate: '' };
+        result[prNo] = { orderedQty: 0, openPOQty: 0, shortClosedQty: 0, refs: [], latestRate: 0, latestTaxPct: 0, firstPoDate: '', latestPoDate: '' };
       }
       const header = headerMap[String(line.poId || '')] || headerByNo[String(line.poNo || '')] || {};
       const poDate = String(header.orderDate || line.createdAt || '').trim();
       result[prNo].orderedQty += Number(line.qty || 0);
+      result[prNo].shortClosedQty += shortClosedQty;
       result[prNo].openPOQty += Math.max(0, Number(line.qty || 0) - allocated - shortClosedQty);
       result[prNo].latestRate = Number(line.rate || 0) || result[prNo].latestRate;
       result[prNo].latestTaxPct = Number(line.taxPct || 0) || result[prNo].latestTaxPct;
@@ -3139,6 +3292,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
   const requestLimit = Math.max(targetPrNos.length || 0, Math.max(1, Number(opts.limit || defaultLimit) || defaultLimit));
   const cacheKey = _cacheKeyHash_('PURCHASE_REQUESTS_OPEN', JSON.stringify({
     v: purchaseCacheVersion,
+    logic: 'supabase-pr-read-model-v4-shortclose-status',
     status: String(opts.status || ''),
     pendingOnly: opts.pendingOnly === true ? 1 : 0,
     fromDate: String(opts.fromDate || ''),
@@ -3169,7 +3323,22 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
   }
 
   let viewRows = null;
-  if (opts.pendingOnly !== true) {
+  let viewHasPrecomputedPo = false;
+  try {
+    const viewFilters = Object.assign({}, filters);
+    if (Object.prototype.hasOwnProperty.call(viewFilters, 'status')) {
+      viewFilters.stored_status = viewFilters.status;
+      delete viewFilters.status;
+    }
+    viewRows = _supabaseSelectAll_('v_purchase_requests_read_model', {
+      filters: viewFilters,
+      order: 'created_at.desc'
+    }, 1000, requestLimit) || [];
+    viewHasPrecomputedPo = true;
+  } catch (err) {
+    viewRows = null;
+  }
+  if (viewRows === null && opts.pendingOnly !== true) {
     try {
       viewRows = _supabaseSelectAll_('v_purchase_requests_open', {
         filters: filters,
@@ -3180,30 +3349,45 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
     }
   }
   if (viewRows !== null) {
-    const itemCodes = [...new Set(viewRows.map(function(r) {
-      return String(r.item_code || '').trim();
-    }).filter(Boolean))];
-    const itemUomMap = {};
-    if (itemCodes.length) {
-      (_supabaseSelectByKeyInBatches_('inv_items', 'item_code,uom', 'item_code', itemCodes, null, 40) || []).forEach(function(item) {
-        itemUomMap[item.item_code] = String(item.uom || '').trim();
+    let itemUomMap = {};
+    let activePoLineMap = {};
+    if (!viewHasPrecomputedPo) {
+      const itemCodes = [...new Set(viewRows.map(function(r) {
+        return String(r.item_code || '').trim();
+      }).filter(Boolean))];
+      if (itemCodes.length) {
+        (_supabaseSelectByKeyInBatches_('inv_items', 'item_code,uom', 'item_code', itemCodes, null, 40) || []).forEach(function(item) {
+          itemUomMap[item.item_code] = String(item.uom || '').trim();
+        });
+      }
+      const receiptSeed = {};
+      viewRows.forEach(function(r) {
+        if (r.pr_no) receiptSeed[r.pr_no] = Number(r.received_qty || r.stored_received_qty || 0);
       });
+      activePoLineMap = _purchaseBuildActivePRPoLineMap_(viewRows.map(function(r) {
+        return r.pr_no;
+      }), receiptSeed);
     }
-    const receiptSeed = {};
-    viewRows.forEach(function(r) {
-      if (r.pr_no) receiptSeed[r.pr_no] = Number(r.received_qty || 0);
-    });
-    const activePoLineMap = _purchaseBuildActivePRPoLineMap_(viewRows.map(function(r) {
-      return r.pr_no;
-    }), receiptSeed);
     const normalized = viewRows.map(function(r) {
-      const linked = activePoLineMap[r.pr_no] || { orderedQty: 0, openPOQty: 0, refs: [], latestRate: 0, latestTaxPct: 0 };
+      const linked = viewHasPrecomputedPo
+        ? {
+            orderedQty: Number(r.ordered_qty || 0),
+            openPOQty: Number(r.open_po_qty || 0),
+            shortClosedQty: Number(r.short_closed_qty || 0),
+            refs: String(r.po_refs || '').split(',').map(function(v) { return v.trim(); }).filter(Boolean),
+            latestRate: Number(r.po_rate || 0),
+            latestTaxPct: Number(r.tax_pct || 0),
+            firstPoDate: r.first_po_date || '',
+            latestPoDate: r.latest_po_date || ''
+          }
+        : (activePoLineMap[r.pr_no] || { orderedQty: 0, openPOQty: 0, shortClosedQty: 0, refs: [], latestRate: 0, latestTaxPct: 0 });
       const requestedQty = Number(r.requested_qty || 0);
-      const receivedQty = Number(r.received_qty || 0);
+      const receivedQty = Number(r.received_qty || r.stored_received_qty || 0);
       const pendingReceiptQty = Math.max(0, requestedQty - receivedQty);
       return {
         prNo: r.pr_no,
         date: r.created_at,
+        itemId: r.item_id || '',
         itemCode: r.item_code,
         itemName: r.item_name,
         requestedQty: requestedQty,
@@ -3211,6 +3395,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
         pendingReceiptQty: pendingReceiptQty,
         orderedQty: Number(linked.orderedQty || 0),
         openPOQty: Number(linked.openPOQty || 0),
+        shortClosedQty: Number(linked.shortClosedQty || 0),
         uom: String(r.uom || itemUomMap[r.item_code] || '').trim(),
         poRate: Number(linked.latestRate || 0),
         taxPct: Number(linked.latestTaxPct || r.tax_pct || 0),
@@ -3220,7 +3405,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
         department: r.department || '',
         jobRef: r.job_ref || '',
         remarks: r.remarks || '',
-        status: r.status || 'OPEN',
+        status: r.status || r.stored_status || 'OPEN',
         poRefs: linked.refs || []
       };
     });
@@ -3271,7 +3456,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
   const poLineMap = _purchaseBuildActivePRPoLineMap_(rows.map(function(r) { return r.pr_no; }), prReceiptMap);
 
   const normalized = rows.map(r => {
-      const linked = poLineMap[r.pr_no] || { orderedQty: 0, openPOQty: 0, refs: [], latestRate: 0 };
+      const linked = poLineMap[r.pr_no] || { orderedQty: 0, openPOQty: 0, shortClosedQty: 0, refs: [], latestRate: 0 };
       const requestedQty = Number(r.requested_qty || 0);
       const receivedQty = Number(r.received_qty || 0);
       const pendingReceiptQty = Math.max(0, requestedQty - receivedQty);
@@ -3287,6 +3472,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
         pendingReceiptQty: pendingReceiptQty,
         orderedQty: orderedQty,
         openPOQty: openPOQty,
+        shortClosedQty: Number(linked.shortClosedQty || 0),
         uom: String(itemUomMap[r.item_code] || '').trim(),
         poRate: Number(linked.latestRate || 0),
         taxPct: Number(itemTaxMap[r.item_code] || 0),
@@ -3314,10 +3500,30 @@ function purchaseListPOsJSON(opts = {}) {
   const forceRefresh = opts.forceRefresh === true;
   const includeOpenOutsideDate = opts.includeOpenOutsideDate === true || opts.pendingOnly === true;
   const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
-  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { v: purchaseCacheVersion, logic: 'ledger-reversal-map-receipts-v7', opts: opts || {}, includeOpenOutsideDate: includeOpenOutsideDate ? 1 : 0 });
+  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { v: purchaseCacheVersion, logic: 'supabase-po-read-model-v8', opts: opts || {}, includeOpenOutsideDate: includeOpenOutsideDate ? 1 : 0 });
   if (!forceRefresh) {
     const cached = _getCachedJson_(cacheKey);
     if (cached) return cached;
+  }
+
+  let viewRows = null;
+  try {
+    const viewFilters = {};
+    if (opts.poNo) viewFilters.po_no = 'eq.' + String(opts.poNo || '').trim();
+    viewRows = _supabaseSelectAll_('v_purchase_orders_read_model_v2', {
+      filters: viewFilters,
+      order: 'order_date.desc,created_at.desc,line_no.asc'
+    }, 1000, 50000) || [];
+  } catch (err) {
+    viewRows = null;
+  }
+  if (viewRows !== null) {
+    const rows = _purchaseBuildPOsFromReadModelRows_(viewRows, Object.assign({}, opts, {
+      includeOpenOutsideDate: includeOpenOutsideDate
+    }));
+    const result = { ok: true, rows: rows };
+    _putCachedJson_(cacheKey, result, 120);
+    return result;
   }
 
   const receiptRows = (opts.poNo && forceRefresh)
@@ -3330,159 +3536,8 @@ function purchaseListPOsJSON(opts = {}) {
     if (!receiptEntriesByLine[lineId]) receiptEntriesByLine[lineId] = [];
     receiptEntriesByLine[lineId].push(row);
   });
-
   const linesForLedgerFallback = opts.poNo ? _purchaseListPOLinesForPO_(opts.poNo) : _purchaseListPOLines_();
   const ledgerReceiptEntriesByLine = _purchaseLedgerPOReceiptEntriesByLine_(linesForLedgerFallback);
-
-  let viewRows = null;
-  if (!forceRefresh && !includeOpenOutsideDate) {
-    try {
-      const viewFilters = {};
-      if (opts.poNo) viewFilters.po_no = 'eq.' + String(opts.poNo || '').trim();
-      viewRows = _supabaseSelectAll_('v_purchase_orders_read_model', {
-        filters: viewFilters,
-        order: 'order_date.desc,created_at.desc,line_no.asc'
-      }, 1000, 50000) || [];
-    } catch (err) {
-      viewRows = null;
-    }
-  }
-  if (viewRows !== null) {
-    const grouped = {};
-    viewRows.forEach(function(row) {
-      const poNo = row.po_no || '';
-      if (!poNo) return;
-      if (!grouped[poNo]) {
-        grouped[poNo] = {
-          poNo: poNo,
-          orderDate: row.order_date || '',
-          vendorId: row.vendor_id || '',
-          vendorName: row.vendor_name || '',
-          vendorGstin: row.vendor_gstin || '',
-          poId: row.po_id || '',
-          status: row.status || 'OPEN',
-          storedStatus: row.status || 'OPEN',
-          lineCount: 0,
-          totalQty: 0,
-          receivedQty: 0,
-          pendingQty: 0,
-          basicTotal: 0,
-          taxTotal: 0,
-          totalValue: 0,
-          storedTotalValue: Number(row.total_value || 0),
-          buyerName: row.created_by || '',
-          paymentTerms: row.payment_terms || '',
-          freightTerms: row.freight_terms || '',
-          freightValue: Number(row.freight_value || 0),
-          deliveryTerms: row.delivery_terms || '',
-          notes: row.notes || '',
-          workflow: '',
-          artworkType: '',
-          lines: []
-        };
-      }
-      const group = grouped[poNo];
-      const inlineEntries = Array.isArray(row.receipt_entries) ? row.receipt_entries : [];
-      const rowLineId = String(row.line_id || '').trim();
-      const linkedEntries = receiptEntriesByLine[rowLineId] || [];
-      const fallbackEntries = ledgerReceiptEntriesByLine[rowLineId] || [];
-      const useLedgerReceipts = _purchaseUseLedgerReceiptsForLine_(row.source_type || '');
-      const liveEntries = (useLedgerReceipts ? fallbackEntries : (linkedEntries.length ? linkedEntries : fallbackEntries))
-        .slice()
-        .sort(function(a, b) {
-          return String(b.receiptDate || '').localeCompare(String(a.receiptDate || '')) ||
-            String(b.createdAt || '').localeCompare(String(a.createdAt || ''));
-        });
-      const liveReceived = liveEntries.reduce(function(sum, entry) {
-        return sum + Number(entry.qty || 0);
-      }, 0);
-      const derivedReceived = liveReceived;
-      const baseLineForClose = {
-        qty: Number(row.qty || 0),
-        remarks: row.remarks || ''
-      };
-      const shortClosedQty = _purchasePOLineShortClosedQty_(baseLineForClose, derivedReceived);
-      const pendingQty = Math.max(0, Number(row.qty || 0) - derivedReceived - shortClosedQty);
-      const line = {
-        id: row.line_id,
-        poId: row.po_id,
-        poNo: row.po_no,
-        lineNo: Number(row.line_no || 0),
-        sourceType: row.source_type || '',
-        sourceRef: row.source_ref || '',
-        itemCode: row.item_code || '',
-        itemName: row.item_name || '',
-        qty: Number(row.qty || 0),
-        rate: Number(row.rate || 0),
-        taxPct: Number(row.tax_pct || 0),
-        amount: Number(row.amount || 0),
-        taxAmount: Number(row.tax_amount || 0),
-        totalAmount: Number(row.total_amount || 0),
-        department: row.department || '',
-        jobRef: row.job_ref || '',
-        remarks: row.remarks || '',
-        createdAt: row.line_created_at || '',
-        receivedQty: derivedReceived,
-        pendingQty: pendingQty,
-        shortClosedQty: shortClosedQty,
-        isShortClosed: shortClosedQty > 0,
-        overReceivedQty: Math.max(0, derivedReceived - Number(row.qty || 0)),
-        receiptEntries: liveEntries.length ? liveEntries : []
-      };
-      group.lines.push(line);
-      group.lineCount += 1;
-      group.totalQty += Number(row.qty || 0);
-      group.receivedQty += Number(line.receivedQty || 0);
-      group.pendingQty += Number(line.pendingQty || 0);
-      group.shortClosedQty = Number(group.shortClosedQty || 0) + Number(line.shortClosedQty || 0);
-      group.basicTotal += Number(row.amount || 0);
-      group.taxTotal += Number(row.tax_amount || 0);
-      group.totalValue += Number(row.total_amount || 0);
-      if (!group.workflow) {
-        const isArtworkPO = _purchaseIsPlateDieSource_(line.sourceType);
-        const hasDieLines = _purchasePlateDieTypeFromSource_(line.sourceType) === 'DIE';
-        const hasPlateLines = _purchasePlateDieTypeFromSource_(line.sourceType) === 'PLATE';
-        group.workflow = isArtworkPO ? 'ARTWORK_PROCUREMENT' : 'INVENTORY_PR';
-        group.artworkType = hasDieLines ? (hasPlateLines ? 'MIXED' : 'DIE') : (isArtworkPO ? 'PLATE' : 'INVENTORY');
-      }
-    });
-
-    const rows = Object.keys(grouped)
-      .map(function(poNo) {
-        const row = grouped[poNo];
-        if (_purchaseIsCancelledStatus_(row.storedStatus)) {
-          row.status = 'CANCELLED';
-          row.pendingQty = 0;
-          row.lines = (row.lines || []).map(function(line) {
-            return Object.assign({}, line, { pendingQty: 0 });
-          });
-        } else {
-          row.status = _purchaseDerivePOStatusWithShortClose_(row.totalQty, row.receivedQty, row.shortClosedQty || 0);
-          row.pendingQty = Math.max(0, row.totalQty - row.receivedQty - Number(row.shortClosedQty || 0));
-          _purchaseMaybeSyncPOHeaderStatus_(row.poNo, row.poId, row.storedStatus, row.status);
-        }
-        row.totalValue = Number(row.storedTotalValue || 0) || (row.totalValue + Number(row.freightValue || 0));
-        return row;
-      })
-      .filter(function(row) {
-        if (opts.poNo && String(row.poNo || '') !== String(opts.poNo || '').trim()) return false;
-        if (opts.pendingOnly) return !_purchaseIsCancelledStatus_(row.status) && Number(row.pendingQty || 0) > 0;
-        const isOpenOrPending = !_purchaseIsCancelledStatus_(row.status) && Number(row.pendingQty || 0) > 0;
-        if (includeOpenOutsideDate && isOpenOrPending) return true;
-        const rowDate = row.orderDate ? new Date(row.orderDate) : null;
-        if (opts.fromDate && rowDate && rowDate < new Date(opts.fromDate + 'T00:00:00')) return false;
-        if (opts.toDate && rowDate && rowDate > new Date(opts.toDate + 'T23:59:59')) return false;
-        return true;
-      })
-      .sort(function(a, b) {
-        return String(b.orderDate || '').localeCompare(String(a.orderDate || ''));
-      });
-    if (opts.limit) rows.splice(Number(opts.limit || rows.length));
-
-    const result = { ok: true, rows: rows };
-    _putCachedJson_(cacheKey, result, 120);
-    return result;
-  }
 
   const headers = opts.poNo
     ? (function() {
@@ -3617,6 +3672,150 @@ function _purchaseNormalizePOSummaryRow_(row) {
   };
 }
 
+function _purchaseReceiptEntriesFromViewValue_(value) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object') return [value];
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : (parsed && typeof parsed === 'object' ? [parsed] : []);
+    } catch (err) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function _purchaseBuildPOsFromReadModelRows_(viewRows, opts) {
+  const options = opts || {};
+  const includeOpenOutsideDate = options.includeOpenOutsideDate === true || options.pendingOnly === true;
+  const grouped = {};
+  (Array.isArray(viewRows) ? viewRows : []).forEach(function(row) {
+    const poNo = row.po_no || '';
+    if (!poNo) return;
+    if (!grouped[poNo]) {
+      grouped[poNo] = {
+        poNo: poNo,
+        orderDate: row.order_date || '',
+        vendorId: row.vendor_id || '',
+        vendorName: row.vendor_name || '',
+        vendorGstin: row.vendor_gstin || '',
+        poId: row.po_id || '',
+        status: row.status || 'OPEN',
+        storedStatus: row.status || 'OPEN',
+        lineCount: 0,
+        totalQty: 0,
+        receivedQty: 0,
+        pendingQty: 0,
+        basicTotal: 0,
+        taxTotal: 0,
+        totalValue: 0,
+        storedTotalValue: Number(row.total_value || 0),
+        buyerName: row.created_by || '',
+        paymentTerms: row.payment_terms || '',
+        freightTerms: row.freight_terms || '',
+        freightValue: Number(row.freight_value || 0),
+        deliveryTerms: row.delivery_terms || '',
+        notes: row.notes || '',
+        workflow: '',
+        artworkType: '',
+        lines: []
+      };
+    }
+    const group = grouped[poNo];
+    const liveEntries = _purchaseReceiptEntriesFromViewValue_(row.receipt_entries)
+      .slice()
+      .sort(function(a, b) {
+        return String(b.receiptDate || b.receipt_date || '').localeCompare(String(a.receiptDate || a.receipt_date || '')) ||
+          String(b.createdAt || b.created_at || '').localeCompare(String(a.createdAt || a.created_at || ''));
+      });
+    const liveReceived = liveEntries.length
+      ? liveEntries.reduce(function(sum, entry) { return sum + Number(entry.qty || 0); }, 0)
+      : Number(row.received_qty || 0);
+    const shortClosedQty = Number(row.short_closed_qty || row.line_short_closed_qty || 0) ||
+      _purchasePOLineShortClosedQty_({ qty: Number(row.qty || 0), remarks: row.remarks || '' }, liveReceived);
+    const pendingQty = Number(row.pending_qty || 0) || Math.max(0, Number(row.qty || 0) - liveReceived - shortClosedQty);
+    const line = {
+      id: row.line_id,
+      poId: row.po_id,
+      poNo: row.po_no,
+      lineNo: Number(row.line_no || 0),
+      sourceType: row.source_type || '',
+      sourceRef: row.source_ref || '',
+      itemCode: row.item_code || '',
+      itemName: row.item_name || '',
+      qty: Number(row.qty || 0),
+      rate: Number(row.rate || 0),
+      taxPct: Number(row.tax_pct || 0),
+      amount: Number(row.amount || 0),
+      taxAmount: Number(row.tax_amount || 0),
+      totalAmount: Number(row.total_amount || 0),
+      department: row.department || '',
+      jobRef: row.job_ref || '',
+      remarks: row.remarks || '',
+      createdAt: row.line_created_at || '',
+      receivedQty: liveReceived,
+      pendingQty: pendingQty,
+      shortClosedQty: shortClosedQty,
+      isShortClosed: shortClosedQty > 0,
+      overReceivedQty: Math.max(0, liveReceived - Number(row.qty || 0)),
+      receiptEntries: liveEntries
+    };
+    group.lines.push(line);
+    group.lineCount += 1;
+    group.totalQty += Number(row.qty || 0);
+    group.receivedQty += Number(line.receivedQty || 0);
+    group.pendingQty += Number(line.pendingQty || 0);
+    group.shortClosedQty = Number(group.shortClosedQty || 0) + Number(line.shortClosedQty || 0);
+    group.basicTotal += Number(row.amount || 0);
+    group.taxTotal += Number(row.tax_amount || 0);
+    group.totalValue += Number(row.total_amount || 0);
+    if (!group.workflow) {
+      const isArtworkPO = _purchaseIsPlateDieSource_(line.sourceType);
+      const hasDieLines = _purchasePlateDieTypeFromSource_(line.sourceType) === 'DIE';
+      const hasPlateLines = _purchasePlateDieTypeFromSource_(line.sourceType) === 'PLATE';
+      group.workflow = isArtworkPO ? 'ARTWORK_PROCUREMENT' : 'INVENTORY_PR';
+      group.artworkType = hasDieLines ? (hasPlateLines ? 'MIXED' : 'DIE') : (isArtworkPO ? 'PLATE' : 'INVENTORY');
+    }
+  });
+
+  const rows = Object.keys(grouped)
+    .map(function(poNo) {
+      const row = grouped[poNo];
+      row.lines.sort(function(a, b) { return Number(a.lineNo || 0) - Number(b.lineNo || 0); });
+      if (_purchaseIsCancelledStatus_(row.storedStatus)) {
+        row.status = 'CANCELLED';
+        row.pendingQty = 0;
+        row.lines = (row.lines || []).map(function(line) {
+          return Object.assign({}, line, { pendingQty: 0 });
+        });
+      } else {
+        row.status = _purchaseDerivePOStatusWithShortClose_(row.totalQty, row.receivedQty, row.shortClosedQty || 0);
+        row.pendingQty = Math.max(0, row.totalQty - row.receivedQty - Number(row.shortClosedQty || 0));
+        _purchaseMaybeSyncPOHeaderStatus_(row.poNo, row.poId, row.storedStatus, row.status);
+      }
+      row.totalValue = Number(row.storedTotalValue || 0) || (row.totalValue + Number(row.freightValue || 0));
+      return row;
+    })
+    .filter(function(row) {
+      if (options.poNo && String(row.poNo || '') !== String(options.poNo || '').trim()) return false;
+      if (options.pendingOnly) return !_purchaseIsCancelledStatus_(row.status) && Number(row.pendingQty || 0) > 0;
+      const isOpenOrPending = !_purchaseIsCancelledStatus_(row.status) && Number(row.pendingQty || 0) > 0;
+      if (includeOpenOutsideDate && isOpenOrPending) return true;
+      const rowDate = row.orderDate ? new Date(row.orderDate) : null;
+      if (options.fromDate && rowDate && rowDate < new Date(options.fromDate + 'T00:00:00')) return false;
+      if (options.toDate && rowDate && rowDate > new Date(options.toDate + 'T23:59:59')) return false;
+      return true;
+    })
+    .sort(function(a, b) {
+      const dateCompare = String(b.orderDate || '').localeCompare(String(a.orderDate || ''));
+      if (dateCompare !== 0) return dateCompare;
+      return String(b.poNo || '').localeCompare(String(a.poNo || ''));
+    });
+  if (options.limit) rows.splice(Number(options.limit || rows.length));
+  return rows;
+}
+
 function purchaseListPOSummariesJSON(opts = {}) {
   const forceRefresh = opts.forceRefresh === true;
   const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
@@ -3677,6 +3876,25 @@ function purchaseGetPODetail(poNo, opts) {
   if (!forceRefresh) {
     const cached = _getCachedJson_(cacheKey);
     if (cached) return cached;
+  }
+  try {
+    const fastRows = supabaseSelect('v_purchase_po_detail_fast', {
+      filters: { po_no: 'eq.' + key },
+      order: 'line_no.asc',
+      limit: 5000
+    }) || [];
+    if (fastRows.length) {
+      const row = (_purchaseBuildPOsFromReadModelRows_(fastRows, { poNo: key, limit: 1 }) || [])[0] || null;
+      if (row) {
+        const result = { ok: true, row: row };
+        _putCachedJson_(cacheKey, result, 120);
+        return result;
+      }
+    }
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_purchase_po_detail_fast')) {
+      Logger.log('purchaseGetPODetail fast view fallback for ' + key + ': ' + (err.message || err));
+    }
   }
   const rows = purchaseListPOsJSON({ poNo: key, limit: 1, forceRefresh: forceRefresh }).rows || [];
   const row = rows.find(function(item) {
@@ -4603,17 +4821,52 @@ function purchaseCancelPOs(payload) {
     : [];
   if (!poNos.length) throw new Error('Select at least one purchase order to cancel.');
 
-  const headers = _purchaseListPOHeaders_().filter(function(header) {
-    return poNos.indexOf(String(header.poNo || '').trim()) !== -1;
-  });
+  let headers = [];
+  let actualReceiptQtyByPo = {};
+  poNos.forEach(function(poNo) { actualReceiptQtyByPo[poNo] = 0; });
+
+  try {
+    const cancelRows = _supabaseSelectByKeyInBatches_(
+      'v_purchase_po_cancel_check',
+      'po_id,po_no,status,notes,received_qty',
+      'po_no',
+      poNos,
+      null,
+      40
+    ) || [];
+    headers = cancelRows.map(function(row) {
+      const poNo = String(row.po_no || '').trim();
+      actualReceiptQtyByPo[poNo] = Number(row.received_qty || 0);
+      return {
+        id: row.po_id,
+        poNo: poNo,
+        status: row.status || 'OPEN',
+        notes: row.notes || ''
+      };
+    });
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_purchase_po_cancel_check')) {
+      Logger.log('purchaseCancelPOs fast view fallback: ' + (err.message || err));
+    }
+  }
+
+  if (!headers.length) {
+    headers = (_supabaseSelectByKeyInBatches_(
+      'purchase_orders',
+      'id,po_no,status,notes',
+      'po_no',
+      poNos,
+      null,
+      40
+    ) || []).map(_purchaseMapPOHeader_);
+    actualReceiptQtyByPo = _purchaseActualReceiptQtyByPoNos_(poNos);
+  }
   if (!headers.length) throw new Error('Selected purchase orders were not found.');
 
   const missing = poNos.filter(function(poNo) {
     return !headers.some(function(header) { return String(header.poNo || '') === poNo; });
   });
   if (missing.length) throw new Error('PO not found: ' + missing.join(', '));
-
-  const actualReceiptQtyByPo = _purchaseActualReceiptQtyByPoNos_(poNos);
 
   const blocked = [];
   const cancellable = [];
@@ -7222,6 +7475,77 @@ function _validateFlexoWorkOrderPayload_(payload) {
   p.flexoDetails = flexoDetails;
 }
 
+function _workOrderAuditSnapshot_(woId) {
+  const id = String(woId || '').trim();
+  if (!id) return null;
+  if (_auditEventsSuppressed_()) return _auditSnapshotError_('work_order:' + id, 'audit_events unavailable');
+
+  let header = null;
+  let jobs = [];
+  let materials = [];
+  let routing = [];
+  const errors = [];
+
+  try {
+    header = (supabaseSelect('work_orders', {
+      filters: { id: 'eq.' + id },
+      limit: 1
+    }) || [])[0] || null;
+  } catch (err) {
+    errors.push(_auditSnapshotError_('work_orders', err));
+  }
+
+  try {
+    jobs = supabaseSelect('work_order_jobs', {
+      filters: { wo_id: 'eq.' + id },
+      order: 'line_no.asc'
+    }) || [];
+  } catch (err) {
+    errors.push(_auditSnapshotError_('work_order_jobs', err));
+  }
+
+  try {
+    materials = supabaseSelect('work_order_materials', {
+      filters: { wo_id: 'eq.' + id },
+      order: 'material_type.asc,material_key.asc'
+    }) || [];
+  } catch (err) {
+    errors.push(_auditSnapshotError_('work_order_materials', err));
+  }
+
+  try {
+    routing = supabaseSelect('work_order_routing', {
+      filters: { wo_id: 'eq.' + id },
+      order: 'sequence_no.asc'
+    }) || [];
+  } catch (err) {
+    errors.push(_auditSnapshotError_('work_order_routing', err));
+  }
+
+  let reservations = [];
+  try {
+    reservations = header && header.wo_number
+      ? (supabaseSelect('inventory_reservations', {
+          filters: {
+            reference_type: 'eq.WORK_ORDER',
+            reference_no: 'eq.' + header.wo_number
+          }
+        }) || [])
+      : [];
+  } catch (err) {
+    errors.push(_auditSnapshotError_('inventory_reservations', err));
+  }
+
+  return {
+    header: header,
+    jobs: jobs,
+    materials: materials,
+    routing: routing,
+    reservations: reservations,
+    snapshot_errors: errors
+  };
+}
+
 function saveWorkOrder(payload, options) {
 
   if (!payload?.jobs?.length) {
@@ -7249,6 +7573,7 @@ function saveWorkOrder(payload, options) {
   const isUpdate = !!(requestedWoNo && existing.length);
   let wo = null;
   let previousSoNumbers = [];
+  let auditBefore = null;
 
   /* =========================
      1️⃣ Insert Header
@@ -7256,6 +7581,7 @@ function saveWorkOrder(payload, options) {
 
   if (isUpdate) {
     wo = existing[0];
+    auditBefore = _workOrderAuditSnapshot_(wo.id);
 
     const existingJobs = supabaseSelect('work_order_jobs', {
       select: 'so_number',
@@ -7509,6 +7835,26 @@ function pushMaterial(m, type) {
   }
 
   _touchWorkOrderDataVersion_();
+  const auditAfter = _workOrderAuditSnapshot_(wo.id);
+  _auditTryInsertEvent_({
+    entityType: 'WORK_ORDER',
+    entityId: wo.id,
+    entityKey: woNo,
+    action: isUpdate ? 'UPDATE' : 'CREATE',
+    sourceModule: 'WORK_ORDER',
+    actor: user,
+    reason: isUpdate ? 'Work order updated' : 'Work order created',
+    beforeJson: auditBefore,
+    afterJson: auditAfter,
+    metadata: {
+      woNumber: woNo,
+      isUpdate: isUpdate,
+      soNumbers: touchedSoNumbers,
+      jobCount: jobRows.length,
+      materialCount: mergedMaterialRows.length,
+      routingCount: routingRows.length
+    }
+  });
 
   return { ok: true, woNo, soNumbers: touchedSoNumbers };
 }
@@ -9756,6 +10102,7 @@ const MODULES = [
     'MASTERS',
     'PURCHASE',
   'PLATES',
+  'MATERIAL_INDENT',
   'ITEMMASTER',
   'WOW',
   'INVENTORY',
@@ -11317,8 +11664,8 @@ function _salesOrderUpdateHeader_(filters, payload) {
 
 function _salesOrderSelectBillingHeaders_(filters, order) {
   try {
-    return (supabaseSelect('sales_orders', {
-      select: 'id,so_number,so_date,client_code,currency,po_number,po_date,remarks,sales_rep,status,mode_of_transport,transport_preference,transport_payment,billing_remarks,advance_payment_required,advance_payment_received',
+    return (_supabaseSelectAllUnbounded_('sales_orders', {
+      select: 'id,so_number,so_date,client_code,currency,po_number,po_date,remarks,sales_rep,status,mode_of_transport,transport_preference,transport_payment,billing_remarks,advance_payment_required,advance_payment_received,order_prefix,sales_type',
       filters: filters,
       order: order
     }) || []).map(_salesOrderEnrichHeaderRow_);
@@ -11331,9 +11678,11 @@ function _salesOrderSelectBillingHeaders_(filters, order) {
       msg.indexOf('sales_orders.billing_remarks') !== -1 ||
       msg.indexOf('sales_orders.advance_payment_required') !== -1 ||
       msg.indexOf('sales_orders.advance_payment_received') !== -1 ||
+      msg.indexOf('sales_orders.order_prefix') !== -1 ||
+      msg.indexOf('sales_orders.sales_type') !== -1 ||
       msg.indexOf('relation "sales_orders"') !== -1 && msg.indexOf('does not exist') !== -1;
     if (!missingNewCols) throw err;
-    return (supabaseSelect('sales_orders', {
+    return (_supabaseSelectAllUnbounded_('sales_orders', {
       select: 'id,so_number,so_date,client_code,currency,po_number,po_date,remarks,sales_rep,status',
       filters: filters,
       order: order
@@ -11736,6 +12085,51 @@ function _salesOrderHasLinkedLineActivity_(soNumber, lineIds) {
   return false;
 }
 
+function _salesOrderAuditSnapshot_(soId) {
+  const id = String(soId || '').trim();
+  if (!id) return { header: null, lines: [], artworks: [] };
+  if (_auditEventsSuppressed_()) return _auditSnapshotError_('sales_order:' + id, 'audit_events unavailable');
+
+  let header = null;
+  let lines = [];
+  let artworks = [];
+  const errors = [];
+
+  try {
+    header = (supabaseSelect('sales_orders', {
+      filters: { id: 'eq.' + id },
+      limit: 1
+    }) || [])[0] || null;
+  } catch (err) {
+    errors.push(_auditSnapshotError_('sales_orders', err));
+  }
+
+  try {
+    lines = supabaseSelect('sales_order_lines', {
+      filters: { so_id: 'eq.' + id },
+      order: 'line_no.asc'
+    }) || [];
+  } catch (err) {
+    errors.push(_auditSnapshotError_('sales_order_lines', err));
+  }
+
+  try {
+    artworks = supabaseSelect('artworks', {
+      filters: { so_id: 'eq.' + id },
+      order: 'line_no.asc'
+    }) || [];
+  } catch (err) {
+    errors.push(_auditSnapshotError_('artworks', err));
+  }
+
+  return {
+    header: header,
+    lines: lines,
+    artworks: artworks,
+    snapshot_errors: errors
+  };
+}
+
 function updateSalesOrder(soId,payload){
 
 if(!soId) throw new Error('SO id missing');
@@ -11767,6 +12161,7 @@ filters:{ id:'eq.'+soId }
 })[0];
 
 if(!so) throw new Error('Sales Order not found');
+const auditBefore = _salesOrderAuditSnapshot_(soId);
 header.orderDate = so.so_date || _salesOrderTodayIso_();
 
 const approvalLines = supabaseSelect('sales_order_lines',{
@@ -12003,6 +12398,25 @@ if (allExistingLinesMatched) {
 ======================== */
 
 createArtworksFromSoLines(soId);
+
+const auditAfter = _salesOrderAuditSnapshot_(soId);
+_auditTryInsertEvent_({
+  entityType: 'SALES_ORDER',
+  entityId: soId,
+  entityKey: so.so_number || soId,
+  action: 'UPDATE',
+  sourceModule: 'SALES_ORDER_ENTRY',
+  actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+  reason: 'Sales order updated',
+  beforeJson: auditBefore,
+  afterJson: auditAfter,
+  metadata: {
+    soNumber: so.so_number || '',
+    oldLineCount: (auditBefore.lines || []).length,
+    newLineCount: (auditAfter.lines || []).length,
+    linesRewritten: !allExistingLinesMatched
+  }
+});
 
 
 return {
@@ -12476,7 +12890,25 @@ function setSalesOrderLifecycleStatus(soNumber, nextStatus, token) {
     throw new Error('Cancelled sales order cannot be updated');
   }
 
+  const auditBefore = _salesOrderAuditSnapshot_(so.id);
   supabaseUpdate('sales_orders', { so_number: 'eq.' + soNumber }, { status: status });
+  const auditAfter = _salesOrderAuditSnapshot_(so.id);
+  _auditTryInsertEvent_({
+    entityType: 'SALES_ORDER',
+    entityId: so.id,
+    entityKey: soNumber,
+    action: 'STATUS_CHANGE',
+    sourceModule: 'SALES_ORDER_ENTRY',
+    actor: token ? getSessionUser(token) : null,
+    reason: 'Sales order status changed to ' + status,
+    beforeJson: auditBefore,
+    afterJson: auditAfter,
+    metadata: {
+      soNumber: soNumber,
+      fromStatus: so.status || '',
+      toStatus: status
+    }
+  });
   return { ok: true, soNumber: soNumber, status: status };
 }
 
@@ -12562,6 +12994,7 @@ function setSalesOrderLineLifecycleStatus(soLineId, nextStatus, token) {
     throw new Error('This line already has billing activity. It cannot be cancelled from order booking.');
   }
 
+  const auditBefore = _salesOrderAuditSnapshot_(so.id);
   const stamp = new Date().toISOString();
   supabaseUpdateMinimal('sales_order_lines', { id: 'eq.' + id }, {
     status: 'CANCELLED',
@@ -12573,6 +13006,25 @@ function setSalesOrderLineLifecycleStatus(soLineId, nextStatus, token) {
   try {
     refreshWorkOrderStatuses([so.so_number]);
   } catch (e) {}
+  const auditAfter = _salesOrderAuditSnapshot_(so.id);
+  _auditTryInsertEvent_({
+    entityType: 'SALES_ORDER_LINE',
+    entityId: id,
+    entityKey: so.so_number + '/' + line.line_no,
+    action: 'CANCEL',
+    sourceModule: 'SALES_ORDER_ENTRY',
+    actor: actor,
+    reason: 'Sales order line cancelled from order booking',
+    beforeJson: auditBefore,
+    afterJson: auditAfter,
+    metadata: {
+      soId: so.id,
+      soNumber: so.so_number,
+      lineNo: line.line_no,
+      productCode: line.product_code || '',
+      productName: line.product_name || ''
+    }
+  });
 
   return {
     ok: true,
@@ -14013,6 +14465,7 @@ const ROUTES = {
     masters: 'Masters',
     plates: 'Purchase',
   purchase: 'Purchase',
+  materialindent: 'MaterialIndent',
   itemmaster: 'ItemMaster',
 
   wow: 'WorkOrderWizard',
@@ -16763,6 +17216,10 @@ function updateSalesOrderLineApproval(payload) {
       throw new Error('Sales Order line not found: ' + normalized.soNo + ' / ' + normalized.lineNo);
     }
 
+    const beforeLine = (_auditSelectRowsSafe_('sales_order_lines', {
+      filters: { id: 'eq.' + lineId },
+      limit: 1
+    }) || [])[0] || null;
     const now = new Date().toISOString();
     const update = {};
 
@@ -16791,6 +17248,30 @@ function updateSalesOrderLineApproval(payload) {
     if (payload.creditOverride === true) {
       _recordApprovalCreditOverrides_(creditWarnings, user, 'SINGLE');
     }
+    const afterLine = (_auditSelectRowsSafe_('sales_order_lines', {
+      filters: { id: 'eq.' + lineId },
+      limit: 1
+    }) || [])[0] || null;
+    _auditTryInsertEvent_({
+      entityType: 'SALES_ORDER_LINE',
+      entityId: lineId,
+      entityKey: normalized.soNo + '/' + normalized.lineNo,
+      action: normalized.approvalType + '_' + normalized.decision,
+      sourceModule: 'SALES_ORDER_APPROVAL',
+      actor: user,
+      reason: normalized.approvalType + ' decision: ' + normalized.decision,
+      beforeJson: beforeLine,
+      afterJson: afterLine,
+      metadata: {
+        soId: soId,
+        soNumber: normalized.soNo,
+        lineNo: normalized.lineNo,
+        approvalType: normalized.approvalType,
+        decision: normalized.decision,
+        advancePaymentRequired: normalized.advancePaymentRequired,
+        creditOverride: payload.creditOverride === true
+      }
+    });
     _bumpSalesOrderApprovalVersion_();
     return { ok:true, soNo: normalized.soNo, lineNo: normalized.lineNo };
   } finally {
@@ -16856,6 +17337,10 @@ function bulkUpdateSalesOrderApproval(payload) {
       updates.push(update);
     });
 
+    const updateIds = updates.map(function(row) { return row.id; });
+    const beforeRows = updateIds.length
+      ? _auditSelectByKeyInBatchesSafe_('sales_order_lines', '*', 'id', updateIds, 'line_no.asc', 40)
+      : [];
     supabaseUpsertMinimal('sales_order_lines', updates, { onConflict: 'id' });
 
     const advanceMap = {};
@@ -16876,6 +17361,27 @@ function bulkUpdateSalesOrderApproval(payload) {
     if (payload.creditOverride === true) {
       _recordApprovalCreditOverrides_(creditWarnings, user, 'BULK');
     }
+    const afterRows = updateIds.length
+      ? _auditSelectByKeyInBatchesSafe_('sales_order_lines', '*', 'id', updateIds, 'line_no.asc', 40)
+      : [];
+    _auditTryInsertEvent_({
+      entityType: 'SALES_ORDER_APPROVAL_BATCH',
+      entityId: null,
+      entityKey: soNumbers.slice(0, 20).join(','),
+      action: approvalTypes[0] + '_BULK_UPDATE',
+      sourceModule: 'SALES_ORDER_APPROVAL',
+      actor: user,
+      reason: 'Bulk ' + approvalTypes[0] + ' approval update',
+      beforeJson: beforeRows,
+      afterJson: afterRows,
+      metadata: {
+        approvalType: approvalTypes[0],
+        updatedCount: updates.length,
+        soNumbers: soNumbers,
+        creditOverride: payload.creditOverride === true,
+        advancePaymentUpdates: advanceMap
+      }
+    });
     _bumpSalesOrderApprovalVersion_();
     return { ok: true, updated: updates.length };
   } finally {
@@ -16894,7 +17400,24 @@ function updateSalesOrderAdvancePaymentRequired(payload) {
 
   const required = payload && payload.advancePaymentRequired === true;
 
+  const auditBefore = _salesOrderAuditSnapshot_(soIdByNumber[soNo]);
   _updateSalesOrderAdvancePaymentRequiredBySoNo_(soNo, required);
+  const auditAfter = _salesOrderAuditSnapshot_(soIdByNumber[soNo]);
+  _auditTryInsertEvent_({
+    entityType: 'SALES_ORDER',
+    entityId: soIdByNumber[soNo],
+    entityKey: soNo,
+    action: 'ADVANCE_PAYMENT_REQUIRED_UPDATE',
+    sourceModule: 'SALES_ORDER_APPROVAL',
+    actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+    reason: 'Advance payment requirement updated',
+    beforeJson: auditBefore,
+    afterJson: auditAfter,
+    metadata: {
+      soNumber: soNo,
+      advancePaymentRequired: required
+    }
+  });
 
   return {
     ok: true,
@@ -16915,6 +17438,7 @@ function updateSalesOrderAdvancePaymentReceived(payload) {
 
   const received = payload && payload.advancePaymentReceived === true;
 
+  const auditBefore = _salesOrderAuditSnapshot_(soIdByNumber[soNo]);
   supabaseUpdateMinimal('sales_orders', {
     so_number: 'eq.' + soNo
   }, received ? {
@@ -16928,6 +17452,22 @@ function updateSalesOrderAdvancePaymentReceived(payload) {
     advancePaymentRequired: received ? true : undefined,
     advancePaymentReceived: received
   }, 1800);
+  const auditAfter = _salesOrderAuditSnapshot_(soIdByNumber[soNo]);
+  _auditTryInsertEvent_({
+    entityType: 'SALES_ORDER',
+    entityId: soIdByNumber[soNo],
+    entityKey: soNo,
+    action: 'ADVANCE_PAYMENT_RECEIVED_UPDATE',
+    sourceModule: 'SALES_ORDER_APPROVAL',
+    actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+    reason: 'Advance payment received status updated',
+    beforeJson: auditBefore,
+    afterJson: auditAfter,
+    metadata: {
+      soNumber: soNo,
+      advancePaymentReceived: received
+    }
+  });
 
   return {
     ok: true,
@@ -16949,6 +17489,15 @@ function bulkUpdateSalesOrderAdvancePaymentRequired(payload) {
 
   const required = payload && payload.advancePaymentRequired === true;
   let updated = 0;
+  const soIdByNumber = _getSalesOrderIdsByNumber_(soNos);
+  const beforeRows = _auditSelectByKeyInBatchesSafe_(
+    'sales_orders',
+    'id,so_number,advance_payment_required,advance_payment_received',
+    'so_number',
+    soNos,
+    'so_number.asc',
+    40
+  );
 
   for (let i = 0; i < soNos.length; i += 40) {
     const chunk = soNos.slice(i, i + 40);
@@ -16969,6 +17518,31 @@ function bulkUpdateSalesOrderAdvancePaymentRequired(payload) {
     });
     updated += chunk.length;
   }
+  const afterRows = _auditSelectByKeyInBatchesSafe_(
+    'sales_orders',
+    'id,so_number,advance_payment_required,advance_payment_received',
+    'so_number',
+    soNos,
+    'so_number.asc',
+    40
+  );
+  _auditTryInsertEvent_({
+    entityType: 'SALES_ORDER_ADVANCE_PAYMENT_BATCH',
+    entityId: null,
+    entityKey: soNos.slice(0, 20).join(','),
+    action: 'ADVANCE_PAYMENT_REQUIRED_BULK_UPDATE',
+    sourceModule: 'SALES_ORDER_APPROVAL',
+    actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+    reason: 'Bulk advance payment requirement updated',
+    beforeJson: beforeRows,
+    afterJson: afterRows,
+    metadata: {
+      soIdsByNumber: soIdByNumber,
+      soNumbers: soNos,
+      advancePaymentRequired: required,
+      updated: updated
+    }
+  });
 
   return {
     ok: true,
@@ -16990,6 +17564,15 @@ function bulkUpdateSalesOrderAdvancePaymentReceived(payload) {
 
   const received = payload && payload.advancePaymentReceived === true;
   let updated = 0;
+  const soIdByNumber = _getSalesOrderIdsByNumber_(soNos);
+  const beforeRows = _auditSelectByKeyInBatchesSafe_(
+    'sales_orders',
+    'id,so_number,advance_payment_required,advance_payment_received',
+    'so_number',
+    soNos,
+    'so_number.asc',
+    40
+  );
 
   for (let i = 0; i < soNos.length; i += 40) {
     const chunk = soNos.slice(i, i + 40);
@@ -17010,6 +17593,31 @@ function bulkUpdateSalesOrderAdvancePaymentReceived(payload) {
     });
     updated += chunk.length;
   }
+  const afterRows = _auditSelectByKeyInBatchesSafe_(
+    'sales_orders',
+    'id,so_number,advance_payment_required,advance_payment_received',
+    'so_number',
+    soNos,
+    'so_number.asc',
+    40
+  );
+  _auditTryInsertEvent_({
+    entityType: 'SALES_ORDER_ADVANCE_PAYMENT_BATCH',
+    entityId: null,
+    entityKey: soNos.slice(0, 20).join(','),
+    action: 'ADVANCE_PAYMENT_RECEIVED_BULK_UPDATE',
+    sourceModule: 'SALES_ORDER_APPROVAL',
+    actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+    reason: 'Bulk advance payment received status updated',
+    beforeJson: beforeRows,
+    afterJson: afterRows,
+    metadata: {
+      soIdsByNumber: soIdByNumber,
+      soNumbers: soNos,
+      advancePaymentReceived: received,
+      updated: updated
+    }
+  });
 
   return {
     ok: true,
@@ -17341,7 +17949,7 @@ function _opsEnsurePackingRecord_(payload) {
   const soLineId = String(payload.soLineId || '').trim();
   if (!soLineId) throw new Error('Sales order line missing for packing');
   const existing = supabaseSelect('packing_records', {
-    select: 'id,so_line_id,packed_qty,packed_weight_kg',
+    select: 'id,so_line_id,produced_qty,packed_qty,packed_weight_kg',
     filters: { so_line_id: 'eq.' + soLineId },
     limit: 1
   }) || [];
@@ -17573,10 +18181,12 @@ function _opsPersistPackingEntries_(entries) {
   const packedBy = Session.getActiveUser()?.getEmail?.() || 'user';
   const grouped = {};
   const logRows = [];
+  const rejectionRows = [];
 
   payloadRows.forEach(function(entry) {
     const qty = Number(entry.qty != null ? entry.qty : entry.packedQty || 0);
-    if (!qty || qty <= 0) return;
+    const rejectedQty = Number(entry.rejectedQty || entry.rejectQty || 0);
+    if ((!qty || qty <= 0) && (!rejectedQty || rejectedQty <= 0)) return;
     const pack = _opsEnsurePackingRecord_(entry);
     const key = String(pack.id || '');
     if (!key) throw new Error('Packing record missing for SO ' + String(entry.soNumber || '') + ' line ' + String(entry.lineNo || ''));
@@ -17585,27 +18195,42 @@ function _opsPersistPackingEntries_(entries) {
     const currentWeightKg = Number(pack.packed_weight_kg || 0);
     const producedQty = Number(entry.producedQty || 0);
     const weightKg = Number(entry.weightKg || 0);
+    const rejectedWeightKg = Number(entry.rejectedWeightKg || entry.rejectWeightKg || 0);
+    const rejectionReason = String(entry.rejectionReason || entry.rejectReason || '').trim();
     const requiresWeight = _opsRequiresPackingWeight_(entry);
-    if (requiresWeight && weightKg <= 0) {
+    if (qty > 0 && requiresWeight && weightKg <= 0) {
       throw new Error('Weight in kg is required for corrugation SO ' + String(entry.soNumber || '') + ' line ' + String(entry.lineNo || ''));
     }
+    if (rejectedQty > 0 && !rejectionReason) {
+      throw new Error('Rejection reason is required for SO ' + String(entry.soNumber || '') + ' line ' + String(entry.lineNo || ''));
+    }
     if (!grouped[key]) {
+      const existingRejectedRows = _fgSafeSelect_('packing_rejection_log', {
+        select: 'rejected_qty',
+        filters: { pack_id: 'eq.' + pack.id },
+        limit: 5000
+      }) || [];
       grouped[key] = {
         id: pack.id,
         soLineId: entry.soLineId || pack.so_line_id || '',
         currentPacked: currentPacked,
         currentWeightKg: currentWeightKg,
+        currentRejected: existingRejectedRows.reduce(function(sum, row) { return sum + Number(row.rejected_qty || 0); }, 0),
         producedQty: producedQty,
         addedQty: 0,
-        addedWeightKg: 0
+        addedWeightKg: 0,
+        rejectedQty: 0,
+        rejectedWeightKg: 0
       };
     }
-    if (grouped[key].addedQty + qty > Math.max(grouped[key].producedQty - grouped[key].currentPacked, 0)) {
-      throw new Error('Packed qty cannot exceed produced balance for SO ' + String(entry.soNumber || '') + ' line ' + String(entry.lineNo || ''));
+    if (grouped[key].addedQty + grouped[key].rejectedQty + qty + rejectedQty > Math.max(grouped[key].producedQty - grouped[key].currentPacked - grouped[key].currentRejected, 0)) {
+      throw new Error('Packed/rejected qty cannot exceed produced balance for SO ' + String(entry.soNumber || '') + ' line ' + String(entry.lineNo || ''));
     }
     grouped[key].addedQty += qty;
+    grouped[key].rejectedQty += rejectedQty;
     if (requiresWeight) grouped[key].addedWeightKg += weightKg;
-    logRows.push({
+    grouped[key].rejectedWeightKg += rejectedWeightKg;
+    if (qty > 0) logRows.push({
       pack_id: pack.id,
       so_id: entry.soId || pack.so_id || null,
       so_line_id: entry.soLineId || pack.so_line_id || null,
@@ -17623,6 +18248,25 @@ function _opsPersistPackingEntries_(entries) {
       posted_at: packedAt,
       posted_by: packedBy
     });
+    if (rejectedQty > 0) {
+      rejectionRows.push({
+        pack_id: pack.id,
+        so_id: entry.soId || pack.so_id || null,
+        so_line_id: entry.soLineId || pack.so_line_id || null,
+        so_number: entry.soNumber || pack.so_number || '',
+        line_no: entry.lineNo || pack.line_no || '',
+        product_code: entry.productCode || pack.product_code || '',
+        product_name: entry.product || pack.product_name || '',
+        category: entry.category || '',
+        department_category: entry.departmentCategory || entry.categoryGroup || '',
+        rejected_qty: rejectedQty,
+        rejected_weight_kg: rejectedWeightKg,
+        reason: rejectionReason,
+        remarks: entry.remarks || '',
+        posted_at: packedAt,
+        posted_by: packedBy
+      });
+    }
   });
 
   const updates = Object.keys(grouped).map(function(key) {
@@ -17641,6 +18285,16 @@ function _opsPersistPackingEntries_(entries) {
   if (updates.length) {
     supabaseUpsertMinimal('packing_records', updates, { onConflict: 'id' });
     _packInsertEntryLogsSafe_(logRows);
+    if (rejectionRows.length) {
+      try {
+        supabaseBulkInsertMinimal('packing_rejection_log', rejectionRows);
+      } catch (err) {
+        if (_supabaseRelationMissing_(err, 'packing_rejection_log')) {
+          throw new Error('Packing rejection schema is not applied. Run supabase_packing_queue_dataset_rpc.sql first.');
+        }
+        throw err;
+      }
+    }
     _opsBumpDatasetVersion_();
     _invBumpStockSnapshotVersion_();
   }
@@ -17655,8 +18309,10 @@ function _opsPersistPackingEntries_(entries) {
         soLineId: item.soLineId,
         addedQty: item.addedQty,
         addedWeightKg: item.addedWeightKg,
+        addedRejectedQty: item.rejectedQty,
         packedQty: item.currentPacked + item.addedQty,
         packedWeightKg: item.currentWeightKg + item.addedWeightKg,
+        packingRejectedQty: item.currentRejected + item.rejectedQty,
         producedQty: item.producedQty,
         readyToDispatch: item.currentPacked + item.addedQty > 0
       };
@@ -17747,6 +18403,10 @@ function _opsRowIdentity_(row) {
 }
 
 function _opsRequiresPackingWeight_(row) {
+  return false;
+}
+
+function _opsIsCorrugationRow_(row) {
   const text = [row && row.departmentCategory, row && row.categoryGroup, row && row.category].join(' ').toUpperCase();
   return text.indexOf('CORR') !== -1;
 }
@@ -17861,6 +18521,8 @@ function _opsMapPackingFastRows_(rows) {
       sourceMode: Number(row.stock_closed_qty || 0) > 0 ? 'STOCK' : 'PRODUCTION',
       packedQty: Number(row.packed_qty || 0),
       packedWeightKg: Number(row.packed_weight_kg || 0),
+      packingRejectedQty: Number(row.packing_rejected_qty || row.rejected_qty || 0),
+      packingRejectedWeightKg: Number(row.packing_rejected_weight_kg || 0),
       dispatchedQty: 0,
       readyToDispatch: row.ready_to_dispatch === true,
       holdFlag: false,
@@ -17950,6 +18612,9 @@ function _opsFilterStageRows_(rows, stage, params) {
   const includeCompleted = p.includeCompleted === true;
   const focus = String(stage || '').toUpperCase();
   return (rows || []).filter(function(row) {
+    if (focus === 'PACKING' && _opsIsCorrugationRow_(row)) {
+      return false;
+    }
     if (focus === 'DISPATCH' && row.readyToDispatch !== true && Number(row.dispatchedQty || 0) <= 0) {
       return false;
     }
@@ -17975,10 +18640,10 @@ function packGetDataset(params, token) {
       p_include_completed: p.includeCompleted === true,
       p_date_from: _prodToDateKey_(p.dateFrom) || null,
       p_date_to: _prodToDateKey_(p.dateTo) || null,
-      p_limit: 5000,
-      p_offset: 0
+      p_limit: Math.min(50000, Math.max(1000, Number(p.limit || 20000) || 20000)),
+      p_offset: Math.max(0, Number(p.offset || 0) || 0)
     }) || [];
-    const rows = _opsMapPackingFastRows_(rpcRows);
+    const rows = _opsFilterStageRows_(_opsMapPackingFastRows_(rpcRows), 'PACKING', p);
     const result = { ok: true, rows: rows, summary: _opsStageDatasetSummary_(rows, 'PACKING') };
     _prodCachePutJsonSafe_(cache, cacheKey, result, 60);
     return result;
@@ -18291,12 +18956,11 @@ function packAdminUpdateEntry(payload, token) {
   const blockReason = _packGetMutationBlockReason_(beforeRow);
   if (blockReason) throw new Error(blockReason);
   const nextQty = Number(p.packedQty || 0);
-  const nextWeightKg = Number(p.packedWeightKg || 0);
+  const nextWeightKg = Object.prototype.hasOwnProperty.call(p, 'packedWeightKg')
+    ? Number(p.packedWeightKg || 0)
+    : Number(beforeRow.packed_weight_kg || 0);
   const changeReason = String(p.changeReason || '').trim();
   if (!(nextQty > 0)) throw new Error('Packed quantity must be greater than zero.');
-  if (_opsRequiresPackingWeight_(beforeRow) && !(nextWeightKg > 0)) {
-    throw new Error('Weight in kg is required for corrugation packing corrections.');
-  }
   if (!changeReason) throw new Error('Reason for correction is required.');
   const pack = _packGetRecordById_(beforeRow.pack_id);
   if (!pack?.id) throw new Error('Packing record not found');
@@ -19256,6 +19920,468 @@ function invSearchItemsJSON(q){
     }))
   };
 
+}
+
+/* =========================
+   MATERIAL INDENT MODULE
+   ========================= */
+
+const MATERIAL_INDENT_MODULE = 'MATERIAL_INDENT';
+
+function _materialIndentActor_(user) {
+  return String((user && (user.displayName || user.fullName || user.userId)) || 'ERP User').trim();
+}
+
+function _materialIndentHasAnyPermission_(user, pairs) {
+  if (!user) return false;
+  if (String(user.role || '').toUpperCase() === 'ADMIN') return true;
+  return (pairs || []).some(function(pair) {
+    return _userHasPermission_(user, pair.module, pair.action || 'can_view');
+  });
+}
+
+function _materialIndentRequireAny_(token, pairs) {
+  const user = getSessionUser(token);
+  if (!user) throw new Error('Unauthorized');
+  if (!_materialIndentHasAnyPermission_(user, pairs || [{ module: MATERIAL_INDENT_MODULE, action: 'can_view' }])) {
+    throw new Error('Unauthorized');
+  }
+  return user;
+}
+
+function _materialIndentCanManage_(user) {
+  return _materialIndentHasAnyPermission_(user, [
+    { module: MATERIAL_INDENT_MODULE, action: 'can_edit' },
+    { module: 'INVENTORY', action: 'can_edit' },
+    { module: 'PURCHASE', action: 'can_create' },
+    { module: 'PURCHASE', action: 'can_edit' }
+  ]);
+}
+
+function _materialIndentEnsureSchema_(err) {
+  if (err && _supabaseRelationMissing_(err, 'material_indents')) {
+    throw new Error('Material Indent schema is not installed. Apply supabase_material_indent_module.sql in Supabase first.');
+  }
+  throw err;
+}
+
+function _materialIndentNextNo_() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    throw new Error('Indent number generation is busy. Please try again.');
+  }
+  try {
+    const prefix = 'MI';
+    const seq = (supabaseSelect('material_indent_sequences', {
+      filters: { prefix: 'eq.' + prefix },
+      limit: 1
+    }) || [])[0];
+    const next = Number(seq && seq.last_no || 0) + 1;
+    if (seq) {
+      supabaseUpdate('material_indent_sequences', { prefix: 'eq.' + prefix }, { last_no: next });
+    } else {
+      supabaseInsert('material_indent_sequences', { prefix: prefix, last_no: next });
+    }
+    return prefix + String(next).padStart(5, '0');
+  } catch (err) {
+    _materialIndentEnsureSchema_(err);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _materialIndentEvent_(entry) {
+  try {
+    supabaseInsertMinimal('material_indent_events', {
+      indent_id: entry.indentId || null,
+      indent_no: String(entry.indentNo || ''),
+      indent_line_id: entry.indentLineId || null,
+      event_type: String(entry.eventType || '').toUpperCase(),
+      actor: String(entry.actor || ''),
+      remarks: String(entry.remarks || ''),
+      before_json: entry.beforeJson || null,
+      after_json: entry.afterJson || null
+    });
+  } catch (err) {
+    Logger.log('Material indent event skipped: ' + ((err && err.message) || err));
+  }
+}
+
+function _materialIndentNormalizeStatusRow_(row) {
+  return {
+    indentId: row.indent_id || '',
+    indentNo: row.indent_no || '',
+    requesterUserId: row.requester_user_id || '',
+    requesterName: row.requester_name || '',
+    requesterEmail: row.requester_email || '',
+    department: row.indent_department || '',
+    requiredDate: row.required_date || '',
+    purpose: row.purpose || '',
+    indentRemarks: row.indent_remarks || '',
+    indentStatus: row.indent_status || '',
+    createdAt: row.indent_created_at || '',
+    updatedAt: row.indent_updated_at || '',
+    lineId: row.indent_line_id || '',
+    lineNo: Number(row.line_no || 0),
+    itemId: row.item_id || '',
+    itemCode: row.item_code || '',
+    itemName: row.item_name || '',
+    uom: row.uom || '',
+    requestedQty: Number(row.requested_qty || 0),
+    stockAvailableQty: Number(row.stock_available_qty || 0),
+    shortageQty: Number(row.shortage_qty || 0),
+    linkedPrQty: Number(row.linked_pr_qty || 0),
+    pendingPrQty: Number(row.pending_pr_qty || 0),
+    currentStockQty: Number(row.current_stock_qty || 0),
+    stockStatus: row.stock_status || '',
+    prStatus: row.pr_status || '',
+    lineStatus: row.line_status || '',
+    lifecycleStatus: row.lifecycle_status || '',
+    jobRef: row.job_ref || '',
+    lineRemarks: row.line_remarks || '',
+    storesRemarks: row.stores_remarks || '',
+    linkedPrNos: String(row.linked_pr_nos || '').split(',').map(function(v) { return v.trim(); }).filter(Boolean),
+    poRefs: String(row.po_refs || '').split(',').map(function(v) { return v.trim(); }).filter(Boolean),
+    prReceivedQty: Number(row.pr_received_qty || 0),
+    prPendingReceiptQty: Number(row.pr_pending_receipt_qty || 0),
+    latestReceiptDate: row.latest_receipt_date || '',
+    prCycleStatuses: row.pr_cycle_statuses || ''
+  };
+}
+
+function materialIndentCreate(payload, token) {
+  const user = _materialIndentRequireAny_(token, [
+    { module: MATERIAL_INDENT_MODULE, action: 'can_create' },
+    { module: MATERIAL_INDENT_MODULE, action: 'can_edit' }
+  ]);
+  const p = payload || {};
+  const rows = Array.isArray(p.lines) ? p.lines : [];
+  if (!rows.length) throw new Error('Add at least one indent line');
+
+  const department = String(p.department || '').trim();
+  if (!department) throw new Error('Department is required');
+
+  const prepared = rows.map(function(line, idx) {
+    if (!line.itemCode && !line.itemName) throw new Error('Item is required on line ' + (idx + 1));
+    const qty = Number(line.qty || line.requestedQty || 0);
+    if (!(qty > 0)) throw new Error('Requested qty is invalid on line ' + (idx + 1));
+    const item = resolveInventoryItemForEntry_(line.itemCode, line.itemName);
+    return {
+      lineNo: idx + 1,
+      item: item,
+      qty: qty,
+      jobRef: String(line.jobRef || '').trim(),
+      remarks: String(line.remarks || '').trim()
+    };
+  });
+
+  const indentNo = _materialIndentNextNo_();
+  const indentId = Utilities.getUuid();
+  const now = new Date().toISOString();
+  const actor = _materialIndentActor_(user);
+
+  try {
+    supabaseInsert('material_indents', {
+      id: indentId,
+      indent_no: indentNo,
+      requester_user_id: String(user.userId || ''),
+      requester_name: actor,
+      requester_email: String(user.email || ''),
+      department: department,
+      required_date: p.requiredDate || null,
+      purpose: String(p.purpose || '').trim(),
+      remarks: String(p.remarks || '').trim(),
+      status: 'SUBMITTED',
+      created_by: actor,
+      created_at: now,
+      updated_at: now
+    });
+
+    supabaseBulkInsert('material_indent_lines', prepared.map(function(row) {
+      return {
+        id: Utilities.getUuid(),
+        indent_id: indentId,
+        indent_no: indentNo,
+        line_no: row.lineNo,
+        item_id: row.item.id,
+        item_code: row.item.item_code,
+        item_name: row.item.item_name,
+        uom: row.item.uom || '',
+        requested_qty: row.qty,
+        stock_available_qty: 0,
+        stock_status: 'PENDING_REVIEW',
+        pr_status: 'NOT_RELEASED',
+        status: 'SUBMITTED',
+        job_ref: row.jobRef,
+        remarks: row.remarks,
+        created_at: now,
+        updated_at: now
+      };
+    }));
+  } catch (err) {
+    _materialIndentEnsureSchema_(err);
+  }
+
+  _materialIndentEvent_({
+    indentId: indentId,
+    indentNo: indentNo,
+    eventType: 'CREATE',
+    actor: actor,
+    afterJson: { lines: prepared.length }
+  });
+  PropertiesService.getScriptProperties().setProperty('MATERIAL_INDENT_CACHE_VERSION', String(Date.now()));
+  return { ok: true, indentNo: indentNo, lineCount: prepared.length };
+}
+
+function materialIndentList(params, token) {
+  const user = _materialIndentRequireAny_(token, [
+    { module: MATERIAL_INDENT_MODULE, action: 'can_view' },
+    { module: MATERIAL_INDENT_MODULE, action: 'can_create' },
+    { module: 'INVENTORY', action: 'can_view' },
+    { module: 'INVENTORY', action: 'can_create' },
+    { module: 'PURCHASE', action: 'can_view' },
+    { module: 'PURCHASE', action: 'can_create' }
+  ]);
+  const p = params || {};
+  const canManage = _materialIndentCanManage_(user);
+  const filters = {};
+  if (p.itemCode) filters.item_code = 'eq.' + String(p.itemCode).trim();
+  if (p.indentNo) filters.indent_no = 'eq.' + String(p.indentNo).trim();
+  if (p.status) filters.lifecycle_status = 'eq.' + String(p.status).trim().toUpperCase();
+  if (p.fromDate && p.toDate) {
+    filters.and = '(indent_created_at.gte.' + p.fromDate + 'T00:00:00,indent_created_at.lte.' + p.toDate + 'T23:59:59)';
+  } else if (p.fromDate) {
+    filters.indent_created_at = 'gte.' + p.fromDate + 'T00:00:00';
+  } else if (p.toDate) {
+    filters.indent_created_at = 'lte.' + p.toDate + 'T23:59:59';
+  }
+  if (!canManage || String(p.scope || '').toLowerCase() === 'my') {
+    filters.requester_user_id = 'eq.' + String(user.userId || '');
+  }
+
+  try {
+    let rows = _supabaseSelectAll_('v_material_indent_line_status', {
+      filters: filters,
+      order: 'indent_created_at.desc,line_no.asc'
+    }, 1000, Math.max(1, Number(p.limit || 50000))) || [];
+    const q = String(p.q || '').trim().toLowerCase();
+    if (q) {
+      rows = rows.filter(function(row) {
+        return [
+          row.indent_no,
+          row.item_code,
+          row.item_name,
+          row.indent_department,
+          row.requester_name,
+          row.job_ref,
+          row.line_remarks,
+          row.linked_pr_nos,
+          row.po_refs
+        ].join(' ').toLowerCase().indexOf(q) !== -1;
+      });
+    }
+    return {
+      ok: true,
+      canManage: canManage,
+      rows: rows.map(_materialIndentNormalizeStatusRow_)
+    };
+  } catch (err) {
+    _materialIndentEnsureSchema_(err);
+  }
+}
+
+function materialIndentListOpenForPR(params, token) {
+  _materialIndentRequireAny_(token, [
+    { module: MATERIAL_INDENT_MODULE, action: 'can_edit' },
+    { module: 'PURCHASE', action: 'can_create' },
+    { module: 'INVENTORY', action: 'can_create' }
+  ]);
+  const result = materialIndentList(Object.assign({}, params || {}, {
+    scope: 'all',
+    limit: params && params.limit || 50000
+  }), token);
+  result.rows = (result.rows || []).filter(function(row) {
+    if (Number(row.pendingPrQty || 0) <= 0) return false;
+    if (['CANCELLED', 'REJECTED', 'RECEIVED', 'CLOSED'].indexOf(String(row.lifecycleStatus || '').toUpperCase()) !== -1) return false;
+    return true;
+  });
+  return result;
+}
+
+function materialIndentReviewStock(payload, token) {
+  const user = _materialIndentRequireAny_(token, [
+    { module: MATERIAL_INDENT_MODULE, action: 'can_edit' },
+    { module: 'INVENTORY', action: 'can_edit' }
+  ]);
+  const lines = Array.isArray(payload && payload.lines) ? payload.lines : [];
+  if (!lines.length) throw new Error('No indent lines selected');
+  const actor = _materialIndentActor_(user);
+  const now = new Date().toISOString();
+  let updated = 0;
+
+  lines.forEach(function(line) {
+    const lineId = String(line.lineId || '').trim();
+    if (!lineId) return;
+    const qty = Math.max(0, Number(line.stockAvailableQty || 0));
+    const existing = (supabaseSelect('material_indent_lines', {
+      select: 'id,indent_id,indent_no,requested_qty,stock_available_qty,stock_status,status,stores_remarks',
+      filters: { id: 'eq.' + lineId },
+      limit: 1
+    }) || [])[0];
+    if (!existing) throw new Error('Indent line not found');
+    const requestedQty = Number(existing.requested_qty || 0);
+    const stockStatus = qty >= requestedQty && requestedQty > 0
+      ? 'STOCK_AVAILABLE'
+      : (qty > 0 ? 'PARTIAL_STOCK_AVAILABLE' : 'NOT_AVAILABLE');
+    supabaseUpdate('material_indent_lines', { id: 'eq.' + lineId }, {
+      stock_available_qty: qty,
+      stock_status: stockStatus,
+      status: stockStatus,
+      stores_remarks: String(line.storesRemarks || line.remarks || '').trim(),
+      updated_at: now
+    });
+    supabaseUpdate('material_indents', { id: 'eq.' + existing.indent_id }, {
+      updated_at: now
+    });
+    _materialIndentEvent_({
+      indentId: existing.indent_id,
+      indentNo: existing.indent_no,
+      indentLineId: lineId,
+      eventType: 'STOCK_REVIEW',
+      actor: actor,
+      beforeJson: existing,
+      afterJson: { stockAvailableQty: qty, stockStatus: stockStatus }
+    });
+    updated++;
+  });
+
+  PropertiesService.getScriptProperties().setProperty('MATERIAL_INDENT_CACHE_VERSION', String(Date.now()));
+  return { ok: true, updated: updated };
+}
+
+function _materialIndentRefreshLinePRStatus_(lineId) {
+  const line = (supabaseSelect('material_indent_lines', {
+    select: 'id,requested_qty,stock_available_qty,status',
+    filters: { id: 'eq.' + lineId },
+    limit: 1
+  }) || [])[0];
+  if (!line) return;
+  const links = supabaseSelect('material_indent_pr_links', {
+    select: 'pr_qty',
+    filters: { indent_line_id: 'eq.' + lineId },
+    limit: 1000
+  }) || [];
+  const linkedQty = links.reduce(function(sum, row) { return sum + Number(row.pr_qty || 0); }, 0);
+  const shortageQty = Math.max(0, Number(line.requested_qty || 0) - Number(line.stock_available_qty || 0));
+  const prStatus = linkedQty >= shortageQty && shortageQty > 0
+    ? 'RELEASED'
+    : (linkedQty > 0 ? 'PARTIAL_RELEASED' : 'NOT_RELEASED');
+  supabaseUpdate('material_indent_lines', { id: 'eq.' + lineId }, {
+    pr_status: prStatus,
+    status: prStatus === 'RELEASED' ? 'PR_RELEASED' : (prStatus === 'PARTIAL_RELEASED' ? 'PARTIAL_PR_RELEASED' : line.status),
+    updated_at: new Date().toISOString()
+  });
+}
+
+function materialIndentCreateLinkedPR(payload, token) {
+  const user = _materialIndentRequireAny_(token, [
+    { module: MATERIAL_INDENT_MODULE, action: 'can_edit' },
+    { module: 'PURCHASE', action: 'can_create' },
+    { module: 'INVENTORY', action: 'can_create' }
+  ]);
+  const lineIds = [...new Set((payload && payload.lineIds || []).map(function(v) {
+    return String(v || '').trim();
+  }).filter(Boolean))];
+  if (!lineIds.length) throw new Error('Select at least one indent line');
+
+  const rows = _supabaseSelectByKeyInBatches_(
+    'v_material_indent_line_status',
+    'indent_id,indent_no,indent_line_id,item_code,item_name,uom,requested_qty,stock_available_qty,pending_pr_qty,indent_department,job_ref,line_remarks,requester_name',
+    'indent_line_id',
+    lineIds,
+    null,
+    25
+  ).map(_materialIndentNormalizeStatusRow_);
+
+  if (rows.length !== lineIds.length) throw new Error('One or more selected indent lines were not found');
+  const itemCode = String(rows[0].itemCode || '').trim();
+  if (!itemCode) throw new Error('Selected indent item is invalid');
+  if (rows.some(function(row) { return String(row.itemCode || '').trim() !== itemCode; })) {
+    throw new Error('Create one PR at a time for one item only');
+  }
+
+  const linkRows = rows.map(function(row) {
+    const qty = Number(row.pendingPrQty || 0);
+    if (!(qty > 0)) return null;
+    return {
+      row: row,
+      qty: qty
+    };
+  }).filter(Boolean);
+  if (!linkRows.length) throw new Error('Selected indent lines do not have pending PR quantity');
+
+  const item = resolveInventoryItemForEntry_(rows[0].itemCode, rows[0].itemName);
+  const prNo = generatePRNo_();
+  const totalQty = linkRows.reduce(function(sum, x) { return sum + Number(x.qty || 0); }, 0);
+  const actor = _materialIndentActor_(user);
+  const indentNos = [...new Set(linkRows.map(function(x) { return x.row.indentNo; }))];
+  const departments = [...new Set(linkRows.map(function(x) { return x.row.department; }).filter(Boolean))];
+  const jobRefs = [...new Set(linkRows.map(function(x) { return x.row.jobRef; }).filter(Boolean))];
+  const sourceSummary = 'Indents: ' + indentNos.join(', ');
+
+  try {
+    supabaseInsert('inv_purchase_requests', {
+      pr_no: prNo,
+      item_id: item.id,
+      item_code: item.item_code,
+      item_name: item.item_name,
+      requested_qty: totalQty,
+      received_qty: 0,
+      department: departments.length === 1 ? departments[0] : 'MULTI',
+      job_ref: jobRefs.slice(0, 6).join(', '),
+      remarks: [String(payload && payload.remarks || '').trim(), sourceSummary].filter(Boolean).join(' | '),
+      status: 'OPEN',
+      source_type: 'MATERIAL_INDENT',
+      source_ref: indentNos.join(', '),
+      source_line_id: linkRows.length === 1 ? linkRows[0].row.lineId : null,
+      source_summary: sourceSummary,
+      requested_by: actor,
+      requested_for_department: departments.join(', ')
+    });
+  } catch (err) {
+    if (String((err && err.message) || err).indexOf('source_type') !== -1 ||
+        String((err && err.message) || err).indexOf('source_ref') !== -1) {
+      throw new Error('Material Indent PR link columns are not installed. Apply supabase_material_indent_module.sql in Supabase first.');
+    }
+    throw err;
+  }
+
+  supabaseBulkInsert('material_indent_pr_links', linkRows.map(function(x) {
+    return {
+      indent_id: x.row.indentId,
+      indent_no: x.row.indentNo,
+      indent_line_id: x.row.lineId,
+      pr_no: prNo,
+      pr_qty: x.qty,
+      created_by: actor
+    };
+  }));
+
+  lineIds.forEach(_materialIndentRefreshLinePRStatus_);
+  linkRows.forEach(function(x) {
+    _materialIndentEvent_({
+      indentId: x.row.indentId,
+      indentNo: x.row.indentNo,
+      indentLineId: x.row.lineId,
+      eventType: 'PR_RELEASED',
+      actor: actor,
+      afterJson: { prNo: prNo, prQty: x.qty }
+    });
+  });
+
+  PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  PropertiesService.getScriptProperties().setProperty('MATERIAL_INDENT_CACHE_VERSION', String(Date.now()));
+  return { ok: true, prNo: prNo, linkedLines: linkRows.length, prQty: totalQty };
 }
 
 function _invBuildTxnDateFilters_(opts, refType) {
@@ -20613,6 +21739,7 @@ function invListPurchaseRequestsJSON(opts = {}) {
   const requestLimit = Math.max(1, Number(opts.limit || ((normalizedStatus === 'OPEN' || hasDateFilter) ? 50000 : 1000)) || 1000);
   const cacheKey = _cacheKeyHash_('INV_PURCHASE_REQUESTS_EFFECTIVE', JSON.stringify({
     v: purchaseCacheVersion,
+    logic: 'supabase-pr-effective-v2',
     status: String(opts.status || ''),
     fromDate: String(opts.fromDate || ''),
     toDate: String(opts.toDate || ''),
@@ -20629,6 +21756,69 @@ function invListPurchaseRequestsJSON(opts = {}) {
         cache.remove(cacheKey);
       }
     }
+  }
+
+  try {
+    const canFilterRawStatusFast = ['CANCELLED', 'SHORT_CLOSED'].indexOf(normalizedStatus) !== -1;
+    const shouldApplyDateFilterFast = !(includeOpenOutsideDate && normalizedStatus === 'OPEN');
+    const purchaseRows = purchaseListInventoryRequestsJSON({
+      status: canFilterRawStatusFast || normalizedStatus === 'OPEN' ? normalizedStatus : '',
+      fromDate: shouldApplyDateFilterFast ? opts.fromDate : '',
+      toDate: shouldApplyDateFilterFast ? opts.toDate : '',
+      limit: requestLimit,
+      forceRefresh: forceRefresh
+    }).rows || [];
+    const normalizedRowsFast = purchaseRows.map(function(r) {
+      const requestedQty = Number(r.requestedQty || 0);
+      const effectiveReceivedQty = Number(r.receivedQty || 0);
+      const storedStatus = String(r.status || 'OPEN').trim().toUpperCase() || 'OPEN';
+      const terminalStatus = storedStatus === 'CANCELLED' || storedStatus === 'SHORT_CLOSED';
+      const poRefs = Array.isArray(r.poRefs || r.refs) ? (r.poRefs || r.refs) : [];
+      const hasLinkedPO = poRefs.length > 0 || Number(r.openPOQty || 0) > 0 || Number(r.orderedQty || 0) > 0;
+      const effectiveStatus = terminalStatus
+        ? storedStatus
+        : (effectiveReceivedQty >= requestedQty && requestedQty > 0 ? 'CLOSED' : (hasLinkedPO || requestedQty > 0 ? 'OPEN' : storedStatus));
+      const displayStatus = terminalStatus
+        ? storedStatus
+        : (effectiveReceivedQty >= requestedQty && requestedQty > 0
+            ? 'CLOSED'
+            : (effectiveReceivedQty > 0 ? 'PARTIAL_RECEIVED' : effectiveStatus));
+      return {
+        prNo: r.prNo,
+        date: r.date,
+        itemId: r.itemId || '',
+        itemCode: r.itemCode,
+        itemName: r.itemName,
+        uom: r.uom || '',
+        prQty: requestedQty,
+        receivedQty: effectiveReceivedQty,
+        balanceQty: Math.max(0, requestedQty - effectiveReceivedQty),
+        pendingQty: Math.max(0, requestedQty - effectiveReceivedQty),
+        poQty: Number(r.openPOQty || 0),
+        poRate: Number(r.poRate || 0),
+        poRefs: poRefs,
+        prDept: r.department,
+        jobRef: r.jobRef,
+        remarks: r.remarks || '',
+        status: effectiveStatus,
+        displayStatus: displayStatus,
+        lifecycleStatus: displayStatus,
+        canEdit: String(effectiveStatus || '').toUpperCase() === 'OPEN' &&
+          effectiveReceivedQty <= 0 &&
+          !poRefs.length
+      };
+    }).filter(function(row) {
+      if (!opts.status) return true;
+      const requested = String(opts.status || '').trim().toUpperCase();
+      if (requested === 'OPEN') return String(row.status || '').trim().toUpperCase() === 'OPEN';
+      return String(row.status || '').trim().toUpperCase() === requested ||
+        String(row.displayStatus || '').trim().toUpperCase() === requested;
+    });
+    const fastResult = { ok: true, rows: normalizedRowsFast };
+    _putCachedJson_(cacheKey, fastResult, 120);
+    return fastResult;
+  } catch (fastErr) {
+    Logger.log('Purchase request read model fallback: ' + (fastErr.message || fastErr));
   }
 
   const filters = {};
@@ -21256,6 +22446,129 @@ function invPostPurchaseReceipt(payload) {
   return { ok: true, receiptNo: ledger?.id || '', batchNo: lot.batchNo || '' };
 }
 
+const GRN_RATE_WARN_PCT = 5;
+const GRN_RATE_BLOCK_PCT = 10;
+
+function _invNormalizeRateHistoryRows_(rows, limitPerItem) {
+  const grouped = {};
+  (rows || []).forEach(function(row) {
+    const itemCode = String(row.item_code || '').trim().toUpperCase();
+    if (!itemCode) return;
+    if (!grouped[itemCode]) grouped[itemCode] = [];
+    grouped[itemCode].push({
+      receiptId: row.receipt_id || '',
+      grnNo: row.grn_no || '',
+      poNo: row.po_no || '',
+      poLineId: row.po_line_id || '',
+      receiptDate: row.receipt_date || '',
+      receiptAt: row.receipt_at || '',
+      itemCode: row.item_code || '',
+      itemName: row.item_name || '',
+      qty: Number(row.qty || 0),
+      rate: Number(row.rate || 0),
+      value: Number(row.value || 0),
+      vendorName: row.vendor_name || '',
+      invoiceNo: row.invoice_no || '',
+      challanNo: row.challan_no || '',
+      location: row.location || '',
+      department: row.department || ''
+    });
+  });
+  const rowsOut = [];
+  const latestByItem = {};
+  Object.keys(grouped).forEach(function(itemCode) {
+    const sorted = grouped[itemCode].sort(function(a, b) {
+      return String(b.receiptAt || b.receiptDate || '').localeCompare(String(a.receiptAt || a.receiptDate || ''));
+    });
+    if (sorted[0]) latestByItem[itemCode] = sorted[0];
+    sorted.slice(0, limitPerItem || 10).forEach(function(row) { rowsOut.push(row); });
+  });
+  return { rows: rowsOut, latestByItem: latestByItem };
+}
+
+function invGetItemPurchaseRateHistoryJSON(itemCodes, opts) {
+  opts = opts || {};
+  const rawCodes = Array.isArray(itemCodes)
+    ? itemCodes
+    : (Array.isArray(itemCodes && itemCodes.itemCodes) ? itemCodes.itemCodes : []);
+  const codes = [...new Set(rawCodes.map(function(code) {
+    return String(code || '').trim();
+  }).filter(Boolean))];
+  if (!codes.length) {
+    return { ok: true, rows: [], latestByItem: {}, warnPct: GRN_RATE_WARN_PCT, blockPct: GRN_RATE_BLOCK_PCT };
+  }
+  const limitPerItem = Math.max(1, Math.min(20, Number(opts.limitPerItem || 10) || 10));
+  try {
+    const rows = _supabaseSelectByKeyInBatches_('v_inventory_item_purchase_rate_history', `
+      receipt_id,
+      receipt_at,
+      receipt_date,
+      grn_no,
+      po_no,
+      po_line_id,
+      item_code,
+      item_name,
+      qty,
+      rate,
+      value,
+      vendor_name,
+      invoice_no,
+      challan_no,
+      location,
+      department
+    `, 'item_code', codes, null, 25) || [];
+    const normalized = _invNormalizeRateHistoryRows_(rows, limitPerItem);
+    return {
+      ok: true,
+      rows: normalized.rows,
+      latestByItem: normalized.latestByItem,
+      warnPct: GRN_RATE_WARN_PCT,
+      blockPct: GRN_RATE_BLOCK_PCT
+    };
+  } catch (err) {
+    Logger.log('GRN rate history lookup failed: ' + (err.message || err));
+    return { ok: false, rows: [], latestByItem: {}, warnPct: GRN_RATE_WARN_PCT, blockPct: GRN_RATE_BLOCK_PCT };
+  }
+}
+
+function _invValidateGRNRateHistory_(receiptLines, reasonText) {
+  const codes = [...new Set((receiptLines || []).map(function(line) {
+    return String(line.itemCode || '').trim();
+  }).filter(Boolean))];
+  if (!codes.length) return [];
+  const history = invGetItemPurchaseRateHistoryJSON(codes, { limitPerItem: 1 });
+  const latestByItem = history.latestByItem || {};
+  const warnings = [];
+  (receiptLines || []).forEach(function(line) {
+    const itemCode = String(line.itemCode || '').trim().toUpperCase();
+    const latest = latestByItem[itemCode];
+    const currentRate = Number(line.rate || 0);
+    const previousRate = Number(latest && latest.rate || 0);
+    if (!latest || previousRate <= 0 || currentRate <= previousRate) return;
+    const increasePct = Number((((currentRate - previousRate) / previousRate) * 100).toFixed(2));
+    if (increasePct < GRN_RATE_WARN_PCT) return;
+    warnings.push({
+      itemCode: itemCode,
+      itemName: line.itemName || latest.itemName || '',
+      currentRate: currentRate,
+      previousRate: previousRate,
+      increasePct: increasePct,
+      lastReceiptDate: latest.receiptDate || '',
+      lastVendorName: latest.vendorName || '',
+      lastGrnNo: latest.grnNo || ''
+    });
+  });
+  const blocked = warnings.filter(function(row) {
+    return Number(row.increasePct || 0) >= GRN_RATE_BLOCK_PCT;
+  });
+  if (blocked.length && !String(reasonText || '').trim()) {
+    throw new Error('Rate increase reason required. ' + blocked.map(function(row) {
+      return row.itemCode + ' increased ' + row.increasePct + '% from ' + row.previousRate + ' to ' + row.currentRate;
+    }).join('; '));
+  }
+  return warnings;
+}
+
 function invPostPurchaseReceiptBulk(payload) {
   const header = payload || {};
   const lines = Array.isArray(header.lines) ? header.lines : [];
@@ -21287,6 +22600,13 @@ function invPostPurchaseReceiptBulk(payload) {
   if (missingPoLine) {
     throw new Error('PO line reference is required for every GRN line. Direct PR receipt is disabled.');
   }
+  const rateIncreaseReason = String(header.rateIncreaseReason || header.remarks || '').trim();
+  const rateWarnings = _invValidateGRNRateHistory_(receiptLines, rateIncreaseReason);
+  const rateWarningNote = rateWarnings.length
+    ? ('RateIncreaseReviewed: ' + rateWarnings.map(function(row) {
+        return row.itemCode + ' +' + row.increasePct + '% (' + row.previousRate + ' -> ' + row.currentRate + ')';
+      }).join('; ') + (rateIncreaseReason ? ' | Reason: ' + rateIncreaseReason : ''))
+    : '';
 
   const idempotencyKey = invBuildGRNIdempotencyKey_(header, receiptLines);
   const lock = LockService.getScriptLock();
@@ -21337,7 +22657,7 @@ function invPostPurchaseReceiptBulk(payload) {
         freightValue: Number(header.freightValue || 0),
         freightGstPct: Number(header.freightGstPct || 0),
         deliveryTerms: String(header.deliveryTerms || '').trim(),
-        remarks: String(header.remarks || '').trim(),
+        remarks: [String(header.remarks || '').trim(), rateWarningNote].filter(Boolean).join(' | '),
         allowOverReceipt: header.allowOverReceipt === true,
         overReceiptReason: String(header.overReceiptReason || '').trim(),
         allowCommercialOverride: header.allowCommercialOverride === true,
@@ -21378,7 +22698,8 @@ function invPostPurchaseReceiptBulk(payload) {
       duplicate: false,
       grnNo: grnNo,
       receiptNo: posted[0]?.receiptNo || '',
-      receipts: posted
+      receipts: posted,
+      rateWarnings: rateWarnings
     };
   } finally {
     lock.releaseLock();
@@ -21443,7 +22764,7 @@ function invSetPurchaseRequestLifecycle(prNo, action, reason) {
       remarks: nextRemarks
     });
     PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
-    return { ok: true, status: 'CANCELLED' };
+    return { ok: true, prNo: ctx.prNo, status: 'CANCELLED', remarks: nextRemarks };
   }
 
   if (target === 'SHORT_CLOSED') {
@@ -21454,7 +22775,7 @@ function invSetPurchaseRequestLifecycle(prNo, action, reason) {
       remarks: nextRemarks
     });
     PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
-    return { ok: true, status: 'SHORT_CLOSED' };
+    return { ok: true, prNo: ctx.prNo, status: 'SHORT_CLOSED', remarks: nextRemarks };
   }
 
   if (target === 'CLOSED') {
@@ -21469,7 +22790,7 @@ function invSetPurchaseRequestLifecycle(prNo, action, reason) {
       remarks: nextRemarks
     });
     PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
-    return { ok: true, status: 'CLOSED' };
+    return { ok: true, prNo: ctx.prNo, status: 'CLOSED', remarks: nextRemarks };
   }
 
   throw new Error('Unsupported lifecycle action');
@@ -24704,6 +26025,10 @@ function _billingRound2_(value) {
   return Number(_billingToNumber_(value).toFixed(2));
 }
 
+function _billingRound3_(value) {
+  return Number(_billingToNumber_(value).toFixed(3));
+}
+
 function _billingNormalizeMode_(mode) {
   const normalized = String(mode || 'DISPATCH').trim().toUpperCase();
   if (normalized === 'MANUAL') return 'MANUAL';
@@ -25092,7 +26417,7 @@ function _billingNormalizeManualLines_(rows) {
       division: String(src.division || '').trim(),
       unit: String(src.unit || 'Nos').trim() || 'Nos',
       qty: _billingRound2_(src.qty),
-      rate: _billingRound2_(src.rate),
+      rate: _billingRound3_(src.rate),
       gstPct: _billingRound2_(src.gstPct),
       remarks: String(src.remarks || '').trim()
     };
@@ -25109,7 +26434,7 @@ function _billingDeduplicateSelectedLines_(lines) {
     bySoLineId[key] = Object.assign({}, row, {
       soLineId: key,
       qty: _billingRound2_(row.qty),
-      rate: _billingRound2_(row.rate),
+      rate: _billingRound3_(row.rate),
       gstPct: _billingRound2_(row.gstPct)
     });
   });
@@ -25120,7 +26445,10 @@ function _billingGetSalesOrders_(clientCode, soNumber) {
   const filters = { status: 'neq.CANCELLED' };
   if (clientCode) filters.client_code = 'eq.' + clientCode;
   if (soNumber) filters.so_number = 'eq.' + soNumber;
-  return _salesOrderSelectBillingHeaders_(filters, 'so_date.desc,so_number.desc');
+  return _excludeManualBillingSalesOrdersByNumber_(
+    _salesOrderSelectBillingHeaders_(filters, 'so_date.desc,so_number.desc'),
+    'so_number'
+  );
 }
 
 function _billingGetDispatchRowsByLineIds_(lineIds) {
@@ -25579,7 +26907,7 @@ function _billingLoadSalesOrderLinesBySoIds_(soIds) {
 }
 
 function _billingBuildSoOptions_(salesOrders) {
-  return (salesOrders || []).map(function(row) {
+  return _excludeManualBillingSalesOrdersByNumber_(salesOrders || [], 'so_number').map(function(row) {
     return {
       soNumber: row.so_number,
       soDate: row.so_date || '',
@@ -25747,7 +27075,7 @@ function _billingEnrichFastDatasetRows_(rows) {
       productName: row.product_name || row.productName || '',
       category: row.category || '',
       unit: row.unit || 'Pcs',
-      rate: _billingRound2_(row.rate),
+      rate: _billingRound3_(row.rate),
       gstPct: _billingRound2_(row.gst_pct != null ? row.gst_pct : row.gstPct),
       hsn: hsn,
       orderQty: _billingRound2_(row.order_qty != null ? row.order_qty : row.orderQty),
@@ -25826,13 +27154,20 @@ function _billingTryDatasetV4_(params, includeRows) {
     const parties = Array.isArray(res.parties) ? res.parties : [];
     const selectedParties = clientRow ? _billingBuildAddressChoices_(clientRow, parties) : null;
     const rows = includeRows === true ? _billingEnrichFastDatasetRows_(res.rows || []) : [];
-    const soOptions = (Array.isArray(res.soOptions) ? res.soOptions : []).map(function(row) {
+    let soOptions = (Array.isArray(res.soOptions) ? res.soOptions : []).map(function(row) {
       return {
         soNumber: row.soNumber || row.so_number || '',
         soDate: row.soDate || row.so_date || '',
         poNumber: row.poNumber || row.po_number || ''
       };
-    }).filter(function(row) { return !!row.soNumber; });
+    }).filter(function(row) {
+      return !!row.soNumber && !_isManualBillingSalesOrderRow_(row, 'soNumber');
+    });
+    try {
+      soOptions = _billingBuildSoOptions_(_billingGetSalesOrders_(p.clientCode, p.soNumber));
+    } catch (optErr) {
+      console.warn('billing SO options fallback used from billing_job_dataset_v4 payload', optErr && optErr.message ? optErr.message : optErr);
+    }
     return {
       ok: true,
       fastPath: 'billing_job_dataset_v4',
@@ -26031,7 +27366,7 @@ function _billingBuildDatasetRows_(options) {
       productName: line.product_name || '',
       category: line.category || '',
       unit: line.unit || 'Pcs',
-      rate: _billingRound2_(line.rate),
+      rate: _billingRound3_(line.rate),
       gstPct: _billingRound2_(line.gst_pct),
       hsn: line.hsn_group || '',
       orderQty: orderQty,
@@ -26272,7 +27607,7 @@ function _billingReplaceInvoiceLines_(invoiceId, rows, optionalLineFields) {
           hsn: row.hsn || '',
           unit: row.unit || 'Nos',
           qty: _billingRound2_(row.qty),
-          rate: _billingRound2_(row.rate),
+          rate: _billingRound3_(row.rate),
           gst_pct: _billingRound2_(row.gst_pct),
           division: row.division || '',
           taxable_amount: _billingRound2_(row.taxable_amount),
@@ -26724,7 +28059,7 @@ function _billingManualSalesOrderLineRows_(manualLines, billToState) {
       category: 'MANUAL',
       qty: _billingRound2_(row.qty),
       unit: row.unit || 'Nos',
-      rate: _billingRound2_(row.rate),
+      rate: _billingRound3_(row.rate),
       disc_pct: 0,
       gst_pct: _billingRound2_(row.gstPct),
       amount: taxable,
@@ -26826,7 +28161,7 @@ function _billingCreateOrUpdateManualSalesOrder_(options) {
         division: row.division || '',
         unit: row.unit || 'Nos',
         qty: _billingRound2_(row.qty),
-        rate: _billingRound2_(row.rate),
+        rate: _billingRound3_(row.rate),
         gstPct: _billingRound2_(row.gst_pct),
         taxableAmount: _billingRound2_(row.amount),
         cgstAmt: _billingRound2_(row.cgst),
@@ -26861,7 +28196,7 @@ function _billingValidateCreatePayload_(payload, token, sessionUser) {
     return {
       soLineId: String(row.soLineId || '').trim(),
       qty: _billingRound2_(row.qty),
-      rate: _billingRound2_(row.rate),
+      rate: _billingRound3_(row.rate),
       gstPct: _billingRound2_(row.gstPct),
       sourceMode: _billingNormalizeMode_(row.sourceMode || mode)
     };
@@ -26961,7 +28296,7 @@ function _billingBuildDatasetRowMapForSelectedLines_(clientCode, headerMode, lin
       hsn: row.hsn || '',
       unit: row.unit || 'Nos',
       division: row.division || '',
-      rate: _billingRound2_(row.rate),
+      rate: _billingRound3_(row.rate),
       gstPct: _billingRound2_(row.gst_pct),
       dispatchedQty: _billingRound2_(row.dispatch_qty_snapshot),
       orderQty: _billingRound2_(row.ordered_qty_snapshot || row.qty),
@@ -26984,7 +28319,7 @@ function _billingInvoiceLineFallbackDatasetRow_(row) {
     hsn: row.hsn || '',
     unit: row.unit || 'Nos',
     division: row.division || '',
-    rate: _billingRound2_(row.rate),
+    rate: _billingRound3_(row.rate),
     gstPct: _billingRound2_(row.gst_pct),
     dispatchedQty: _billingRound2_(row.dispatch_qty_snapshot),
     orderQty: _billingRound2_(row.ordered_qty_snapshot || row.qty),
@@ -27053,7 +28388,7 @@ function createInvoice(payload, token) {
     return Object.assign({}, row, {
       sourceMode: entry.sourceMode,
       billingQty: _billingRound2_(entry.qty),
-      billingRate: _billingRound2_(entry.rate > 0 ? entry.rate : row.rate),
+      billingRate: _billingRound3_(entry.rate > 0 ? entry.rate : row.rate),
       billingGstPct: isChallan ? 0 : _billingRound2_(entry.gstPct != null ? entry.gstPct : row.gstPct)
     });
   });
@@ -27736,7 +29071,7 @@ function billingExportDocumentRegisterExcel(params, token) {
           _billingRound2_(line.dispatch_qty_snapshot || 0),
           _billingRound2_(line.billed_qty_snapshot || 0),
           _billingRound2_(line.qty || 0),
-          _billingRound2_(line.rate || 0),
+          _billingRound3_(line.rate || 0),
           _billingRound2_(line.gst_pct || 0),
           taxable,
           _billingRound2_(line.cgst_amt || 0),
@@ -27814,7 +29149,7 @@ function _billingDeleteSyntheticManualSalesOrders_(manualSoMap) {
 }
 
 function deleteInvoiceDraft(invoiceId, token) {
-  _requireModuleAccess_(token, 'BILLING', 'can_edit');
+  const user = _requireModuleAccess_(token, 'BILLING', 'can_edit');
   if (!invoiceId) throw new Error('InvoiceId required');
 
   const inv = (supabaseSelect('invoices', {
@@ -27829,7 +29164,25 @@ function deleteInvoiceDraft(invoiceId, token) {
     throw new Error('Posted invoice cannot be deleted.');
   }
 
+  const auditBefore = { invoice: inv, lines: lines };
   const manualSoMap = _billingCollectSyntheticManualSalesOrders_(lines);
+  _auditTryInsertEvent_({
+    entityType: 'INVOICE',
+    entityId: invoiceId,
+    entityKey: inv.invoice_no || invoiceId,
+    action: 'DELETE_DRAFT',
+    sourceModule: 'BILLING',
+    actor: user,
+    reason: 'Draft invoice deleted',
+    beforeJson: auditBefore,
+    afterJson: null,
+    metadata: {
+      invoiceNo: inv.invoice_no || '',
+      documentType: _billingInferDocumentType_(inv),
+      status: inv.status || '',
+      lineCount: lines.length
+    }
+  });
 
   try { supabaseDelete('invoice_audit_log', { invoice_id: 'eq.' + invoiceId }); } catch (err) {}
   supabaseDelete('invoice_lines', { invoice_id: 'eq.' + invoiceId });
@@ -27856,6 +29209,23 @@ function deletePostedInvoiceAdmin(invoiceId, token) {
     filters: { invoice_id: 'eq.' + invoiceId }
   }) || [];
   const manualSoMap = _billingCollectSyntheticManualSalesOrders_(lines);
+  _auditTryInsertEvent_({
+    entityType: 'INVOICE',
+    entityId: invoiceId,
+    entityKey: inv.invoice_no || invoiceId,
+    action: 'DELETE_POSTED',
+    sourceModule: 'BILLING',
+    actor: admin,
+    reason: 'Posted invoice deleted by admin',
+    beforeJson: { invoice: inv, lines: lines },
+    afterJson: null,
+    metadata: {
+      invoiceNo: inv.invoice_no || '',
+      documentType: _billingInferDocumentType_(inv),
+      status: inv.status || '',
+      lineCount: lines.length
+    }
+  });
 
   supabaseUpdate('invoices', { id: 'eq.' + invoiceId }, { status: 'CANCELLED' });
   try { supabaseDelete('invoice_audit_log', { invoice_id: 'eq.' + invoiceId }); } catch (err) {}
@@ -27884,10 +29254,12 @@ function reopenPostedInvoiceAdmin(invoiceId, token) {
     throw new Error('Only posted documents can be reopened for admin editing.');
   }
 
+  const auditBefore = _billingAuditInvoiceSnapshot_(invoiceId);
   _billingUpdateWithFallback_('invoices', { id: 'eq.' + invoiceId }, {
     status: 'DRAFT',
     posted_at: null
   }, ['posted_at']);
+  const auditAfter = _billingAuditInvoiceSnapshot_(invoiceId);
 
   try {
     supabaseInsert('invoice_audit_log', {
@@ -27897,6 +29269,21 @@ function reopenPostedInvoiceAdmin(invoiceId, token) {
       remarks: 'Posted document reopened as draft for admin correction.'
     });
   } catch (err) {}
+  _auditTryInsertEvent_({
+    entityType: 'INVOICE',
+    entityId: invoiceId,
+    entityKey: inv.invoice_no || invoiceId,
+    action: 'REOPEN_POSTED',
+    sourceModule: 'BILLING',
+    actor: admin,
+    reason: 'Posted document reopened as draft for admin correction.',
+    beforeJson: auditBefore,
+    afterJson: auditAfter,
+    metadata: {
+      invoiceNo: inv.invoice_no || '',
+      documentType: _billingInferDocumentType_(inv)
+    }
+  });
 
   return {
     ok: true,
@@ -27945,7 +29332,7 @@ function billingGetInvoiceEditor(invoiceId, token) {
       hsn: row.hsn || '',
       unit: row.unit || 'Nos',
       qty: qty,
-      rate: _billingRound2_(row.rate),
+      rate: _billingRound3_(row.rate),
       gstPct: _billingRound2_(row.gst_pct),
       sourceMode: sourceMode,
       orderQty: orderedQty > 0 ? orderedQty : qty,
@@ -27971,7 +29358,7 @@ function billingGetInvoiceEditor(invoiceId, token) {
       division: row.division || '',
       unit: row.unit || 'Nos',
       qty: _billingRound2_(row.qty),
-      rate: _billingRound2_(row.rate),
+      rate: _billingRound3_(row.rate),
       gstPct: _billingRound2_(row.gst_pct)
     };
   }).filter(function(row) {
@@ -28075,7 +29462,7 @@ function updateInvoiceDraft(invoiceId, payload, token) {
   normalized.lines.forEach(function(entry) {
     const row = rowMap[entry.soLineId];
     if (!row) throw new Error('Billing line not found or no longer available: ' + entry.soLineId);
-    const effectiveRate = _billingRound2_(entry.rate > 0 ? entry.rate : row.rate);
+    const effectiveRate = _billingRound3_(entry.rate > 0 ? entry.rate : row.rate);
     const effectiveGstPct = isChallan ? 0 : _billingRound2_(entry.gstPct != null ? entry.gstPct : row.gstPct);
     const taxable = _billingRound2_(entry.qty * effectiveRate);
     const tax = isChallan
@@ -28209,6 +29596,25 @@ function updateInvoiceDraft(invoiceId, payload, token) {
     'billed_qty_snapshot'
   ];
   _billingReplaceInvoiceLines_(invoiceId, lineInserts, optionalLineFields);
+  const auditAfter = _billingAuditInvoiceSnapshot_(invoiceId);
+  _auditTryInsertEvent_({
+    entityType: 'INVOICE',
+    entityId: invoiceId,
+    entityKey: inv.invoice_no || invoiceId,
+    action: 'UPDATE_DRAFT',
+    sourceModule: 'BILLING',
+    actor: user,
+    reason: 'Invoice draft updated',
+    beforeJson: existing,
+    afterJson: auditAfter,
+    metadata: {
+      invoiceNo: inv.invoice_no || '',
+      documentType: documentType,
+      mode: normalized.mode,
+      oldLineCount: (existing.lines || []).length,
+      newLineCount: lineInserts.length
+    }
+  });
 
   return {
     ok: true,
@@ -28221,6 +29627,8 @@ function updateInvoiceDraft(invoiceId, payload, token) {
 }
 
 function _billingUpdateManualInvoiceDraft_(invoiceId, inv, normalized, token) {
+  const auditBefore = _billingAuditInvoiceSnapshot_(invoiceId);
+  const auditActor = getSessionUser(token) || Session.getActiveUser?.().getEmail?.() || 'system';
   const documentType = normalized.documentType || _billingInferDocumentType_(inv);
   const isChallan = documentType === 'CHALLAN';
   const clientMap = normalized.clientCode ? _billingSelectClientsByCodes_([normalized.clientCode]) : {};
@@ -28365,6 +29773,25 @@ function _billingUpdateManualInvoiceDraft_(invoiceId, inv, normalized, token) {
     throw err;
   }
   _billingDeleteSyntheticManualSalesOrders_(previousManualSoMap);
+  const auditAfter = _billingAuditInvoiceSnapshot_(invoiceId);
+  _auditTryInsertEvent_({
+    entityType: 'INVOICE',
+    entityId: invoiceId,
+    entityKey: inv.invoice_no || invoiceId,
+    action: 'UPDATE_DRAFT',
+    sourceModule: 'BILLING',
+    actor: auditActor,
+    reason: 'Manual invoice draft updated',
+    beforeJson: auditBefore,
+    afterJson: auditAfter,
+    metadata: {
+      invoiceNo: inv.invoice_no || '',
+      documentType: documentType,
+      mode: 'MANUAL',
+      oldLineCount: (auditBefore.lines || []).length,
+      newLineCount: replacementLines.length
+    }
+  });
   return { ok:true, invoiceId: invoiceId, invoiceNo: inv.invoice_no || '', documentType: documentType, status:'DRAFT', printUrl:_billingBuildPrintUrl_(invoiceId, token, documentType) };
 }
 
@@ -28404,6 +29831,15 @@ function _invLoadInvoice_(invoiceId) {
   return { inv, lines };
 }
 
+function _billingAuditInvoiceSnapshot_(invoiceId) {
+  if (_auditEventsSuppressed_()) return _auditSnapshotError_('invoice:' + String(invoiceId || ''), 'audit_events unavailable');
+  try {
+    return _invLoadInvoice_(invoiceId);
+  } catch (err) {
+    return _auditSnapshotError_('invoice:' + String(invoiceId || ''), err);
+  }
+}
+
 function _billingTryPostInvoiceV4_(invoiceId, token, documentType) {
   try {
     const actor = String(Session.getActiveUser()?.getEmail?.() || 'system');
@@ -28428,10 +29864,11 @@ function _billingTryPostInvoiceV4_(invoiceId, token, documentType) {
 
 function postInvoice(invoiceId) {
   const token = arguments.length > 1 ? arguments[1] : '';
-  _requireModuleAccess_(token, 'BILLING', 'can_edit');
+  const user = _requireModuleAccess_(token, 'BILLING', 'can_edit');
   if (!invoiceId) throw new Error('InvoiceId required');
 
   const { inv, lines } = _invLoadInvoice_(invoiceId);
+  const auditBefore = { invoice: inv, lines: lines };
   const documentType = _billingInferDocumentType_(inv);
   const label = _billingDocumentLabel_(documentType);
   if (String(inv.status || '').toUpperCase() === 'POSTED') {
@@ -28445,6 +29882,23 @@ function postInvoice(invoiceId) {
   const postedV4 = _billingTryPostInvoiceV4_(invoiceId, token, documentType);
   if (postedV4) {
     postedV4.invoiceNo = postedV4.invoiceNo || inv.invoice_no || '';
+    _auditTryInsertEvent_({
+      entityType: 'INVOICE',
+      entityId: invoiceId,
+      entityKey: postedV4.invoiceNo || inv.invoice_no || invoiceId,
+      action: 'POST',
+      sourceModule: 'BILLING',
+      actor: user,
+      reason: 'Invoice posted',
+      beforeJson: auditBefore,
+      afterJson: _billingAuditInvoiceSnapshot_(invoiceId),
+      metadata: {
+        invoiceNo: postedV4.invoiceNo || inv.invoice_no || '',
+        documentType: postedV4.documentType || documentType,
+        lineCount: lines.length,
+        path: 'billing_post_invoice_v4'
+      }
+    });
     return postedV4;
   }
 
@@ -28489,6 +29943,26 @@ function postInvoice(invoiceId) {
       remarks: 'Posted after totals reconciliation | stored subtotal: ' + storedSubtotal + ' | stored tax: ' + storedTax + ' | stored grand: ' + storedGrand
     });
   } catch (err) {}
+  _auditTryInsertEvent_({
+    entityType: 'INVOICE',
+    entityId: invoiceId,
+    entityKey: inv.invoice_no || invoiceId,
+    action: 'POST',
+    sourceModule: 'BILLING',
+    actor: user,
+    reason: 'Invoice posted',
+    beforeJson: auditBefore,
+    afterJson: _billingAuditInvoiceSnapshot_(invoiceId),
+    metadata: {
+      invoiceNo: inv.invoice_no || '',
+      documentType: documentType,
+      lineCount: lines.length,
+      path: 'legacy_post',
+      recalculatedSubtotal: calcSubtotal,
+      recalculatedTax: calcTax,
+      recalculatedGrandTotal: grandTotal
+    }
+  });
 
   return {
     ok: true,
@@ -28554,7 +30028,7 @@ function billingGetInvoicePrintData(invoiceId, token) {
     const so = soMap[String(row.so_id)] || {};
     const dispatch = dispatchMap[String(row.so_line_id)] || {};
     const qty = _billingRound2_(row.qty);
-    const rate = _billingRound2_(row.rate);
+    const rate = _billingRound3_(row.rate);
     const taxable = _billingRound2_(row.line_amount || row.taxable_amount);
     const total = _billingRound2_(row.line_total);
     return {
@@ -29193,6 +30667,46 @@ function _prodMapStageRowsFastViewRows_(rows) {
   });
 }
 
+function _prodEnrichCorrugationFinalStageFlags_(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const woIds = [...new Set(list.filter(function(row) {
+    return _prodNormalizeCategoryGroup_(row.categoryGroup || '') === 'CORRUGATION';
+  }).map(function(row) {
+    return String(row.woId || '').trim();
+  }).filter(Boolean))];
+  if (!woIds.length) return list;
+
+  const routingRows = _selectInBatches_(
+    'work_order_routing',
+    'id,wo_id,sequence_no,process_name,department',
+    'wo_id',
+    woIds,
+    'sequence_no.asc'
+  ) || [];
+  const routingByWoId = {};
+  routingRows.forEach(function(row) {
+    const key = String(row.wo_id || '');
+    if (!routingByWoId[key]) routingByWoId[key] = [];
+    routingByWoId[key].push(row);
+  });
+  const finalRoutingByWoId = {};
+  Object.keys(routingByWoId).forEach(function(woId) {
+    const active = routingByWoId[woId].filter(function(row) {
+      return !_prodIsExcludedProcess_(row.process_name || row.department || '');
+    }).sort(function(a, b) {
+      return Number(a.sequence_no || 0) - Number(b.sequence_no || 0);
+    });
+    if (active.length) finalRoutingByWoId[woId] = String(active[active.length - 1].id || '');
+  });
+
+  return list.map(function(row) {
+    if (_prodNormalizeCategoryGroup_(row.categoryGroup || '') !== 'CORRUGATION') return row;
+    return Object.assign({}, row, {
+      isCorrugationFinalStage: String(row.routingId || '') === String(finalRoutingByWoId[String(row.woId || '')] || '')
+    });
+  });
+}
+
 function _prodIs2PlyMakingProcess_(row) {
   const name = String(row?.processName || row?.process_name || row?.processDisplayName || row?.department || '').trim().toUpperCase();
   return name.indexOf('2 PLY') !== -1 || name.indexOf('TWO PLY') !== -1 || name.indexOf('PLY MAKING') !== -1;
@@ -29707,12 +31221,12 @@ function _prodGetStageRowsFastResult_(params) {
     filters.wo_date = 'lte.' + dateTo;
   }
 
-  const rows = _prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(supabaseSelect('v_production_stage_rows_fast', {
+  const rows = _prodEnrichCorrugationFinalStageFlags_(_prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(supabaseSelect('v_production_stage_rows_fast', {
     select: 'row_key,row_kind,row_description,plan_unit,wo_id,wo_date,routing_id,wo_number,so_numbers,so_number_display,so_number,line_no,job_reference,job_ups,client_name,product_name,product_names,artwork_no,artwork_nos,process_name,process_display_name,department,planned_machine,sequence_no,expected_delivery,job_priority,department_category,planned_qty,produced_qty,balance_qty,status',
     filters: filters,
     order: 'wo_date.desc,wo_number.asc,sequence_no.asc,row_sort.asc,job_sort.asc',
     limit: 10000
-  }) || [])).filter(function(row) {
+  }) || []))).filter(function(row) {
     return !_prodIsExcludedProcess_(row.processName || row.department || '');
   });
 
@@ -29748,12 +31262,12 @@ function _prodGetStageRowsFastResult_(params) {
 }
 
 function _prodGetStageRowsForWoFast_(woId) {
-  return _prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(supabaseSelect('v_production_stage_rows_fast', {
+  return _prodEnrichCorrugationFinalStageFlags_(_prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(supabaseSelect('v_production_stage_rows_fast', {
     select: 'row_key,row_kind,row_description,plan_unit,wo_id,wo_date,routing_id,wo_number,so_numbers,so_number_display,so_number,line_no,job_reference,job_ups,client_name,product_name,product_names,artwork_no,artwork_nos,process_name,process_display_name,department,planned_machine,sequence_no,expected_delivery,job_priority,department_category,planned_qty,produced_qty,balance_qty,status',
     filters: { wo_id: 'eq.' + woId },
     order: 'sequence_no.asc,row_sort.asc,job_sort.asc',
     limit: 5000
-  }) || [])).filter(function(row) {
+  }) || []))).filter(function(row) {
     return !_prodIsExcludedProcess_(row.processName || row.department || '');
   });
 }
@@ -30539,6 +32053,16 @@ function _prodBuildCorr2PlyDetailInsert_(detail, productionEntryId, productionRo
   };
 }
 
+function _prodIsCorrugationFinalRouting_(routing, routingList, categoryGroup) {
+  if (_prodNormalizeCategoryGroup_(categoryGroup) !== 'CORRUGATION') return false;
+  const active = (Array.isArray(routingList) ? routingList : []).filter(function(row) {
+    return !_prodIsExcludedProcess_(row.process_name || row.department || '');
+  });
+  if (!active.length) return false;
+  const last = active[active.length - 1] || {};
+  return String(last.id || '') === String(routing && routing.id || '');
+}
+
 function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWoId, categoryByWoId) {
   const ids = Array.isArray(woIds) ? woIds.map(String) : [];
   if (!ids.length) return [];
@@ -30591,6 +32115,7 @@ function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWo
       const prev = idx > 0 ? routingList[idx - 1] : null;
       const routingKey = String(routing.id || '');
       const processName = String(routing.process_name || routing.department || '');
+      const isCorrugationFinalStage = _prodIsCorrugationFinalRouting_(routing, routingList, categoryByWoId[woId]);
       if (splitSeq && Number(routing.sequence_no || 0) > splitSeq && jobs.length) {
         jobs.forEach(function(job) {
           const jobKey = _prodRowJobKey_(job);
@@ -30634,7 +32159,8 @@ function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWo
             plannedQty: plannedQty,
             producedQty: producedQty,
             balanceQty: Math.max(plannedQty - producedQty, 0),
-            status: _prodStageStatusFromQty_(routing.status, plannedQty, producedQty)
+            status: _prodStageStatusFromQty_(routing.status, plannedQty, producedQty),
+            isCorrugationFinalStage: isCorrugationFinalStage
           });
         });
         return;
@@ -30675,7 +32201,8 @@ function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWo
         plannedQty: plannedQty,
         producedQty: producedQty,
         balanceQty: Math.max(plannedQty - producedQty, 0),
-        status: _prodStageStatusFromQty_(routing.status, plannedQty, producedQty)
+        status: _prodStageStatusFromQty_(routing.status, plannedQty, producedQty),
+        isCorrugationFinalStage: isCorrugationFinalStage
       });
     });
   });
@@ -30788,6 +32315,212 @@ function getProductionBoardByWO(woId, token, forceRefresh){
   return result;
 }
 
+function _prodCorrugationFgTableMissing_(err) {
+  const msg = String(err && err.message || '').toLowerCase();
+  return msg.indexOf('production_fg_completion_log') !== -1 &&
+    (msg.indexOf('does not exist') !== -1 || msg.indexOf('not found') !== -1);
+}
+
+function _prodRound3_(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? Number(n.toFixed(3)) : 0;
+}
+
+function _prodBuildCorrugationFgAllocations_(payload, jobs, goodQty, fgWeightKg) {
+  const qty = Math.max(Number(goodQty || 0), 0);
+  const weight = Math.max(Number(fgWeightKg || 0), 0);
+  if (!(qty > 0)) return [];
+
+  const soNumber = String(payload && payload.soNumber || '').trim();
+  const lineNo = String(payload && payload.lineNo || '').trim();
+  const allJobs = Array.isArray(jobs) ? jobs : [];
+  let selectedJobs = [];
+  if (soNumber && lineNo) {
+    selectedJobs = allJobs.filter(function(job) {
+      return String(job.so_number || '').trim() === soNumber &&
+        String(job.line_no || '').trim() === lineNo;
+    });
+    if (!selectedJobs.length) {
+      selectedJobs = [{ so_number: soNumber, line_no: lineNo, product_name: payload.productName || '', qty: qty }];
+    }
+  } else {
+    selectedJobs = allJobs.filter(function(job) {
+      return String(job.so_number || '').trim() && String(job.line_no || '').trim();
+    });
+  }
+  if (!selectedJobs.length) throw new Error('Corrugation FG posting needs sales-order line details on the work order.');
+
+  const positiveBase = selectedJobs.reduce(function(sum, job) {
+    return sum + Math.max(Number(job.qty || 0), 0);
+  }, 0);
+  const equalBase = selectedJobs.length;
+  let qtyPosted = 0;
+  let weightPosted = 0;
+  return selectedJobs.map(function(job, idx) {
+    const isLast = idx === selectedJobs.length - 1;
+    const share = positiveBase > 0
+      ? Math.max(Number(job.qty || 0), 0) / positiveBase
+      : 1 / equalBase;
+    const lineQty = isLast ? _prodRound3_(qty - qtyPosted) : _prodRound3_(qty * share);
+    const lineWeight = isLast ? _prodRound3_(weight - weightPosted) : _prodRound3_(weight * share);
+    qtyPosted = _prodRound3_(qtyPosted + lineQty);
+    weightPosted = _prodRound3_(weightPosted + lineWeight);
+    return {
+      soNumber: String(job.so_number || soNumber || '').trim(),
+      lineNo: String(job.line_no || lineNo || '').trim(),
+      productName: String(job.product_name || payload.productName || '').trim(),
+      qty: lineQty,
+      weightKg: lineWeight
+    };
+  }).filter(function(row) {
+    return row.soNumber && row.lineNo && Number(row.qty || 0) > 0;
+  });
+}
+
+function _prodGetSalesLineMapForFg_(allocations) {
+  const soNumbers = [...new Set((allocations || []).map(function(row) { return row.soNumber; }).filter(Boolean))];
+  if (!soNumbers.length) return {};
+  const soRows = _supabaseSelectByKeyInBatches_('sales_orders', 'id,so_number', 'so_number', soNumbers) || [];
+  const soIdByNumber = {};
+  soRows.forEach(function(row) {
+    if (row && row.id) soIdByNumber[String(row.so_number || '')] = row.id;
+  });
+  const soIds = [...new Set(Object.keys(soIdByNumber).map(function(key) { return soIdByNumber[key]; }).filter(Boolean))];
+  if (!soIds.length) return {};
+  let lineRows = [];
+  try {
+    lineRows = _supabaseSelectByKeyInBatches_(
+      'sales_order_lines',
+      'id,so_id,line_no,item_code,product_code,product_name,item_name,qty',
+      'so_id',
+      soIds
+    ) || [];
+  } catch (err) {
+    lineRows = _supabaseSelectByKeyInBatches_(
+      'sales_order_lines',
+      'id,so_id,line_no,product_name,qty',
+      'so_id',
+      soIds
+    ) || [];
+  }
+  const soNumberById = {};
+  Object.keys(soIdByNumber).forEach(function(soNumber) {
+    soNumberById[String(soIdByNumber[soNumber])] = soNumber;
+  });
+  const out = {};
+  lineRows.forEach(function(line) {
+    const key = String(soNumberById[String(line.so_id || '')] || '') + '||' + String(line.line_no || '').trim();
+    if (!key || key === '||') return;
+    out[key] = {
+      soId: line.so_id || '',
+      soLineId: line.id || '',
+      lineNo: line.line_no || '',
+      productCode: line.product_code || line.item_code || '',
+      productName: line.product_name || line.item_name || '',
+      orderQty: Number(line.qty || 0)
+    };
+  });
+  return out;
+}
+
+function _prodPostCorrugationFgCompletion_(payload, productionEntry, routing, routingList, jobs, createdBy) {
+  const category = _prodNormalizeCategoryGroup_((payload && payload.categoryGroup) || '');
+  if (!_prodIsCorrugationFinalRouting_(routing, routingList, category)) return;
+
+  const produced = Number(payload.producedQty || 0);
+  const rejected = Number(payload.rejectedQty || 0);
+  const goodQty = Math.max(produced - rejected, 0);
+  const fgWeightKg = Math.max(Number(payload.fgWeightKg || 0), 0);
+  if (!(goodQty > 0)) return;
+  if (!(fgWeightKg > 0)) throw new Error('Enter FG box weight in kg for final corrugation entry.');
+
+  const entryId = String(productionEntry && productionEntry.id || '').trim();
+  if (entryId) {
+    try {
+      const existingLog = supabaseSelect('production_fg_completion_log', {
+        select: 'id',
+        filters: { production_entry_id: 'eq.' + entryId },
+        limit: 1
+      }) || [];
+      if (existingLog[0] && existingLog[0].id) return;
+    } catch (err) {
+      if (_prodCorrugationFgTableMissing_(err)) {
+        throw new Error('Corrugation FG schema is not applied. Run supabase_corrugation_fg_completion.sql first.');
+      }
+      throw err;
+    }
+  }
+
+  const allocations = _prodBuildCorrugationFgAllocations_(payload || {}, jobs || [], goodQty, fgWeightKg);
+  const lineMap = _prodGetSalesLineMapForFg_(allocations);
+  const nowIso = new Date().toISOString();
+  const logRows = [];
+
+  allocations.forEach(function(allocation) {
+    const key = allocation.soNumber + '||' + allocation.lineNo;
+    const line = lineMap[key] || {};
+    if (!line.soLineId) throw new Error('Sales-order line not found for corrugation FG: ' + key);
+    const pack = _opsEnsurePackingRecord_({
+      soId: line.soId,
+      soLineId: line.soLineId,
+      soNumber: allocation.soNumber,
+      lineNo: allocation.lineNo,
+      productCode: line.productCode || '',
+      product: line.productName || allocation.productName || '',
+      orderQty: line.orderQty || 0,
+      producedQty: allocation.qty
+    });
+    const currentPackedQty = Number(pack.packed_qty || 0);
+    const currentPackedWeight = Number(pack.packed_weight_kg || 0);
+    const nextPackedQty = _prodRound3_(currentPackedQty + Number(allocation.qty || 0));
+    const nextPackedWeight = _prodRound3_(currentPackedWeight + Number(allocation.weightKg || 0));
+    supabaseUpsertMinimal('packing_records', [{
+      id: pack.id,
+      so_id: line.soId,
+      so_line_id: line.soLineId,
+      so_number: allocation.soNumber,
+      line_no: allocation.lineNo,
+      product_code: line.productCode || '',
+      product_name: line.productName || allocation.productName || '',
+      order_qty: Number(line.orderQty || 0),
+      produced_qty: Math.max(Number(pack.produced_qty || 0), nextPackedQty),
+      packed_qty: nextPackedQty,
+      packed_weight_kg: nextPackedWeight,
+      ready_to_dispatch: true,
+      packed_by: createdBy || '',
+      packed_at: nowIso
+    }], { onConflict: 'id' });
+    logRows.push({
+      production_entry_id: entryId || null,
+      pack_id: pack.id,
+      so_id: line.soId,
+      so_line_id: line.soLineId,
+      so_number: allocation.soNumber,
+      line_no: allocation.lineNo,
+      product_code: line.productCode || '',
+      product_name: line.productName || allocation.productName || '',
+      fg_qty: Number(allocation.qty || 0),
+      fg_weight_kg: Number(allocation.weightKg || 0),
+      source_routing_id: routing.id,
+      source_stage: routing.process_name || routing.department || '',
+      remarks: 'Auto FG from final corrugation production stage',
+      posted_at: nowIso,
+      posted_by: createdBy || ''
+    });
+  });
+
+  if (logRows.length) {
+    try {
+      supabaseBulkInsertMinimal('production_fg_completion_log', logRows);
+    } catch (err) {
+      if (_prodCorrugationFgTableMissing_(err)) {
+        throw new Error('Corrugation FG schema is not applied. Run supabase_corrugation_fg_completion.sql first.');
+      }
+      throw err;
+    }
+  }
+}
+
 
 /* ==============================
    4️⃣ BULK SAVE PRODUCTION ENTRIES
@@ -30876,6 +32609,7 @@ function saveProductionBulk(entries, token) {
   const createdBy = Session.getActiveUser()?.getEmail?.() || 'user';
   const inserts = [];
   const corr2PlyDetailRefs = [];
+  const corrugationFgRefs = [];
   const corr2PlyDetailTotals = entries.some(function(entry) {
     return !!(entry && entry.corrugation2PlyDetails && entry.corrugation2PlyDetails.group && entry.corrugation2PlyDetails.group.groupKey);
   }) ? _prodGetCorr2PlyDetailTotals_(routingIds) : {};
@@ -30942,6 +32676,14 @@ function saveProductionBulk(entries, token) {
       throw new Error('Reject exceeds produced');
 
     const goodQty = Math.max(produced - rejected, 0);
+    const isCorrugationFgCompletion = _prodIsCorrugationFinalRouting_(
+      routing,
+      routingByWoId[woKey] || [],
+      payload.categoryGroup || ''
+    );
+    if (isCorrugationFgCompletion && goodQty > 0 && !(Number(payload.fgWeightKg || 0) > 0)) {
+      throw new Error('Enter FG box weight in kg for final corrugation entry.');
+    }
     const entryTime = payload.endDate
       ? _prodKolkataLocalToIso_(payload.endDate)
       : (payload.entryDate
@@ -31006,12 +32748,31 @@ function saveProductionBulk(entries, token) {
         routing: routing
       });
     }
+    if (isCorrugationFgCompletion && goodQty > 0) {
+      corrugationFgRefs.push({
+        insertIndex: inserts.length,
+        payload: Object.assign({}, payload),
+        routing: routing,
+        routingList: (routingByWoId[woKey] || []).slice(),
+        jobs: (jobsByWoId[woKey] || []).slice()
+      });
+    }
     inserts.push(productionRow);
   });
 
   if (inserts.length) {
     try {
-      if (corr2PlyDetailRefs.length) {
+      if (corrugationFgRefs.length) {
+        try {
+          supabaseSelect('production_fg_completion_log', { select: 'id', limit: 1 });
+        } catch (err) {
+          if (_prodCorrugationFgTableMissing_(err)) {
+            throw new Error('Corrugation FG schema is not applied. Run supabase_corrugation_fg_completion.sql first.');
+          }
+          throw err;
+        }
+      }
+      if (corr2PlyDetailRefs.length || corrugationFgRefs.length) {
         const insertedRows = _supabaseBulkInsertInChunks_('production_entries', inserts, 30, 250000);
         const insertedIds = insertedRows.map(function(row) {
           return String(row && row.id || '').trim();
@@ -31041,6 +32802,16 @@ function saveProductionBulk(entries, token) {
           });
           throw detailErr;
         }
+        corrugationFgRefs.forEach(function(ref) {
+          _prodPostCorrugationFgCompletion_(
+            ref.payload,
+            insertedRows[ref.insertIndex] || {},
+            ref.routing,
+            ref.routingList,
+            ref.jobs,
+            createdBy
+          );
+        });
       } else {
         _supabaseBulkInsertMinimalInChunks_('production_entries', inserts, 40, 300000);
       }
@@ -31061,7 +32832,7 @@ function saveProductionBulk(entries, token) {
 
       // Keep production posting working on environments that have not applied the
       // optional job-split / actual-hours migrations yet.
-      if (corr2PlyDetailRefs.length) throw err;
+      if (corr2PlyDetailRefs.length || corrugationFgRefs.length) throw err;
       _supabaseBulkInsertMinimalInChunks_('production_entries', inserts.map(function(row) {
         return _prodStripOptionalEntryCols_(row);
       }), 40, 300000);
@@ -31710,6 +33481,7 @@ this.purchaseReceiveArtworkPOBulk = purchaseReceiveArtworkPOBulk;
 this.purchaseGetPOPrintData = purchaseGetPOPrintData;
 this.purchaseDashboardSummaryJSON = purchaseDashboardSummaryJSON;
 this.mastersGetBootstrap = mastersGetBootstrap;
+this.mastersGetClient = mastersGetClient;
 this.mastersSaveClient = mastersSaveClient;
 this.mastersToggleClientStatus = mastersToggleClientStatus;
 
@@ -31725,6 +33497,11 @@ this.bulkUpdateSalesOrderAdvancePaymentReceived = bulkUpdateSalesOrderAdvancePay
 this.invSaveItem = invSaveItem;
 this.invListItemsJSON = invListItemsJSON;
 this.invSearchItemsJSON = invSearchItemsJSON;
+this.materialIndentCreate = materialIndentCreate;
+this.materialIndentList = materialIndentList;
+this.materialIndentListOpenForPR = materialIndentListOpenForPR;
+this.materialIndentReviewStock = materialIndentReviewStock;
+this.materialIndentCreateLinkedPR = materialIndentCreateLinkedPR;
 this.invCreatePurchaseRequest = invCreatePurchaseRequest;
 this.invCreatePurchaseRequestsBulk = invCreatePurchaseRequestsBulk;
 this.invUpdatePurchaseRequest = invUpdatePurchaseRequest;
@@ -31732,6 +33509,7 @@ this.invListPurchaseReceiptsJSON = invListPurchaseReceiptsJSON;
 this.invReverseLedgerTransaction = invReverseLedgerTransaction;
 this.invGetReceiptPrintData = invGetReceiptPrintData;
 this.invGetGRNPrintData = invGetGRNPrintData;
+this.invGetItemPurchaseRateHistoryJSON = invGetItemPurchaseRateHistoryJSON;
 this.invRegularizePRReceiptToPO = invRegularizePRReceiptToPO;
 
 this.invGetStockSnapshotJSON = invGetStockSnapshotJSON;
@@ -32449,7 +34227,8 @@ function _reportsNormalizeFilters_(params) {
     toDate: String(p.toDate || '').trim(),
     pendingOnly: p.pendingOnly === true,
     q: String(p.q || '').trim().toLowerCase(),
-    status: String(p.status || '').trim().toLowerCase()
+    status: String(p.status || '').trim().toLowerCase(),
+    dateBasis: String(p.dateBasis || '').trim().toUpperCase()
   };
   if (!out.pendingOnly) {
     if (!out.fromDate && !out.toDate) {
@@ -33645,6 +35424,381 @@ function _reportsSectionJobProfitability_(token, params) {
   };
 }
 
+function _reportsOtifDateBasis_(filters) {
+  const value = String(filters && filters.dateBasis || '').trim().toUpperCase();
+  return ['SO_DATE', 'STAGE_TARGET', 'STAGE_ACTUAL', 'FINAL_TARGET', 'FINAL_BILLING'].indexOf(value) !== -1
+    ? value
+    : 'STAGE_TARGET';
+}
+
+function _reportsOtifOverlapFilters_(filters, firstColumn, lastColumn) {
+  const f = filters || {};
+  if (f.pendingOnly) return {};
+  if (f.fromDate && f.toDate) {
+    return { and: '(' + firstColumn + '.lte.' + f.toDate + ',' + lastColumn + '.gte.' + f.fromDate + ')' };
+  }
+  if (f.fromDate) {
+    const out = {};
+    out[lastColumn] = 'gte.' + f.fromDate;
+    return out;
+  }
+  if (f.toDate) {
+    const out = {};
+    out[firstColumn] = 'lte.' + f.toDate;
+    return out;
+  }
+  return {};
+}
+
+function _reportsOtifQueryFilters_(filters, dateBasis) {
+  if (dateBasis === 'SO_DATE') return _reportsApplyDateFilterToQuery_(filters, 'so_date');
+  if (dateBasis === 'FINAL_TARGET') return _reportsApplyDateFilterToQuery_(filters, 'final_otif_target_date');
+  if (dateBasis === 'FINAL_BILLING') return _reportsApplyDateFilterToQuery_(filters, 'final_billing_date');
+  if (dateBasis === 'STAGE_ACTUAL') return _reportsOtifOverlapFilters_(filters, 'otif_first_actual_date', 'otif_last_actual_date');
+  return _reportsOtifOverlapFilters_(filters, 'otif_first_target_date', 'otif_last_target_date');
+}
+
+function _reportsOtifDateInRange_(value, filters) {
+  if (!filters || filters.pendingOnly) return true;
+  if (!filters.fromDate && !filters.toDate) return true;
+  return _reportsDatePasses_(value, filters);
+}
+
+function _reportsOtifAnyDateInRange_(values, filters) {
+  if (!filters || filters.pendingOnly) return true;
+  if (!filters.fromDate && !filters.toDate) return true;
+  return (values || []).some(function(value) {
+    return _reportsDatePasses_(value, filters);
+  });
+}
+
+function _reportsOtifRowDatePasses_(row, filters, dateBasis) {
+  if (dateBasis === 'SO_DATE') return _reportsOtifDateInRange_(row.soDate, filters);
+  if (dateBasis === 'FINAL_TARGET') return _reportsOtifDateInRange_(row.finalOtifTargetDate, filters);
+  if (dateBasis === 'FINAL_BILLING') return _reportsOtifDateInRange_(row.finalOtifActualDate, filters);
+  if (dateBasis === 'STAGE_ACTUAL') {
+    return _reportsOtifAnyDateInRange_([
+      row.soApprovalActualDate,
+      row.artworkApprovalActualDate,
+      row.productionCompletedDate,
+      row.dispatchBillingActualDate,
+      row.finalOtifActualDate
+    ], filters);
+  }
+  return _reportsOtifAnyDateInRange_([
+    row.soApprovalTargetDate,
+    row.artworkApprovalTargetDate,
+    row.productionTargetDate,
+    row.dispatchBillingTargetDate,
+    row.finalOtifTargetDate
+  ], filters);
+}
+
+function _reportsOtifStageIncluded_(row, stage, filters, dateBasis) {
+  if (dateBasis === 'SO_DATE') return _reportsOtifDateInRange_(row.soDate, filters);
+  if (dateBasis === 'FINAL_TARGET') return _reportsOtifDateInRange_(row.finalOtifTargetDate, filters);
+  if (dateBasis === 'FINAL_BILLING') return _reportsOtifDateInRange_(row.finalOtifActualDate, filters);
+  if (dateBasis === 'STAGE_ACTUAL') return _reportsOtifDateInRange_(row[stage.actualField], filters);
+  return _reportsOtifDateInRange_(row[stage.targetField], filters);
+}
+
+function _reportsOtifStageRows_(rows, filters, dateBasis) {
+  const stages = [
+    { key: 'soApproval', label: 'SO to SO Approval', status: 'soApprovalStatus', targetField: 'soApprovalTargetDate', actualField: 'soApprovalActualDate', order: 1 },
+    { key: 'artworkApproval', label: 'SO to Artwork Approval', status: 'artworkApprovalStatus', targetField: 'artworkApprovalTargetDate', actualField: 'artworkApprovalActualDate', order: 2 },
+    { key: 'production', label: 'Artwork Approval to Production', status: 'productionStatus', targetField: 'productionTargetDate', actualField: 'productionCompletedDate', order: 3 },
+    { key: 'dispatchBilling', label: 'Production to Billing', status: 'dispatchBillingStatus', targetField: 'dispatchBillingTargetDate', actualField: 'dispatchBillingActualDate', order: 4 },
+    { key: 'finalOtif', label: 'SO to Final Billing', status: 'finalOtifStatus', targetField: 'finalOtifTargetDate', actualField: 'finalOtifActualDate', order: 5 }
+  ];
+  const summary = {};
+
+  function ensure(department, stage) {
+    const key = department + '||' + stage.key;
+    if (!summary[key]) {
+      summary[key] = {
+        department: department,
+        stage: stage.label,
+        stageOrder: stage.order,
+        totalJobs: 0,
+        onTimeJobs: 0,
+        delayedJobs: 0,
+        pendingInTatJobs: 0,
+        pendingDelayedJobs: 0,
+        waitingJobs: 0,
+        notApplicableJobs: 0,
+        otifPct: 0
+      };
+    }
+    return summary[key];
+  }
+
+  (rows || []).forEach(function(row) {
+    const department = row.department || 'Unassigned';
+    stages.forEach(function(stage) {
+      if (!_reportsOtifStageIncluded_(row, stage, filters, dateBasis)) return;
+      const rawStatus = String(row[stage.status] || 'NOT_APPLICABLE').toUpperCase();
+      const deptBucket = ensure(department, stage);
+      const totalBucket = ensure('Grand Total', stage);
+      [deptBucket, totalBucket].forEach(function(bucket) {
+        if (rawStatus === 'NOT_APPLICABLE') {
+          bucket.notApplicableJobs += 1;
+          return;
+        }
+        if (rawStatus === 'WAITING_PREVIOUS_STAGE') {
+          bucket.waitingJobs += 1;
+          return;
+        }
+        bucket.totalJobs += 1;
+        if (rawStatus === 'ON_TIME') bucket.onTimeJobs += 1;
+        else if (rawStatus === 'DELAYED') bucket.delayedJobs += 1;
+        else if (rawStatus === 'PENDING_IN_TAT') bucket.pendingInTatJobs += 1;
+        else if (rawStatus === 'PENDING_DELAYED') bucket.pendingDelayedJobs += 1;
+      });
+    });
+  });
+
+  return Object.keys(summary).map(function(key) {
+    const row = summary[key];
+    row.otifPct = row.totalJobs > 0 ? _reportsRoundNumber_((row.onTimeJobs / row.totalJobs) * 100, 2) : 0;
+    return row;
+  }).sort(function(a, b) {
+    if (a.department === 'Grand Total' && b.department !== 'Grand Total') return 1;
+    if (a.department !== 'Grand Total' && b.department === 'Grand Total') return -1;
+    const deptCompare = String(a.department || '').localeCompare(String(b.department || ''));
+    if (deptCompare !== 0) return deptCompare;
+    return _reportsSafeNumber_(a.stageOrder) - _reportsSafeNumber_(b.stageOrder);
+  });
+}
+
+function _reportsSectionOTIF_(token, params) {
+  _reportsRequireSession_(token);
+  const filters = _reportsNormalizeFilters_(params);
+  const dateBasis = _reportsOtifDateBasis_(filters);
+  const rows = _reportsSelectAllRequired_('v_report_otif_job_detail', {
+    filters: _reportsOtifQueryFilters_(filters, dateBasis),
+    order: 'so_date.desc,so_number.desc,line_no.asc'
+  }).map(function(row) {
+    return {
+      soLineId: row.so_line_id || '',
+      soNumber: row.so_number || '',
+      soDate: row.so_date || '',
+      soCreatedAt: row.so_created_at || '',
+      clientName: row.client_name || row.client_code || '',
+      salesRep: row.sales_rep || '',
+      lineNo: row.line_no == null ? '' : String(row.line_no),
+      productCode: row.product_code || '',
+      productName: row.product_name || '',
+      category: row.category || '',
+      division: row.division || '',
+      department: row.department || 'Unassigned',
+      orderQty: _reportsSafeNumber_(row.order_qty),
+      unit: row.unit || '',
+      orderValue: _reportsSafeNumber_(row.order_value),
+      jobType: row.job_type || '',
+      jobTypeBucket: row.job_type_bucket || '',
+      jobReference: row.job_reference || '',
+      soLineStatus: row.so_line_status || 'OPEN',
+      accountsStatus: row.accounts_status || 'PENDING',
+      accountsAt: row.accounts_at || '',
+      businessStatus: row.business_status || 'PENDING',
+      businessAt: row.business_at || '',
+      salesApprovalStatus: row.sales_approval_status || 'PENDING',
+      salesApprovalAt: row.sales_approval_at || '',
+      artworkNo: row.artwork_no || '',
+      productType: row.product_type || '',
+      artworkStatus: row.artwork_status || 'NO_ART',
+      artworkAt: row.artwork_at || '',
+      artworkApprovedAt: row.artwork_approved_at || '',
+      woCount: _reportsSafeNumber_(row.wo_count),
+      woNumbers: row.wo_numbers || '',
+      firstWoDate: row.first_wo_date || '',
+      latestWoDate: row.latest_wo_date || '',
+      requiredStageCount: _reportsSafeNumber_(row.required_stage_count),
+      completedStageCount: _reportsSafeNumber_(row.completed_stage_count),
+      requiredStages: row.required_stages || '',
+      productionOkQty: _reportsSafeNumber_(row.production_ok_qty),
+      productionCompletedAt: row.production_completed_at || '',
+      productionCompletedDate: row.production_completed_date || '',
+      invoiceCount: _reportsSafeNumber_(row.invoice_count),
+      invoiceNos: row.invoice_nos || '',
+      billedQty: _reportsSafeNumber_(row.billed_qty),
+      firstInvoiceDate: row.first_invoice_date || '',
+      lastInvoiceDate: row.last_invoice_date || '',
+      finalBillingDate: row.final_billing_date || '',
+      productionTatDays: _reportsSafeNumber_(row.production_tat_days),
+      finalTatDays: _reportsSafeNumber_(row.final_tat_days),
+      soApprovalTargetDate: row.so_approval_target_date || '',
+      soApprovalActualDate: row.so_approval_actual_date || '',
+      soApprovalStatus: row.so_approval_otif_status || 'NOT_APPLICABLE',
+      artworkApprovalTargetDate: row.artwork_approval_target_date || '',
+      artworkApprovalActualDate: row.artwork_approval_actual_date || '',
+      artworkApprovalStatus: row.artwork_approval_otif_status || 'NOT_APPLICABLE',
+      productionTargetDate: row.production_target_date || '',
+      productionStatus: row.production_otif_status || 'NOT_APPLICABLE',
+      dispatchBillingTargetDate: row.dispatch_billing_target_date || '',
+      dispatchBillingActualDate: row.dispatch_billing_actual_date || '',
+      dispatchBillingStatus: row.dispatch_billing_otif_status || 'NOT_APPLICABLE',
+      finalOtifTargetDate: row.final_otif_target_date || '',
+      finalOtifActualDate: row.final_otif_actual_date || '',
+      finalOtifStatus: row.final_otif_status || 'NOT_APPLICABLE',
+      isFinalOtifOnTime: row.is_final_otif_on_time === true ? 'YES' : 'NO'
+    };
+  }).filter(function(row) {
+    const pendingPass = filters.pendingOnly
+      ? ['ON_TIME', 'NOT_APPLICABLE'].indexOf(String(row.finalOtifStatus || '').toUpperCase()) === -1
+      : true;
+    return pendingPass &&
+      _reportsOtifRowDatePasses_(row, filters, dateBasis) &&
+      _reportsTextPasses_(row, filters, [
+        'soNumber',
+        'lineNo',
+        'clientName',
+        'salesRep',
+        'productCode',
+        'productName',
+        'category',
+        'division',
+        'department',
+        'jobType',
+        'jobTypeBucket',
+        'jobReference',
+        'soLineStatus',
+        'accountsStatus',
+        'businessStatus',
+        'salesApprovalStatus',
+        'artworkNo',
+        'productType',
+        'artworkStatus',
+        'woNumbers',
+        'requiredStages',
+        'invoiceNos',
+        'soApprovalStatus',
+        'artworkApprovalStatus',
+        'productionStatus',
+        'dispatchBillingStatus',
+        'finalOtifStatus'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'department',
+        'division',
+        'jobTypeBucket',
+        'soLineStatus',
+        'salesApprovalStatus',
+        'artworkStatus',
+        'soApprovalStatus',
+        'artworkApprovalStatus',
+        'productionStatus',
+        'dispatchBillingStatus',
+        'finalOtifStatus'
+      ]);
+  });
+  const summaryRows = _reportsOtifStageRows_(rows, filters, dateBasis);
+  const finalSummary = summaryRows.filter(function(row) {
+    return row.department === 'Grand Total' && row.stage === 'SO to Final Billing';
+  })[0] || {};
+
+  return {
+    ok: true,
+    title: 'OTIF',
+    metrics: {
+      detailRows: rows.length,
+      finalEligibleJobs: _reportsSafeNumber_(finalSummary.totalJobs),
+      finalOnTimeJobs: _reportsSafeNumber_(finalSummary.onTimeJobs),
+      finalDelayedJobs: _reportsSafeNumber_(finalSummary.delayedJobs),
+      finalPendingJobs: _reportsSafeNumber_(finalSummary.pendingInTatJobs) + _reportsSafeNumber_(finalSummary.pendingDelayedJobs),
+      finalOtifPct: _reportsSafeNumber_(finalSummary.otifPct)
+    },
+    tables: [{
+      key: 'otifSummary',
+      title: 'Department-wise Stage OTIF',
+      subtitle: 'OTIF percentage is On Time / Total eligible jobs. Waiting previous stage and not applicable rows are shown separately.',
+      minWidth: 1180,
+      columns: [
+        { key:'department', label:'Department' },
+        { key:'stage', label:'Stage' },
+        { key:'totalJobs', label:'Total Eligible Jobs', type:'number' },
+        { key:'onTimeJobs', label:'On Time', type:'number' },
+        { key:'delayedJobs', label:'Delayed', type:'number' },
+        { key:'pendingInTatJobs', label:'Pending In TAT', type:'number' },
+        { key:'pendingDelayedJobs', label:'Pending Delayed', type:'number' },
+        { key:'waitingJobs', label:'Waiting Previous Stage', type:'number' },
+        { key:'notApplicableJobs', label:'Not Applicable', type:'number' },
+        { key:'otifPct', label:'OTIF %', type:'number' }
+      ],
+      rows: summaryRows
+    }, {
+      key: 'otifJobDetail',
+      title: 'Job-wise OTIF Detail',
+      subtitle: 'Line-wise OTIF with target date, actual date, and status for each stage. Time-of-day cutoff is not applied in this phase.',
+      minWidth: 5200,
+      columns: [
+        { key:'soNumber', label:'SO No' },
+        { key:'lineNo', label:'Line' },
+        { key:'soDate', label:'SO Date', type:'date' },
+        { key:'clientName', label:'Client' },
+        { key:'salesRep', label:'Sales Rep' },
+        { key:'department', label:'Department' },
+        { key:'division', label:'Division' },
+        { key:'productCode', label:'Product Code' },
+        { key:'productName', label:'Product' },
+        { key:'category', label:'Category' },
+        { key:'orderQty', label:'Order Qty', type:'number' },
+        { key:'unit', label:'Unit' },
+        { key:'orderValue', label:'SO Value', type:'money' },
+        { key:'jobType', label:'Job Type' },
+        { key:'jobTypeBucket', label:'Job Bucket', type:'status' },
+        { key:'jobReference', label:'Job Ref' },
+        { key:'soLineStatus', label:'SO Line Status', type:'status' },
+        { key:'accountsStatus', label:'Accounts Status', type:'status' },
+        { key:'accountsAt', label:'Accounts At', type:'datetime' },
+        { key:'businessStatus', label:'Business Status', type:'status' },
+        { key:'businessAt', label:'Business At', type:'datetime' },
+        { key:'salesApprovalStatus', label:'SO Approval Status', type:'status' },
+        { key:'salesApprovalAt', label:'SO Approval At', type:'datetime' },
+        { key:'soApprovalTargetDate', label:'SO Approval Target', type:'date' },
+        { key:'soApprovalActualDate', label:'SO Approval Actual', type:'date' },
+        { key:'soApprovalStatus', label:'SO Approval OTIF', type:'status' },
+        { key:'artworkNo', label:'Artwork No' },
+        { key:'productType', label:'Product Type' },
+        { key:'artworkStatus', label:'Artwork Status', type:'status' },
+        { key:'artworkAt', label:'Artwork Created', type:'datetime' },
+        { key:'artworkApprovedAt', label:'Artwork Approved At', type:'datetime' },
+        { key:'artworkApprovalTargetDate', label:'Artwork Target', type:'date' },
+        { key:'artworkApprovalActualDate', label:'Artwork Actual', type:'date' },
+        { key:'artworkApprovalStatus', label:'Artwork OTIF', type:'status' },
+        { key:'woCount', label:'WO Count', type:'number' },
+        { key:'woNumbers', label:'WO Nos' },
+        { key:'firstWoDate', label:'First WO Date', type:'date' },
+        { key:'latestWoDate', label:'Latest WO Date', type:'date' },
+        { key:'requiredStageCount', label:'Required Stages', type:'number' },
+        { key:'completedStageCount', label:'Completed Stages', type:'number' },
+        { key:'requiredStages', label:'Routing Stages' },
+        { key:'productionTatDays', label:'Production TAT Days', type:'number' },
+        { key:'productionTargetDate', label:'Production Target', type:'date' },
+        { key:'productionCompletedDate', label:'Production Actual', type:'date' },
+        { key:'productionCompletedAt', label:'Production Completed At', type:'datetime' },
+        { key:'productionStatus', label:'Production OTIF', type:'status' },
+        { key:'productionOkQty', label:'Production OK Qty', type:'number' },
+        { key:'dispatchBillingTargetDate', label:'Billing Target', type:'date' },
+        { key:'dispatchBillingActualDate', label:'Billing Actual', type:'date' },
+        { key:'dispatchBillingStatus', label:'Dispatch/Billing OTIF', type:'status' },
+        { key:'invoiceCount', label:'Invoice Count', type:'number' },
+        { key:'invoiceNos', label:'Invoice Nos' },
+        { key:'billedQty', label:'Billed Qty', type:'number' },
+        { key:'firstInvoiceDate', label:'First Invoice Date', type:'date' },
+        { key:'lastInvoiceDate', label:'Last Invoice Date', type:'date' },
+        { key:'finalTatDays', label:'Final TAT Days', type:'number' },
+        { key:'finalOtifTargetDate', label:'Final OTIF Target', type:'date' },
+        { key:'finalOtifActualDate', label:'Final OTIF Actual', type:'date' },
+        { key:'finalOtifStatus', label:'Final OTIF', type:'status' },
+        { key:'isFinalOtifOnTime', label:'Final On Time', type:'status' },
+        { key:'soLineId', label:'SO Line ID' }
+      ],
+      rows: rows
+    }]
+  };
+}
+
 function _reportsSalesOrderRows_(filters) {
   return _reportsSelectAll_('v_report_planning_lines', {
     filters: _reportsApplyDateFilterToQuery_(filters, 'so_date'),
@@ -34241,8 +36395,16 @@ function _reportsPRLifecycleStatus_(row) {
   const orderedQty = _reportsSafeNumber_(row.orderedQty);
   const availableToOrderQty = _reportsSafeNumber_(row.availableToOrderQty);
   const receivedQty = _reportsSafeNumber_(row.receivedQty);
+  const openPOQty = _reportsSafeNumber_(row.openPOQty);
+  const shortClosedQty = _reportsSafeNumber_(row.shortClosedQty);
+  const prStatus = String(row.prStatus || row.status || '').trim().toUpperCase();
 
+  if (prStatus === 'CANCELLED') return 'PR_CANCELLED';
+  if (prStatus === 'SHORT_CLOSED') return 'PR_SHORT_CLOSED';
+  if (prStatus === 'CLOSED') return 'PR_CLOSED';
   if (pendingReceiptQty <= 0) return 'MATERIAL_RECEIVED';
+  if (shortClosedQty > 0 && openPOQty <= 0.0001) return 'PO_SHORT_CLOSED';
+  if (shortClosedQty > 0) return 'PO_PARTIAL_SHORT_CLOSED';
   if (orderedQty <= 0) return 'PO_PENDING';
   if (availableToOrderQty > 0) return 'PO_PARTIAL';
   if (receivedQty > 0) return 'GRN_PARTIAL';
@@ -34276,6 +36438,7 @@ function _reportsSectionPRLifecycle_(token, params) {
       requestedQty: _reportsSafeNumber_(row.requestedQty),
       orderedQty: _reportsSafeNumber_(row.orderedQty),
       openPOQty: _reportsSafeNumber_(row.openPOQty),
+      shortClosedQty: _reportsSafeNumber_(row.shortClosedQty),
       availableToOrderQty: _reportsSafeNumber_(row.availableToOrderQty),
       receivedQty: _reportsSafeNumber_(row.receivedQty),
       pendingReceiptQty: _reportsSafeNumber_(row.pendingReceiptQty),
@@ -34336,7 +36499,7 @@ function _reportsSectionPRLifecycle_(token, params) {
     metrics: {
       totalRows: rows.length,
       poPendingRows: rows.filter(function(r){
-        return ['PO_PENDING','PO_PARTIAL'].indexOf(String(r.lifecycleStatus || '').toUpperCase()) !== -1;
+        return ['PO_PENDING','PO_PARTIAL','PO_SHORT_CLOSED','PO_PARTIAL_SHORT_CLOSED'].indexOf(String(r.lifecycleStatus || '').toUpperCase()) !== -1;
       }).length,
       grnPendingRows: rows.filter(function(r){
         return ['GRN_PENDING','GRN_PARTIAL'].indexOf(String(r.lifecycleStatus || '').toUpperCase()) !== -1;
@@ -34361,6 +36524,7 @@ function _reportsSectionPRLifecycle_(token, params) {
         { key:'requestedQty', label:'Requested Qty', type:'number' },
         { key:'orderedQty', label:'PO Qty', type:'number' },
         { key:'openPOQty', label:'Open PO Qty', type:'number' },
+        { key:'shortClosedQty', label:'PO Short Closed Qty', type:'number' },
         { key:'availableToOrderQty', label:'Yet To PO', type:'number' },
         { key:'receivedQty', label:'GRN Qty', type:'number' },
         { key:'pendingReceiptQty', label:'Pending GRN Qty', type:'number' },
@@ -36906,6 +39070,7 @@ function reportsGetSectionData(section, params, token) {
   if (key === 'planning') result = _reportsSectionPlanning_(token, params);
   else if (key === 'wipageing') result = _reportsSectionWipAgeing_(token, params);
   else if (key === 'jobprofitability') result = _reportsSectionJobProfitability_(token, params);
+  else if (key === 'otif') result = _reportsSectionOTIF_(token, params);
   else if (key === 'salesorders') result = _reportsSectionSalesOrders_(token, params);
   else if (key === 'sheetutilization') result = _reportsSectionSheetUtilization_(token, params);
   else if (key === 'dispatchdiscrepancy') result = _reportsSectionDispatchDiscrepancy_(token, params);
@@ -37236,9 +39401,115 @@ function _salesCommandEmptyDivision_(name) {
     billedLinesToday: 0,
     billedLinesWtd: 0,
     billedLinesMtd: 0,
+    purchaseValueToday: 0,
+    purchaseValueWtd: 0,
+    purchaseValueMtd: 0,
+    purchaseLinesToday: 0,
+    purchaseLinesWtd: 0,
+    purchaseLinesMtd: 0,
     backlogValue: 0,
     openQty: 0,
     openLines: 0
+  };
+}
+
+function _salesCommandIsCommonPurchaseBucket_(value) {
+  const text = String(value || '').trim().toUpperCase();
+  if (!text) return true;
+  return text === 'UNASSIGNED' ||
+    text === 'GENERAL' ||
+    text === 'COMMON' ||
+    text === 'ADMIN' ||
+    text === 'OFFICE' ||
+    text === 'STORE' ||
+    text === 'STORES' ||
+    text.indexOf('GENERAL') !== -1 ||
+    text.indexOf('COMMON') !== -1 ||
+    text.indexOf('ADMIN') !== -1 ||
+    text.indexOf('OFFICE') !== -1;
+}
+
+function _salesCommandPurchaseRatioPct_(purchaseValue, salesValue) {
+  const sales = _salesCommandNumber_(salesValue);
+  if (sales <= 0) return null;
+  return Math.round(_salesCommandNumber_(purchaseValue) / sales * 1000) / 10;
+}
+
+function _salesCommandBuildPurchaseRatio_(divisions, purchaseRows, bounds) {
+  const map = {};
+  (divisions || []).forEach(function(row) {
+    const key = _salesCommandDivisionLabel_(row.division);
+    map[key] = Object.assign({}, row);
+  });
+  const common = _salesCommandEmptyDivision_('General / Common');
+  (purchaseRows || []).forEach(function(row) {
+    const rawDepartment = row.department || row.division || '';
+    const isCommon = _salesCommandIsCommonPurchaseBucket_(rawDepartment);
+    const key = isCommon ? common.division : _salesCommandDivisionLabel_(rawDepartment);
+    if (!isCommon && !map[key]) map[key] = _salesCommandEmptyDivision_(key);
+    const bucket = isCommon ? common : map[key];
+    const dateText = String(row.grn_date || row.receipt_date || '').slice(0, 10);
+    const value = _salesCommandNumber_(row.total_value || row.totalValue || row.basic_value);
+    if (_salesCommandDateInRange_(dateText, bounds.today, bounds.today)) {
+      bucket.purchaseValueToday += value;
+      bucket.purchaseLinesToday += 1;
+    }
+    if (_salesCommandDateInRange_(dateText, bounds.weekStart, bounds.today)) {
+      bucket.purchaseValueWtd += value;
+      bucket.purchaseLinesWtd += 1;
+    }
+    if (_salesCommandDateInRange_(dateText, bounds.monthStart, bounds.today)) {
+      bucket.purchaseValueMtd += value;
+      bucket.purchaseLinesMtd += 1;
+    }
+  });
+  const rows = Object.keys(map).map(function(key) {
+    const row = map[key];
+    row.purchaseToSalesTodayPct = _salesCommandPurchaseRatioPct_(row.purchaseValueToday, row.billingValueToday);
+    row.purchaseToSalesWtdPct = _salesCommandPurchaseRatioPct_(row.purchaseValueWtd, row.billingValueWtd);
+    row.purchaseToSalesMtdPct = _salesCommandPurchaseRatioPct_(row.purchaseValueMtd, row.billingValueMtd);
+    return row;
+  }).filter(function(row) {
+    return row.billingValueMtd || row.purchaseValueMtd || row.billingValueWtd || row.purchaseValueWtd;
+  }).sort(function(a, b) {
+    return _salesCommandNumber_(b.purchaseValueMtd) - _salesCommandNumber_(a.purchaseValueMtd) ||
+      _salesCommandNumber_(b.billingValueMtd) - _salesCommandNumber_(a.billingValueMtd) ||
+      a.division.localeCompare(b.division);
+  });
+  const totals = rows.reduce(function(out, row) {
+    out.purchaseValueToday += row.purchaseValueToday;
+    out.purchaseValueWtd += row.purchaseValueWtd;
+    out.purchaseValueMtd += row.purchaseValueMtd;
+    out.salesValueToday += row.billingValueToday;
+    out.salesValueWtd += row.billingValueWtd;
+    out.salesValueMtd += row.billingValueMtd;
+    out.purchaseLinesMtd += row.purchaseLinesMtd;
+    return out;
+  }, {
+    purchaseValueToday: 0,
+    purchaseValueWtd: 0,
+    purchaseValueMtd: 0,
+    salesValueToday: 0,
+    salesValueWtd: 0,
+    salesValueMtd: 0,
+    purchaseLinesMtd: 0
+  });
+  ['Today', 'Wtd', 'Mtd'].forEach(function(period) {
+    totals['commonPurchaseValue' + period] = common['purchaseValue' + period];
+    totals['totalPurchaseValue' + period] = totals['purchaseValue' + period] + common['purchaseValue' + period];
+    totals['ratio' + period + 'Pct'] = _salesCommandPurchaseRatioPct_(
+      totals['totalPurchaseValue' + period],
+      totals['salesValue' + period]
+    );
+  });
+  common.purchaseToSalesTodayPct = _salesCommandPurchaseRatioPct_(common.purchaseValueToday, totals.salesValueToday);
+  common.purchaseToSalesWtdPct = _salesCommandPurchaseRatioPct_(common.purchaseValueWtd, totals.salesValueWtd);
+  common.purchaseToSalesMtdPct = _salesCommandPurchaseRatioPct_(common.purchaseValueMtd, totals.salesValueMtd);
+  return {
+    rows: rows,
+    common: common,
+    totals: totals,
+    note: 'Purchase is based on posted GRN/MRN total value; reversed inventory receipts are excluded by v_report_department_purchase_grn. General/common purchases are excluded from division rows but included in total purchase-to-sales ratio.'
   };
 }
 
@@ -37493,7 +39764,7 @@ function _salesCommandCelebrations_(reps, clients) {
 
 function salesCommandGetDashboard(params, token) {
   _reportsRequireSession_(token);
-  const cacheKey = _reportsCacheKey_('SALES_COMMAND_CENTER_V3', {});
+  const cacheKey = _reportsCacheKey_('SALES_DASHBOARD_V8', {});
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
 
@@ -37505,6 +39776,7 @@ function salesCommandGetDashboard(params, token) {
   let flowOpenRows;
   let divisionOrderRows;
   let divisionBillingRows;
+  let divisionPurchaseRows;
   const tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
   const now = new Date();
   const today = Utilities.formatDate(now, tz, 'yyyy-MM-dd');
@@ -37548,28 +39820,37 @@ function salesCommandGetDashboard(params, token) {
       select: 'so_line_id,so_number,line_no,order_qty,accounts_status,business_status,artwork_status,wo_count,packed_qty,dispatched_qty,billed_qty',
       order: 'so_date.desc,so_number.desc,line_no.asc'
     }) || [];
-    divisionOrderRows = _supabaseSelectAllUnbounded_('v_sales_live_line_snapshot', {
+    divisionOrderRows = _supabaseSelectAllUnbounded_('v_sales_dashboard_order_lines', {
       select: 'division,so_date,order_value',
       filters: {
         so_date: 'gte.' + divisionQueryStart
       },
       order: 'so_date.desc'
     }, 1000) || [];
-    divisionBillingRows = _reportsSelectAll_('v_report_billing_register', {
-      select: 'division,invoice_date,billed_value,document_type,invoice_status,invoice_no',
+    divisionBillingRows = _reportsSelectAll_('v_sales_dashboard_billing_lines', {
+      select: 'division,invoice_date,billed_value,document_type,invoice_status,invoice_no,billing_mode',
       filters: {
         invoice_date: 'gte.' + divisionQueryStart,
-        invoice_status: 'eq.POSTED',
-        document_type: 'eq.INVOICE'
+        invoice_status: 'eq.POSTED'
       },
       order: 'invoice_date.desc'
+    }) || [];
+    divisionPurchaseRows = _reportsSelectAllRequired_('v_report_department_purchase_grn', {
+      select: 'department,grn_date,total_value,basic_value,tax_value,receipt_type,grn_no,item_category,item_name',
+      filters: {
+        grn_date: 'gte.' + divisionQueryStart
+      },
+      order: 'grn_date.desc,department.asc'
     }) || [];
   } catch (err) {
     if (_supabaseRelationMissing_(err, 'v_sales_dashboard_rep_summary') ||
         _supabaseRelationMissing_(err, 'v_sales_dashboard_client_summary') ||
         _supabaseRelationMissing_(err, 'v_sales_dashboard_activity_feed') ||
-        _supabaseRelationMissing_(err, 'v_sales_live_line_snapshot')) {
-      throw new Error('Live Sales Command Center schema is not installed. Apply supabase/sales_live_command_center_20260615.sql in Supabase first.');
+        _supabaseRelationMissing_(err, 'v_sales_dashboard_order_lines') ||
+        _supabaseRelationMissing_(err, 'v_sales_dashboard_billing_lines') ||
+        _supabaseRelationMissing_(err, 'v_sales_live_line_snapshot') ||
+        _supabaseRelationMissing_(err, 'v_report_department_purchase_grn')) {
+      throw new Error('Sales Dashboard schema is not installed. Apply supabase/sales_live_command_center_20260615.sql and supabase/department_purchase_grn_report_view.sql in Supabase first.');
     }
     throw err;
   }
@@ -37580,6 +39861,11 @@ function salesCommandGetDashboard(params, token) {
     divisionOrderRows,
     divisionBillingRows,
     flowOpenRows,
+    { today: today, weekStart: weekStart, monthStart: monthStart }
+  );
+  const purchaseRatio = _salesCommandBuildPurchaseRatio_(
+    divisions,
+    divisionPurchaseRows,
     { today: today, weekStart: weekStart, monthStart: monthStart }
   );
   const totals = reps.reduce(function(out, row) {
@@ -37640,9 +39926,27 @@ function salesCommandGetDashboard(params, token) {
     { key: 'COMPLETED', label: 'Completed' }
   ];
   const flowMap = {};
+  const flowDivisionMap = {};
   flowOrder.forEach(function(stage) {
     flowMap[stage.key] = { key: stage.key, label: stage.label, lineCount: 0, orderQty: 0 };
   });
+  function ensureFlowDivision(name) {
+    const key = _salesCommandDivisionLabel_(name);
+    if (!flowDivisionMap[key]) {
+      const stages = {};
+      flowOrder.forEach(function(stage) {
+        stages[stage.key] = { key: stage.key, label: stage.label, lineCount: 0, orderQty: 0, openValue: 0 };
+      });
+      flowDivisionMap[key] = {
+        division: key,
+        totalLines: 0,
+        openQty: 0,
+        openValue: 0,
+        stages: stages
+      };
+    }
+    return flowDivisionMap[key];
+  }
   const openFlowMap = {};
   (flowOpenRows || []).forEach(function(row) {
     const idKey = String(row.so_line_id || '').trim();
@@ -37652,7 +39956,8 @@ function salesCommandGetDashboard(params, token) {
       operationalOpenQty: _salesCommandNumber_(row.operational_open_qty),
       dispatchedQty: _salesCommandNumber_(row.dispatched_qty),
       billedQty: _salesCommandNumber_(row.billed_qty),
-      openOrderValue: _salesCommandNumber_(row.open_order_value)
+      openOrderValue: _salesCommandNumber_(row.open_order_value),
+      division: _salesCommandDivisionLabel_(row.division)
     };
     if (idKey) openFlowMap[idKey] = mapped;
     if (compositeKey !== '||') openFlowMap[compositeKey] = mapped;
@@ -37670,9 +39975,47 @@ function salesCommandGetDashboard(params, token) {
     if (!flowMap[state]) return;
     flowMap[state].lineCount += 1;
     flowMap[state].orderQty += openLine.operationalOpenQty;
+    const divisionFlow = ensureFlowDivision(openLine.division);
+    divisionFlow.totalLines += 1;
+    divisionFlow.openQty += openLine.operationalOpenQty;
+    divisionFlow.openValue += openLine.openOrderValue;
+    divisionFlow.stages[state].lineCount += 1;
+    divisionFlow.stages[state].orderQty += openLine.operationalOpenQty;
+    divisionFlow.stages[state].openValue += openLine.openOrderValue;
   });
+  const maxFlowLines = flowOrder.reduce(function(max, stage) {
+    return Math.max(max, _salesCommandNumber_(flowMap[stage.key].lineCount));
+  }, 0);
   const orderFlow = flowOrder.map(function(stage) {
-    return flowMap[stage.key];
+    const row = flowMap[stage.key];
+    row.isBottleneck = maxFlowLines > 0 && row.lineCount === maxFlowLines;
+    return row;
+  });
+  const orderFlowDivisions = Object.keys(flowDivisionMap).map(function(key) {
+    const row = flowDivisionMap[key];
+    const stages = flowOrder.map(function(stage) {
+      return row.stages[stage.key];
+    });
+    const bottleneck = stages.slice().sort(function(a, b) {
+      return _salesCommandNumber_(b.lineCount) - _salesCommandNumber_(a.lineCount) ||
+        _salesCommandNumber_(b.orderQty) - _salesCommandNumber_(a.orderQty);
+    })[0] || { key: '', label: '', lineCount: 0, orderQty: 0, openValue: 0 };
+    return {
+      division: row.division,
+      totalLines: row.totalLines,
+      openQty: row.openQty,
+      openValue: row.openValue,
+      bottleneckStage: bottleneck.label,
+      bottleneckKey: bottleneck.key,
+      bottleneckLines: bottleneck.lineCount,
+      bottleneckQty: bottleneck.orderQty,
+      bottleneckValue: bottleneck.openValue,
+      stages: stages
+    };
+  }).sort(function(a, b) {
+    return _salesCommandNumber_(b.totalLines) - _salesCommandNumber_(a.totalLines) ||
+      _salesCommandNumber_(b.openValue) - _salesCommandNumber_(a.openValue) ||
+      a.division.localeCompare(b.division);
   });
   const orderFlowMeta = {
     scope: 'Open actionable order lines till date',
@@ -37715,8 +40058,10 @@ function salesCommandGetDashboard(params, token) {
     topClients: benchmarkTopClients.length ? benchmarkTopClients : clients.slice(0, 20),
     currentTopClients: clients.slice(0, 20),
     divisions: divisions,
+    purchaseRatio: purchaseRatio,
     celebrations: celebrations,
     orderFlow: orderFlow,
+    orderFlowDivisions: orderFlowDivisions,
     orderFlowMeta: orderFlowMeta,
     overdueOrders: overdueOrders,
     activities: activities,
