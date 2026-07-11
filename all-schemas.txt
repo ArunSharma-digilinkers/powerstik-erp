@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict vQNoMcjY7GJvWawrkcU03wTkVxgFBHMJjclxPUnyw8jR4oF5JYxVH71efrJHSpe
+\restrict V2yMhid4bTbXcu6FZ74Bgi0hdLlwsRAcfHTbmkp78V3jemDahLH4wKZY3ywAwpl
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.3
@@ -1909,14 +1909,8 @@ begin
     raise exception 'Work Order not found: %', p_wo_number;
   end if;
 
-  if exists (
-    select 1
-    from public.inv_ledger il
-    where upper(coalesce(il.ref_type, '')) = 'ISSUE'
-      and trim(coalesce(il.ref_no, '')) = trim(v_wo.wo_number)
-      and coalesce(il.qty_out, 0) > 0
-  ) then
-    raise exception 'Work order % cannot be deleted because material has been issued against it.', v_wo.wo_number;
+  if public.work_order_has_open_material_issue(v_wo.wo_number) then
+    raise exception 'Work order % cannot be deleted because material is still net issued against it.', v_wo.wo_number;
   end if;
 
   select
@@ -2024,7 +2018,7 @@ $_$;
 -- Name: FUNCTION delete_work_order_with_audit(p_wo_number text, p_deleted_by text, p_reason text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.delete_work_order_with_audit(p_wo_number text, p_deleted_by text, p_reason text) IS 'Blocks deletion after any material issue and atomically archives all work order data before deletion.';
+COMMENT ON FUNCTION public.delete_work_order_with_audit(p_wo_number text, p_deleted_by text, p_reason text) IS 'Blocks deletion while material is still net issued and atomically archives all work order data before deletion.';
 
 
 --
@@ -2723,48 +2717,160 @@ $$;
 CREATE FUNCTION public.inv_wo_issue_variance_export_ui(p_search text DEFAULT NULL::text, p_date_from date DEFAULT NULL::date, p_date_to date DEFAULT NULL::date, p_limit integer DEFAULT 500000, p_offset integer DEFAULT 0) RETURNS TABLE(wo_date date, wo_no text, job_card_no text, sales_orders text, client text, product text, artwork_no text, department text, material_key text, material text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, pending_qty numeric, excess_qty numeric, status text, issue_batches text, return_batches text, last_issue_date timestamp with time zone, last_return_date timestamp with time zone)
     LANGUAGE sql STABLE
     AS $$
-  select
-    v.wo_date,
-    v.wo_no,
-    v.job_card_no,
-    v.sales_orders,
-    v.client,
-    v.product,
-    v.artwork_no,
-    v.department,
-    v.material_key,
-    v.material,
-    v.gsm,
-    v.deckle_mm,
-    v.cut_mm,
-    v.uom,
-    v.required_qty,
-    v.issued_qty,
-    v.returned_qty,
-    v.net_issued_qty,
-    v.pending_qty,
-    v.excess_qty,
-    v.status,
-    v.issue_batches,
-    v.return_batches,
-    v.last_issue_date,
-    v.last_return_date
-  from public.inv_wo_issue_variance_export_v v
-  where (
-    p_search is null
-    or trim(p_search) = ''
-    or v.wo_no ilike '%' || trim(p_search) || '%'
-    or v.job_card_no ilike '%' || trim(p_search) || '%'
-    or v.sales_orders ilike '%' || trim(p_search) || '%'
-    or v.client ilike '%' || trim(p_search) || '%'
-    or v.product ilike '%' || trim(p_search) || '%'
-    or v.artwork_no ilike '%' || trim(p_search) || '%'
-    or v.material ilike '%' || trim(p_search) || '%'
+  with filtered as (
+    select v.*
+    from public.inv_wo_issue_variance_export_v v
+    where (
+      p_search is null
+      or trim(p_search) = ''
+      or v.wo_no ilike '%' || trim(p_search) || '%'
+      or v.job_card_no ilike '%' || trim(p_search) || '%'
+      or v.sales_orders ilike '%' || trim(p_search) || '%'
+      or v.client ilike '%' || trim(p_search) || '%'
+      or v.product ilike '%' || trim(p_search) || '%'
+      or v.artwork_no ilike '%' || trim(p_search) || '%'
+      or v.material ilike '%' || trim(p_search) || '%'
+    )
+      and coalesce(v.required_qty, 0) > 0
+      and coalesce(v.excess_qty, 0) > 0.0001
+  ),
+  matched_ledger as (
+    select
+      f.wo_no,
+      f.material_key as report_material_key,
+      f.required_qty,
+      il.id as ledger_id,
+      upper(coalesce(il.ref_type, '')) as ref_type,
+      coalesce(il.qty_out, 0::numeric) as qty_out,
+      coalesce(il.qty_in, 0::numeric) as qty_in,
+      case
+        when upper(coalesce(il.ref_type, '')) = 'WO-RETURN'
+          then -1 * coalesce(il.qty_in, 0::numeric)
+        else coalesce(il.qty_out, 0::numeric)
+      end as signed_qty,
+      coalesce(il.batch_no, '') as batch_no,
+      il.created_at
+    from filtered f
+    join public.inv_ledger il
+      on trim(coalesce(il.ref_no, '')) = trim(coalesce(f.wo_no, ''))
+    where upper(coalesce(il.ref_type, '')) in ('ISSUE', 'WO-RETURN')
+      and coalesce(il.remarks, '') <> ''
+      and (
+        coalesce(il.qty_out, 0::numeric) > 0
+        or coalesce(il.qty_in, 0::numeric) > 0
+      )
+      and not exists (
+        select 1
+        from public.inv_ledger rev
+        where rev.ref_no = il.id::text
+          and upper(coalesce(rev.ref_type, '')) like 'REV-%'
+      )
+      and (
+        f.material_key = il.remarks
+        or upper(coalesce(split_part(il.remarks, '|', 1), '')) in (
+          upper(coalesce(f.material, '')),
+          upper(coalesce(split_part(f.material_key, '|', 1), ''))
+        )
+      )
+      and (coalesce(f.gsm, '') = '' or coalesce(split_part(il.remarks, '|', 2), '') = '' or coalesce(split_part(il.remarks, '|', 2), '') = coalesce(f.gsm, ''))
+      and (
+        coalesce(f.deckle_mm, 0) = 0
+        or coalesce(nullif(split_part(il.remarks, '|', 3), '')::numeric, 0) = 0
+        or abs(coalesce(nullif(split_part(il.remarks, '|', 3), '')::numeric, 0) - coalesce(f.deckle_mm, 0)) <= 0.01
+      )
+      and (
+        coalesce(f.cut_mm, 0) = 0
+        or coalesce(nullif(split_part(il.remarks, '|', 4), '')::numeric, 0) = 0
+        or abs(coalesce(nullif(split_part(il.remarks, '|', 4), '')::numeric, 0) - coalesce(f.cut_mm, 0)) <= 0.01
+      )
+      and (
+        case
+          when upper(coalesce(split_part(il.remarks, '|', 5), '')) in ('RM', 'R.M.', 'RUNNING METER', 'RUNNING METERS') then 'RM'
+          when upper(coalesce(split_part(il.remarks, '|', 5), '')) in ('KG', 'KGS', 'KILOGRAM', 'KILOGRAMS') then 'KG'
+          when upper(coalesce(split_part(il.remarks, '|', 5), '')) in ('SHEET', 'SHEETS') then 'SHEET'
+          else upper(coalesce(split_part(il.remarks, '|', 5), ''))
+        end = upper(coalesce(f.uom, ''))
+        or (
+          f.department = 'Flexo'
+          and f.uom = 'RM'
+          and case
+            when upper(coalesce(split_part(il.remarks, '|', 5), '')) in ('RM', 'R.M.', 'RUNNING METER', 'RUNNING METERS') then 'RM'
+            when upper(coalesce(split_part(il.remarks, '|', 5), '')) in ('KG', 'KGS', 'KILOGRAM', 'KILOGRAMS') then 'KG'
+            else upper(coalesce(split_part(il.remarks, '|', 5), ''))
+          end in ('RM', 'KG')
+        )
+      )
+  ),
+  sequenced_ledger as (
+    select
+      ml.*,
+      coalesce(
+        sum(ml.signed_qty) over (
+          partition by ml.wo_no, ml.report_material_key
+          order by ml.created_at, ml.ledger_id
+          rows between unbounded preceding and 1 preceding
+        ),
+        0::numeric
+      ) as net_before
+    from matched_ledger ml
+  ),
+  excess_issue_events as (
+    select
+      sl.wo_no,
+      sl.report_material_key,
+      sl.created_at,
+      sl.batch_no,
+      greatest(sl.net_before + sl.qty_out - coalesce(sl.required_qty, 0), 0)
+        - greatest(sl.net_before - coalesce(sl.required_qty, 0), 0) as event_excess_qty
+    from sequenced_ledger sl
+    where sl.ref_type = 'ISSUE'
+      and sl.qty_out > 0
+  ),
+  period_excess as (
+    select
+      eie.wo_no,
+      eie.report_material_key,
+      sum(eie.event_excess_qty) as period_excess_qty,
+      max(eie.created_at) as last_excess_issue_date,
+      string_agg(distinct nullif(trim(eie.batch_no), ''), ', ') as excess_issue_batches
+    from excess_issue_events eie
+    where eie.event_excess_qty > 0.0001
+      and (p_date_from is null or (eie.created_at at time zone 'Asia/Kolkata')::date >= p_date_from)
+      and (p_date_to is null or (eie.created_at at time zone 'Asia/Kolkata')::date <= p_date_to)
+    group by eie.wo_no, eie.report_material_key
   )
-  and coalesce(v.required_qty, 0) > 0
-  and (p_date_from is null or (v.last_issue_date at time zone 'Asia/Kolkata')::date >= p_date_from)
-  and (p_date_to is null or (v.last_issue_date at time zone 'Asia/Kolkata')::date <= p_date_to)
-  order by v.last_issue_date desc nulls last, v.wo_date desc nulls last, v.wo_no desc, v.material asc, v.material_key asc
+  select
+    f.wo_date,
+    f.wo_no,
+    f.job_card_no,
+    f.sales_orders,
+    f.client,
+    f.product,
+    f.artwork_no,
+    f.department,
+    f.material_key,
+    f.material,
+    f.gsm,
+    f.deckle_mm,
+    f.cut_mm,
+    f.uom,
+    f.required_qty,
+    f.issued_qty,
+    f.returned_qty,
+    f.net_issued_qty,
+    f.pending_qty,
+    least(coalesce(f.excess_qty, 0), coalesce(pe.period_excess_qty, 0)) as excess_qty,
+    'EXCESS'::text as status,
+    coalesce(pe.excess_issue_batches, f.issue_batches),
+    f.return_batches,
+    pe.last_excess_issue_date as last_issue_date,
+    f.last_return_date
+  from filtered f
+  join period_excess pe
+    on pe.wo_no = f.wo_no
+   and pe.report_material_key = f.material_key
+  where least(coalesce(f.excess_qty, 0), coalesce(pe.period_excess_qty, 0)) > 0.0001
+  order by pe.last_excess_issue_date desc nulls last, f.wo_date desc nulls last, f.wo_no desc, f.material asc, f.material_key asc
   limit greatest(coalesce(p_limit, 500000), 1)
   offset greatest(coalesce(p_offset, 0), 0);
 $$;
@@ -3088,14 +3194,8 @@ CREATE FUNCTION public.prevent_unaudited_work_order_delete() RETURNS trigger
     SET search_path TO 'public'
     AS $$
 begin
-  if exists (
-    select 1
-    from public.inv_ledger il
-    where upper(coalesce(il.ref_type, '')) = 'ISSUE'
-      and trim(coalesce(il.ref_no, '')) = trim(old.wo_number)
-      and coalesce(il.qty_out, 0) > 0
-  ) then
-    raise exception 'Work order % cannot be deleted because material has been issued against it.', old.wo_number;
+  if public.work_order_has_open_material_issue(old.wo_number) then
+    raise exception 'Work order % cannot be deleted because material is still net issued against it.', old.wo_number;
   end if;
 
   if not exists (
@@ -3884,6 +3984,63 @@ CREATE FUNCTION public.wo_material_issue_status(p_wo_no text, p_material_key tex
   where wo.wo_number = p_wo_no
     and wom.material_key = p_material_key;
 $$;
+
+
+--
+-- Name: work_order_has_open_material_issue(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.work_order_has_open_material_issue(p_wo_number text) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  with live_material_ledger as (
+    select
+      il.item_id,
+      coalesce(il.remarks, '') as material_key,
+      upper(coalesce(il.ref_type, '')) as ref_type,
+      coalesce(il.qty_in, 0::numeric) as qty_in,
+      coalesce(il.qty_out, 0::numeric) as qty_out
+    from public.inv_ledger il
+    where trim(coalesce(il.ref_no, '')) = trim(coalesce(p_wo_number, ''))
+      and upper(coalesce(il.ref_type, '')) in ('ISSUE', 'WO-RETURN')
+      and (
+        (upper(coalesce(il.ref_type, '')) = 'ISSUE' and coalesce(il.qty_out, 0::numeric) > 0)
+        or (upper(coalesce(il.ref_type, '')) = 'WO-RETURN' and coalesce(il.qty_in, 0::numeric) > 0)
+      )
+      and not exists (
+        select 1
+        from public.inv_ledger rev
+        where rev.ref_no = il.id::text
+          and upper(coalesce(rev.ref_type, '')) like 'REV-%'
+      )
+  ),
+  net_material_ledger as (
+    select
+      item_id,
+      material_key,
+      sum(
+        case
+          when ref_type = 'WO-RETURN' then -1 * qty_in
+          else qty_out
+        end
+      ) as net_issue_qty
+    from live_material_ledger
+    group by item_id, material_key
+  )
+  select exists (
+    select 1
+    from net_material_ledger
+    where coalesce(net_issue_qty, 0::numeric) > 0.0001
+  );
+$$;
+
+
+--
+-- Name: FUNCTION work_order_has_open_material_issue(p_wo_number text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.work_order_has_open_material_issue(p_wo_number text) IS 'Returns true only when a work order still has positive net material issue after WO-RETURN rows and reversed ledger rows are considered.';
 
 
 --
@@ -7151,7 +7308,7 @@ CREATE VIEW public.inv_adjustment_register_v WITH (security_invoker='on') AS
 -- Name: inv_issue_register_v; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.inv_issue_register_v WITH (security_invoker='on') AS
+CREATE VIEW public.inv_issue_register_v AS
  SELECT id,
     item_id,
     created_at,
@@ -7795,7 +7952,7 @@ CREATE TABLE public.work_orders (
 -- Name: inv_wo_issue_material_source_v; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.inv_wo_issue_material_source_v WITH (security_invoker='on') AS
+CREATE VIEW public.inv_wo_issue_material_source_v AS
  WITH wo_base AS (
          SELECT wo.id AS wo_id,
             wo.wo_number,
@@ -7998,7 +8155,7 @@ CREATE VIEW public.inv_wo_issue_material_source_v WITH (security_invoker='on') A
 -- Name: inv_wo_issue_requirement_fast_v; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.inv_wo_issue_requirement_fast_v WITH (security_invoker='on') AS
+CREATE VIEW public.inv_wo_issue_requirement_fast_v AS
  WITH issued_rows AS (
          SELECT il.ref_no AS wo_number,
             il.remarks AS material_key,
@@ -8084,7 +8241,7 @@ CREATE VIEW public.inv_wo_issue_requirement_fast_v WITH (security_invoker='on') 
 -- Name: inv_wo_issue_requirement_v; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.inv_wo_issue_requirement_v WITH (security_invoker='on') AS
+CREATE VIEW public.inv_wo_issue_requirement_v AS
  WITH material_rows AS (
          SELECT wom.wo_id,
             wom.material_key,
@@ -8236,7 +8393,7 @@ CREATE VIEW public.inv_wo_issue_requirement_v WITH (security_invoker='on') AS
 -- Name: inv_wo_issue_status_fast_v; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.inv_wo_issue_status_fast_v WITH (security_invoker='on') AS
+CREATE VIEW public.inv_wo_issue_status_fast_v AS
  WITH wo_base AS (
          SELECT wo.id AS wo_id,
             wo.wo_number,
@@ -8299,7 +8456,7 @@ CREATE VIEW public.inv_wo_issue_status_fast_v WITH (security_invoker='on') AS
 -- Name: inv_wo_issue_status_v; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.inv_wo_issue_status_v WITH (security_invoker='on') AS
+CREATE VIEW public.inv_wo_issue_status_v AS
  SELECT wo_number,
     max(issue_department) AS issue_department,
         CASE
@@ -8349,7 +8506,7 @@ CREATE TABLE public.work_order_jobs (
 -- Name: inv_wo_issue_variance_export_v; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.inv_wo_issue_variance_export_v WITH (security_invoker='on') AS
+CREATE VIEW public.inv_wo_issue_variance_export_v AS
  WITH job_rollup AS (
          SELECT woj.wo_id,
             string_agg(DISTINCT NULLIF(TRIM(BOTH FROM woj.job_reference), ''::text), ' / '::text) AS job_card_no,
@@ -14078,6 +14235,24 @@ CREATE VIEW public.v_report_department_material_issue AS
            FROM public.inv_ledger l
           WHERE ((upper(COALESCE(l.ref_type, ''::text)) = 'ISSUE'::text) AND (COALESCE(l.qty_out, (0)::numeric) > (0)::numeric))
         UNION ALL
+         SELECT l.id AS ledger_id,
+            'WO-RETURN'::text AS transaction_type,
+            ''::text AS source_issue_id,
+            l.item_id,
+            l.location,
+            l.ref_no,
+            (('-1'::integer)::numeric * COALESCE(l.qty_in, (0)::numeric)) AS issue_qty,
+            COALESCE(l.rate, (0)::numeric) AS issue_rate,
+            (('-1'::integer)::numeric * abs(COALESCE(NULLIF(l.value, (0)::numeric), (COALESCE(l.qty_in, (0)::numeric) * COALESCE(l.rate, (0)::numeric))))) AS basic_value,
+            COALESCE(l.department, ''::text) AS ledger_department,
+            COALESCE(l.batch_no, ''::text) AS batch_no,
+            COALESCE(l.remarks, ''::text) AS remarks,
+            l.created_at AS issue_created_at
+           FROM public.inv_ledger l
+          WHERE ((upper(COALESCE(l.ref_type, ''::text)) = 'WO-RETURN'::text) AND (COALESCE(l.qty_in, (0)::numeric) > (0)::numeric) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.inv_ledger rev
+                  WHERE ((rev.ref_no = (l.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
+        UNION ALL
          SELECT rev.id AS ledger_id,
             'REV-ISSUE'::text AS transaction_type,
             (orig.id)::text AS source_issue_id,
@@ -14194,6 +14369,7 @@ CREATE VIEW public.v_report_department_material_issue AS
     source_issue_id,
         CASE
             WHEN (transaction_type = 'REV-ISSUE'::text) THEN 'REVERSAL'::text
+            WHEN (transaction_type = 'WO-RETURN'::text) THEN 'RETURN'::text
             ELSE 'ISSUE'::text
         END AS issue_row_type
    FROM prepared p;
@@ -14203,7 +14379,7 @@ CREATE VIEW public.v_report_department_material_issue AS
 -- Name: VIEW v_report_department_material_issue; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.v_report_department_material_issue IS 'Department-wise material issue report from inventory ISSUE ledger rows and REV-ISSUE adjustments. total_value is GST-inclusive using items.gst_pct or latest purchase_order_lines.tax_pct by item code.';
+COMMENT ON VIEW public.v_report_department_material_issue IS 'Department-wise material issue report from inventory ISSUE ledger rows, WO-RETURN leftover returns, and REV-ISSUE adjustments. total_value is GST-inclusive using items.gst_pct or latest purchase_order_lines.tax_pct by item code.';
 
 
 --
@@ -14911,10 +15087,17 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             COALESCE(sol.unit, ''::text) AS unit,
             COALESCE(sol.rate, (0)::numeric) AS rate,
             COALESCE(sol.job_reference, ''::text) AS sales_job_reference,
+            COALESCE(i.length_mm, (0)::numeric) AS item_length_mm,
+            COALESCE(i.width_mm, (0)::numeric) AS item_width_mm,
+                CASE
+                    WHEN ((COALESCE(i.length_mm, (0)::numeric) > (0)::numeric) AND (COALESCE(i.width_mm, (0)::numeric) > (0)::numeric)) THEN (COALESCE(i.length_mm, (0)::numeric) * COALESCE(i.width_mm, (0)::numeric))
+                    ELSE (0)::numeric
+                END AS job_area_mm2,
             COALESCE(sol.status, 'OPEN'::text) AS so_line_status
-           FROM ((public.sales_orders so
+           FROM (((public.sales_orders so
              JOIN public.sales_order_lines sol ON ((sol.so_id = so.id)))
              LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+             LEFT JOIN public.items i ON ((upper(i.item_code) = upper(sol.product_code))))
           WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text))
         ), entry_raw AS (
          SELECT pe.id AS production_entry_id,
@@ -14977,9 +15160,13 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             lb.unit,
             lb.rate,
             lb.so_line_status,
+            lb.item_length_mm,
+            lb.item_width_mm,
+            lb.job_area_mm2,
             COALESCE(NULLIF(er.entry_job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ((lb.so_number || '||'::text) || (lb.line_no)::text)) AS job_key,
             COALESCE(NULLIF(er.entry_job_reference, ''::text), NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ''::text) AS job_reference,
-            GREATEST(COALESCE(woj.job_qty, lb.order_qty, (0)::numeric), (0)::numeric) AS candidate_qty
+            GREATEST(COALESCE(woj.job_qty, lb.order_qty, (0)::numeric), (0)::numeric) AS candidate_qty,
+            COALESCE(lb.job_area_mm2, (0)::numeric) AS candidate_area_mm2
            FROM ((entry_raw er
              JOIN line_base lb ON (((lb.so_number = er.entry_so_number) AND ((lb.line_no)::text = btrim(er.entry_line_no)))))
              LEFT JOIN LATERAL ( SELECT woj1.job_reference,
@@ -15029,9 +15216,13 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             lb.unit,
             lb.rate,
             lb.so_line_status,
+            lb.item_length_mm,
+            lb.item_width_mm,
+            lb.job_area_mm2,
             COALESCE(NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ((lb.so_number || '||'::text) || (lb.line_no)::text)) AS job_key,
             COALESCE(NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ''::text) AS job_reference,
-            GREATEST(COALESCE(woj.qty, lb.order_qty, (0)::numeric), (0)::numeric) AS candidate_qty
+            GREATEST(COALESCE(woj.qty, lb.order_qty, (0)::numeric), (0)::numeric) AS candidate_qty,
+            COALESCE(lb.job_area_mm2, (0)::numeric) AS candidate_area_mm2
            FROM ((entry_raw er
              JOIN public.work_order_jobs woj ON ((woj.wo_id = er.wo_id)))
              JOIN line_base lb ON (((lb.so_number = woj.so_number) AND ((lb.line_no)::text = (woj.line_no)::text))))
@@ -15075,9 +15266,13 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             entry_candidates_exact.unit,
             entry_candidates_exact.rate,
             entry_candidates_exact.so_line_status,
+            entry_candidates_exact.item_length_mm,
+            entry_candidates_exact.item_width_mm,
+            entry_candidates_exact.job_area_mm2,
             entry_candidates_exact.job_key,
             entry_candidates_exact.job_reference,
-            entry_candidates_exact.candidate_qty
+            entry_candidates_exact.candidate_qty,
+            entry_candidates_exact.candidate_area_mm2
            FROM entry_candidates_exact
         UNION ALL
          SELECT entry_candidates_wo_fallback.production_entry_id,
@@ -15116,9 +15311,13 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             entry_candidates_wo_fallback.unit,
             entry_candidates_wo_fallback.rate,
             entry_candidates_wo_fallback.so_line_status,
+            entry_candidates_wo_fallback.item_length_mm,
+            entry_candidates_wo_fallback.item_width_mm,
+            entry_candidates_wo_fallback.job_area_mm2,
             entry_candidates_wo_fallback.job_key,
             entry_candidates_wo_fallback.job_reference,
-            entry_candidates_wo_fallback.candidate_qty
+            entry_candidates_wo_fallback.candidate_qty,
+            entry_candidates_wo_fallback.candidate_area_mm2
            FROM entry_candidates_wo_fallback
         ), entry_base AS (
          SELECT ec.so_id,
@@ -15137,6 +15336,12 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             ec.unit,
             ec.rate,
             ec.so_line_status,
+            ec.item_length_mm,
+            ec.item_width_mm,
+            ec.job_area_mm2,
+            ec.candidate_area_mm2,
+            ec.entry_share,
+            ec.cost_allocation_basis,
             ec.job_key,
             ec.job_reference,
             ec.production_entry_id,
@@ -15192,13 +15397,23 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
                     ec_1.unit,
                     ec_1.rate,
                     ec_1.so_line_status,
+                    ec_1.item_length_mm,
+                    ec_1.item_width_mm,
+                    ec_1.job_area_mm2,
                     ec_1.job_key,
                     ec_1.job_reference,
                     ec_1.candidate_qty,
+                    ec_1.candidate_area_mm2,
                         CASE
+                            WHEN (sum(ec_1.candidate_area_mm2) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric) THEN (ec_1.candidate_area_mm2 / NULLIF(sum(ec_1.candidate_area_mm2) OVER (PARTITION BY ec_1.production_entry_id), (0)::numeric))
                             WHEN (sum(ec_1.candidate_qty) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric) THEN (ec_1.candidate_qty / NULLIF(sum(ec_1.candidate_qty) OVER (PARTITION BY ec_1.production_entry_id), (0)::numeric))
                             ELSE ((1)::numeric / (NULLIF(count(*) OVER (PARTITION BY ec_1.production_entry_id), 0))::numeric)
-                        END AS entry_share
+                        END AS entry_share,
+                        CASE
+                            WHEN (sum(ec_1.candidate_area_mm2) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric) THEN 'JOB_AREA'::text
+                            WHEN (sum(ec_1.candidate_qty) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric) THEN 'JOB_QTY_FALLBACK'::text
+                            ELSE 'EQUAL_FALLBACK'::text
+                        END AS cost_allocation_basis
                    FROM entry_candidates ec_1) ec
         ), entry_with_net_hours AS (
          SELECT eb.so_id,
@@ -15217,6 +15432,12 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             eb.unit,
             eb.rate,
             eb.so_line_status,
+            eb.item_length_mm,
+            eb.item_width_mm,
+            eb.job_area_mm2,
+            eb.candidate_area_mm2,
+            eb.entry_share,
+            eb.cost_allocation_basis,
             eb.job_key,
             eb.job_reference,
             eb.production_entry_id,
@@ -15285,6 +15506,10 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             eb.unit,
             eb.rate,
             eb.so_line_status,
+            eb.item_length_mm,
+            eb.item_width_mm,
+            eb.job_area_mm2,
+            eb.cost_allocation_basis,
             eb.job_key,
             eb.job_reference,
             eb.routing_id,
@@ -15302,7 +15527,7 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             min(eb.entry_local_ts) AS first_production_at,
             max(eb.entry_local_ts) AS last_production_at
            FROM entry_with_net_hours eb
-          GROUP BY eb.so_id, eb.so_line_id, eb.so_number, eb.so_date, eb.client_code, eb.client_name, eb.sales_rep, eb.line_no, eb.division, eb.product_code, eb.product_name, eb.category, eb.order_qty, eb.unit, eb.rate, eb.so_line_status, eb.job_key, eb.job_reference, eb.routing_id, eb.production_stage, eb.production_machine, eb.machine_key, eb.stage_sequence, eb.production_date
+          GROUP BY eb.so_id, eb.so_line_id, eb.so_number, eb.so_date, eb.client_code, eb.client_name, eb.sales_rep, eb.line_no, eb.division, eb.product_code, eb.product_name, eb.category, eb.order_qty, eb.unit, eb.rate, eb.so_line_status, eb.item_length_mm, eb.item_width_mm, eb.job_area_mm2, eb.cost_allocation_basis, eb.job_key, eb.job_reference, eb.routing_id, eb.production_stage, eb.production_machine, eb.machine_key, eb.stage_sequence, eb.production_date
         ), cost_base AS (
          SELECT jsd.so_id,
             jsd.so_line_id,
@@ -15320,6 +15545,10 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             jsd.unit,
             jsd.rate,
             jsd.so_line_status,
+            jsd.item_length_mm,
+            jsd.item_width_mm,
+            jsd.job_area_mm2,
+            jsd.cost_allocation_basis,
             jsd.job_key,
             jsd.job_reference,
             jsd.routing_id,
@@ -15413,7 +15642,11 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
             ELSE false
         END AS mhr_missing,
     cb.first_production_at,
-    cb.last_production_at
+    cb.last_production_at,
+    round(COALESCE(cb.item_length_mm, (0)::numeric), 3) AS job_length_mm,
+    round(COALESCE(cb.item_width_mm, (0)::numeric), 3) AS job_width_mm,
+    round(COALESCE(cb.job_area_mm2, (0)::numeric), 3) AS job_area_mm2,
+    COALESCE(cb.cost_allocation_basis, ''::text) AS cost_allocation_basis
    FROM (cost_base cb
      LEFT JOIN LATERAL ( SELECT r.id,
             r.mhr
@@ -15462,6 +15695,12 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             sol.product_code,
             sol.product_name,
             sol.category,
+            COALESCE(i.length_mm, (0)::numeric) AS item_length_mm,
+            COALESCE(i.width_mm, (0)::numeric) AS item_width_mm,
+                CASE
+                    WHEN ((COALESCE(i.length_mm, (0)::numeric) > (0)::numeric) AND (COALESCE(i.width_mm, (0)::numeric) > (0)::numeric)) THEN (COALESCE(i.length_mm, (0)::numeric) * COALESCE(i.width_mm, (0)::numeric))
+                    ELSE (0)::numeric
+                END AS job_area_mm2,
             COALESCE(sol.qty, (0)::numeric) AS order_qty,
             COALESCE(sol.unit, ''::text) AS unit,
             COALESCE(sol.rate, (0)::numeric) AS rate,
@@ -15471,9 +15710,10 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             COALESCE(sol.status, 'OPEN'::text) AS so_line_status,
             (((so.id)::text || '||'::text) || (sol.line_no)::text) AS fallback_artwork_key,
             COALESCE(ab.artwork_no, waf.artwork_no, ''::text) AS artwork_no
-           FROM ((((public.sales_orders so
+           FROM (((((public.sales_orders so
              JOIN public.sales_order_lines sol ON ((sol.so_id = so.id)))
              LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+             LEFT JOIN public.items i ON ((upper(i.item_code) = upper(sol.product_code))))
              LEFT JOIN artwork_base ab ON (((ab.so_id = so.id) AND (ab.line_no = sol.line_no))))
              LEFT JOIN wo_artwork_fallback waf ON (((waf.so_number = so.so_number) AND (waf.line_no = sol.line_no))))
           WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text))
@@ -15490,6 +15730,9 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             lb.product_code,
             lb.product_name,
             lb.category,
+            lb.item_length_mm,
+            lb.item_width_mm,
+            lb.job_area_mm2,
             lb.order_qty,
             lb.unit,
             lb.rate,
@@ -15518,6 +15761,9 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             lb.product_code,
             lb.product_name,
             lb.category,
+            lb.item_length_mm,
+            lb.item_width_mm,
+            lb.job_area_mm2,
             lb.order_qty,
             lb.unit,
             lb.rate,
@@ -15547,6 +15793,9 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             job_rows.product_code,
             job_rows.product_name,
             job_rows.category,
+            job_rows.item_length_mm,
+            job_rows.item_width_mm,
+            job_rows.job_area_mm2,
             job_rows.order_qty,
             job_rows.unit,
             job_rows.rate,
@@ -15573,6 +15822,9 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             job_fallback.product_code,
             job_fallback.product_name,
             job_fallback.category,
+            job_fallback.item_length_mm,
+            job_fallback.item_width_mm,
+            job_fallback.job_area_mm2,
             job_fallback.order_qty,
             job_fallback.unit,
             job_fallback.rate,
@@ -15599,6 +15851,9 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             ju.product_code,
             ju.product_name,
             ju.category,
+            max(COALESCE(ju.item_length_mm, (0)::numeric)) AS item_length_mm,
+            max(COALESCE(ju.item_width_mm, (0)::numeric)) AS item_width_mm,
+            max(COALESCE(ju.job_area_mm2, (0)::numeric)) AS job_area_mm2,
             ju.order_qty,
             ju.unit,
             ju.rate,
@@ -15626,6 +15881,9 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             lj.product_code,
             lj.product_name,
             lj.category,
+            lj.item_length_mm,
+            lj.item_width_mm,
+            lj.job_area_mm2,
             lj.order_qty,
             lj.unit,
             lj.rate,
@@ -15639,10 +15897,21 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             lj.wo_count,
             lj.wo_numbers,
             sum(lj.job_qty) OVER (PARTITION BY lj.so_line_id) AS total_job_qty,
+            sum(lj.job_area_mm2) OVER (PARTITION BY lj.so_line_id) AS total_job_area_mm2,
                 CASE
                     WHEN (sum(lj.job_qty) OVER (PARTITION BY lj.so_line_id) > (0)::numeric) THEN (lj.job_qty / NULLIF(sum(lj.job_qty) OVER (PARTITION BY lj.so_line_id), (0)::numeric))
                     ELSE ((1)::numeric / (NULLIF(count(*) OVER (PARTITION BY lj.so_line_id), 0))::numeric)
-                END AS job_share
+                END AS job_share,
+                CASE
+                    WHEN (sum(lj.job_area_mm2) OVER (PARTITION BY lj.so_line_id) > (0)::numeric) THEN (lj.job_area_mm2 / NULLIF(sum(lj.job_area_mm2) OVER (PARTITION BY lj.so_line_id), (0)::numeric))
+                    WHEN (sum(lj.job_qty) OVER (PARTITION BY lj.so_line_id) > (0)::numeric) THEN (lj.job_qty / NULLIF(sum(lj.job_qty) OVER (PARTITION BY lj.so_line_id), (0)::numeric))
+                    ELSE ((1)::numeric / (NULLIF(count(*) OVER (PARTITION BY lj.so_line_id), 0))::numeric)
+                END AS job_area_share,
+                CASE
+                    WHEN (sum(lj.job_area_mm2) OVER (PARTITION BY lj.so_line_id) > (0)::numeric) THEN 'JOB_AREA'::text
+                    WHEN (sum(lj.job_qty) OVER (PARTITION BY lj.so_line_id) > (0)::numeric) THEN 'JOB_QTY_FALLBACK'::text
+                    ELSE 'EQUAL_FALLBACK'::text
+                END AS cost_allocation_basis
            FROM line_jobs lj
         ), dispatch_base AS (
          SELECT dr.so_line_id,
@@ -15666,20 +15935,34 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
          SELECT lb.so_line_id,
             woj.wo_id,
             COALESCE(NULLIF(woj.job_reference, ''::text), NULLIF(lb.sales_job_reference, ''::text), ((lb.so_number || '||'::text) || (lb.line_no)::text)) AS job_key,
-            GREATEST(COALESCE(woj.qty, (0)::numeric), (0)::numeric) AS job_qty
+            GREATEST(COALESCE(woj.qty, (0)::numeric), (0)::numeric) AS job_qty,
+            COALESCE(lb.job_area_mm2, (0)::numeric) AS job_area_mm2
            FROM (line_base lb
              JOIN public.work_order_jobs woj ON (((woj.so_number = lb.so_number) AND (woj.line_no = lb.line_no))))
         ), wo_job_share AS (
-         SELECT wjb.so_line_id,
-            wjb.wo_id,
-            wjb.job_key,
-            sum(wjb.job_qty) AS job_qty,
+         SELECT g.so_line_id,
+            g.wo_id,
+            g.job_key,
+            g.job_qty,
+            g.job_area_mm2,
+            sum(g.job_area_mm2) OVER (PARTITION BY g.wo_id) AS total_wo_job_area_mm2,
                 CASE
-                    WHEN (sum(sum(wjb.job_qty)) OVER (PARTITION BY wjb.wo_id) > (0)::numeric) THEN (sum(wjb.job_qty) / NULLIF(sum(sum(wjb.job_qty)) OVER (PARTITION BY wjb.wo_id), (0)::numeric))
+                    WHEN (sum(g.job_area_mm2) OVER (PARTITION BY g.wo_id) > (0)::numeric) THEN (g.job_area_mm2 / NULLIF(sum(g.job_area_mm2) OVER (PARTITION BY g.wo_id), (0)::numeric))
+                    WHEN (sum(g.job_qty) OVER (PARTITION BY g.wo_id) > (0)::numeric) THEN (g.job_qty / NULLIF(sum(g.job_qty) OVER (PARTITION BY g.wo_id), (0)::numeric))
                     ELSE (0)::numeric
-                END AS wo_share
-           FROM wo_job_base wjb
-          GROUP BY wjb.so_line_id, wjb.wo_id, wjb.job_key
+                END AS wo_share,
+                CASE
+                    WHEN (sum(g.job_area_mm2) OVER (PARTITION BY g.wo_id) > (0)::numeric) THEN 'JOB_AREA'::text
+                    WHEN (sum(g.job_qty) OVER (PARTITION BY g.wo_id) > (0)::numeric) THEN 'JOB_QTY_FALLBACK'::text
+                    ELSE 'EQUAL_FALLBACK'::text
+                END AS cost_allocation_basis
+           FROM ( SELECT wjb.so_line_id,
+                    wjb.wo_id,
+                    wjb.job_key,
+                    sum(COALESCE(wjb.job_qty, (0)::numeric)) AS job_qty,
+                    max(COALESCE(wjb.job_area_mm2, (0)::numeric)) AS job_area_mm2
+                   FROM wo_job_base wjb
+                  GROUP BY wjb.so_line_id, wjb.wo_id, wjb.job_key) g
         ), issue_base AS (
          SELECT wo.id AS wo_id,
             sum(
@@ -15699,13 +15982,55 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
                    FROM public.inv_ledger rev
                   WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
           GROUP BY wo.id
+        ), material_base AS (
+         SELECT r.wo_id,
+            sum(COALESCE(r.required_qty, (0)::numeric)) AS rm_required_qty,
+            sum(COALESCE(r.net_issued_qty, (0)::numeric)) AS rm_net_issued_qty,
+            sum(COALESCE(r.remaining_qty, (0)::numeric)) AS rm_pending_qty,
+            sum(COALESCE(r.excess_qty, (0)::numeric)) AS rm_excess_qty,
+            count(*) FILTER (WHERE (COALESCE(r.remaining_qty, (0)::numeric) > 0.0001)) AS rm_pending_material_lines,
+            count(*) FILTER (WHERE (COALESCE(r.excess_qty, (0)::numeric) > 0.0001)) AS rm_excess_material_lines,
+                CASE
+                    WHEN bool_or((COALESCE(r.excess_qty, (0)::numeric) > 0.0001)) THEN 'EXCESS'::text
+                    WHEN bool_or((COALESCE(r.remaining_qty, (0)::numeric) > 0.0001)) THEN 'PENDING'::text
+                    ELSE 'ISSUED'::text
+                END AS rm_material_status,
+            string_agg(concat_ws(': '::text, NULLIF(COALESCE(r.item_label, r.material_key, ''::text), ''::text), ((((('Req '::text || (round(COALESCE(r.required_qty, (0)::numeric), 3))::text) || ', Issued '::text) || (round(COALESCE(r.net_issued_qty, (0)::numeric), 3))::text) ||
+                CASE
+                    WHEN (COALESCE(r.remaining_qty, (0)::numeric) > 0.0001) THEN (', Pending '::text || (round(COALESCE(r.remaining_qty, (0)::numeric), 3))::text)
+                    ELSE ''::text
+                END) ||
+                CASE
+                    WHEN (COALESCE(r.excess_qty, (0)::numeric) > 0.0001) THEN (', Excess '::text || (round(COALESCE(r.excess_qty, (0)::numeric), 3))::text)
+                    ELSE ''::text
+                END)), ' | '::text ORDER BY r.item_label, r.material_key) AS rm_material_detail
+           FROM public.inv_wo_issue_requirement_fast_v r
+          GROUP BY r.wo_id
         ), job_rm_cost AS (
          SELECT wjs.so_line_id,
             wjs.job_key,
+            max(COALESCE(wjs.job_area_mm2, (0)::numeric)) AS job_area_mm2,
+            max(COALESCE(wjs.total_wo_job_area_mm2, (0)::numeric)) AS total_wo_job_area_mm2,
+            max(COALESCE(wjs.wo_share, (0)::numeric)) AS wo_cost_allocation_share,
+            string_agg(DISTINCT NULLIF(wjs.cost_allocation_basis, ''::text), ', '::text) FILTER (WHERE (COALESCE(wjs.cost_allocation_basis, ''::text) <> ''::text)) AS cost_allocation_basis,
             sum((COALESCE(ib.issued_qty, (0)::numeric) * COALESCE(wjs.wo_share, (0)::numeric))) AS rm_issued_qty,
-            sum((COALESCE(ib.issued_value, (0)::numeric) * COALESCE(wjs.wo_share, (0)::numeric))) AS rm_issued_value
-           FROM (wo_job_share wjs
+            sum((COALESCE(ib.issued_value, (0)::numeric) * COALESCE(wjs.wo_share, (0)::numeric))) AS rm_issued_value,
+            sum((COALESCE(mb.rm_required_qty, (0)::numeric) * COALESCE(wjs.wo_share, (0)::numeric))) AS rm_required_qty,
+            sum((COALESCE(mb.rm_net_issued_qty, (0)::numeric) * COALESCE(wjs.wo_share, (0)::numeric))) AS rm_net_issued_qty,
+            sum((COALESCE(mb.rm_pending_qty, (0)::numeric) * COALESCE(wjs.wo_share, (0)::numeric))) AS rm_pending_qty,
+            sum((COALESCE(mb.rm_excess_qty, (0)::numeric) * COALESCE(wjs.wo_share, (0)::numeric))) AS rm_excess_qty,
+            sum(COALESCE(mb.rm_pending_material_lines, (0)::bigint)) AS rm_pending_material_lines,
+            sum(COALESCE(mb.rm_excess_material_lines, (0)::bigint)) AS rm_excess_material_lines,
+                CASE
+                    WHEN bool_or((COALESCE(mb.rm_material_status, ''::text) = 'EXCESS'::text)) THEN 'EXCESS'::text
+                    WHEN bool_or((COALESCE(mb.rm_material_status, ''::text) = 'PENDING'::text)) THEN 'PENDING'::text
+                    WHEN bool_or((COALESCE(mb.rm_material_status, ''::text) = 'ISSUED'::text)) THEN 'ISSUED'::text
+                    ELSE 'NO_MATERIAL'::text
+                END AS rm_material_status,
+            string_agg(DISTINCT NULLIF(mb.rm_material_detail, ''::text), ' | '::text) FILTER (WHERE (COALESCE(mb.rm_material_detail, ''::text) <> ''::text)) AS rm_material_detail
+           FROM ((wo_job_share wjs
              LEFT JOIN issue_base ib ON ((ib.wo_id = wjs.wo_id)))
+             LEFT JOIN material_base mb ON ((mb.wo_id = wjs.wo_id)))
           GROUP BY wjs.so_line_id, wjs.job_key
         ), production_stage_base AS (
          SELECT lb.so_line_id,
@@ -15854,6 +16179,12 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             ljs.product_code,
             ljs.product_name,
             ljs.category,
+            ljs.item_length_mm,
+            ljs.item_width_mm,
+            COALESCE(jrm.job_area_mm2, ljs.job_area_mm2, (0)::numeric) AS job_area_mm2,
+            COALESCE(jrm.total_wo_job_area_mm2, ljs.total_job_area_mm2, (0)::numeric) AS total_job_area_mm2,
+            COALESCE(jrm.wo_cost_allocation_share, ljs.job_area_share, ljs.job_share, (0)::numeric) AS job_area_share,
+            COALESCE(NULLIF(jrm.cost_allocation_basis, ''::text), ljs.cost_allocation_basis, ''::text) AS cost_allocation_basis,
             ljs.unit,
             ljs.rate,
             ljs.job_type,
@@ -15870,8 +16201,16 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
             round((COALESCE(ib.billed_value, (0)::numeric) * COALESCE(ljs.job_share, (0)::numeric)), 2) AS billed_value,
             round(COALESCE(jrm.rm_issued_qty, (0)::numeric), 3) AS rm_issued_qty,
             round(COALESCE(jrm.rm_issued_value, (0)::numeric), 2) AS rm_issued_value,
-            round((COALESCE(lt.plate_cost, (0)::numeric) * COALESCE(ljs.job_share, (0)::numeric)), 2) AS plate_cost,
-            round((COALESCE(lt.die_cost, (0)::numeric) * COALESCE(ljs.job_share, (0)::numeric)), 2) AS die_cost,
+            round(COALESCE(jrm.rm_required_qty, (0)::numeric), 3) AS rm_required_qty,
+            round(COALESCE(jrm.rm_net_issued_qty, (0)::numeric), 3) AS rm_net_issued_qty,
+            round(COALESCE(jrm.rm_pending_qty, (0)::numeric), 3) AS rm_pending_qty,
+            round(COALESCE(jrm.rm_excess_qty, (0)::numeric), 3) AS rm_excess_qty,
+            COALESCE(jrm.rm_material_status, 'NO_MATERIAL'::text) AS rm_material_status,
+            COALESCE(jrm.rm_pending_material_lines, (0)::numeric) AS rm_pending_material_lines,
+            COALESCE(jrm.rm_excess_material_lines, (0)::numeric) AS rm_excess_material_lines,
+            COALESCE(jrm.rm_material_detail, ''::text) AS rm_material_detail,
+            round((COALESCE(lt.plate_cost, (0)::numeric) * COALESCE(ljs.job_area_share, ljs.job_share, (0)::numeric)), 2) AS plate_cost,
+            round((COALESCE(lt.die_cost, (0)::numeric) * COALESCE(ljs.job_area_share, ljs.job_share, (0)::numeric)), 2) AS die_cost,
             COALESCE(lp.latest_production_stage, ''::text) AS latest_production_stage,
             COALESCE(lp.latest_production_machine, ''::text) AS latest_production_machine,
             round(COALESCE(lp.latest_stage_ok_qty, (0)::numeric), 3) AS latest_stage_ok_qty,
@@ -15965,7 +16304,21 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
         CASE
             WHEN (COALESCE(produced_goods_value, (0)::numeric) > (0)::numeric) THEN (((COALESCE(produced_goods_value, (0)::numeric) - ((COALESCE(rm_issued_value, (0)::numeric) + COALESCE(plate_cost, (0)::numeric)) + COALESCE(die_cost, (0)::numeric))) / NULLIF(produced_goods_value, (0)::numeric)) * 100.0)
             ELSE (0)::numeric
-        END, 2) AS profit_pct_on_produced_value
+        END, 2) AS profit_pct_on_produced_value,
+    round(COALESCE(item_length_mm, (0)::numeric), 3) AS job_length_mm,
+    round(COALESCE(item_width_mm, (0)::numeric), 3) AS job_width_mm,
+    round(COALESCE(job_area_mm2, (0)::numeric), 3) AS job_area_mm2,
+    round(COALESCE(total_job_area_mm2, (0)::numeric), 3) AS total_job_area_mm2,
+    round((COALESCE(job_area_share, (0)::numeric) * 100.0), 4) AS cost_allocation_pct,
+    COALESCE(cost_allocation_basis, ''::text) AS cost_allocation_basis,
+    rm_required_qty,
+    rm_net_issued_qty,
+    rm_pending_qty,
+    rm_excess_qty,
+    rm_material_status,
+    rm_pending_material_lines,
+    rm_excess_material_lines,
+    rm_material_detail
    FROM final_base fb;
 
 
@@ -15973,7 +16326,7 @@ CREATE VIEW public.v_report_job_profitability_phase1 AS
 -- Name: v_report_job_profitability_complete; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_report_job_profitability_complete WITH (security_invoker='on') AS
+CREATE VIEW public.v_report_job_profitability_complete AS
  WITH process_cost_by_job AS (
          SELECT pc.so_line_id,
             pc.job_key,
@@ -16040,6 +16393,20 @@ CREATE VIEW public.v_report_job_profitability_complete WITH (security_invoker='o
             jp.produced_goods_value,
             jp.profit_on_produced_value,
             jp.profit_pct_on_produced_value,
+            jp.job_length_mm,
+            jp.job_width_mm,
+            jp.job_area_mm2,
+            jp.total_job_area_mm2,
+            jp.cost_allocation_pct,
+            jp.cost_allocation_basis,
+            jp.rm_required_qty,
+            jp.rm_net_issued_qty,
+            jp.rm_pending_qty,
+            jp.rm_excess_qty,
+            jp.rm_material_status,
+            jp.rm_pending_material_lines,
+            jp.rm_excess_material_lines,
+            jp.rm_material_detail,
             COALESCE(pcj.process_hours, (0)::numeric) AS process_hours,
             COALESCE(pcj.process_cost, (0)::numeric) AS process_cost,
             COALESCE(pcj.process_cost_line_count, (0)::bigint) AS process_cost_line_count,
@@ -16137,7 +16504,21 @@ CREATE VIEW public.v_report_job_profitability_complete WITH (security_invoker='o
     invoice_nos,
     first_invoice_date,
     last_invoice_date,
-    last_dispatch_date
+    last_dispatch_date,
+    job_length_mm,
+    job_width_mm,
+    job_area_mm2,
+    total_job_area_mm2,
+    cost_allocation_pct,
+    cost_allocation_basis,
+    rm_required_qty,
+    rm_net_issued_qty,
+    rm_pending_qty,
+    rm_excess_qty,
+    rm_material_status,
+    rm_pending_material_lines,
+    rm_excess_material_lines,
+    rm_material_detail
    FROM complete_base cb;
 
 
@@ -18340,13 +18721,17 @@ CREATE VIEW public.v_report_wip_ageing_all_lines WITH (security_invoker='on') AS
           GROUP BY wls.so_line_id
         ), material_issue_base AS (
          SELECT wls.so_line_id,
-            min(il.created_at) AS first_material_issue_at,
+            min(il.created_at) FILTER (WHERE (upper(COALESCE(il.ref_type, ''::text)) = 'ISSUE'::text)) AS first_material_issue_at,
             max(il.created_at) AS latest_material_issue_at,
-            round(sum((COALESCE(il.qty_out, (0)::numeric) * COALESCE(wls.wo_share, (0)::numeric))), 3) AS issued_qty_by_ledger
+            round(sum((
+                CASE
+                    WHEN (upper(COALESCE(il.ref_type, ''::text)) = 'WO-RETURN'::text) THEN (('-1'::integer)::numeric * COALESCE(il.qty_in, (0)::numeric))
+                    ELSE COALESCE(il.qty_out, (0)::numeric)
+                END * COALESCE(wls.wo_share, (0)::numeric))), 3) AS issued_qty_by_ledger
            FROM ((wo_line_share wls
              JOIN public.work_orders wo ON ((wo.id = wls.wo_id)))
              JOIN public.inv_ledger il ON ((il.ref_no = wo.wo_number)))
-          WHERE ((upper(COALESCE(il.ref_type, ''::text)) = 'ISSUE'::text) AND (COALESCE(il.qty_out, (0)::numeric) > (0)::numeric) AND (NOT (EXISTS ( SELECT 1
+          WHERE ((upper(COALESCE(il.ref_type, ''::text)) = ANY (ARRAY['ISSUE'::text, 'WO-RETURN'::text])) AND (((upper(COALESCE(il.ref_type, ''::text)) = 'ISSUE'::text) AND (COALESCE(il.qty_out, (0)::numeric) > (0)::numeric)) OR ((upper(COALESCE(il.ref_type, ''::text)) = 'WO-RETURN'::text) AND (COALESCE(il.qty_in, (0)::numeric) > (0)::numeric))) AND (NOT (EXISTS ( SELECT 1
                    FROM public.inv_ledger rev
                   WHERE ((rev.ref_no = (il.id)::text) AND (upper(COALESCE(rev.ref_type, ''::text)) ~~ 'REV-%'::text))))))
           GROUP BY wls.so_line_id
@@ -30077,5 +30462,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict vQNoMcjY7GJvWawrkcU03wTkVxgFBHMJjclxPUnyw8jR4oF5JYxVH71efrJHSpe
+\unrestrict V2yMhid4bTbXcu6FZ74Bgi0hdLlwsRAcfHTbmkp78V3jemDahLH4wKZY3ywAwpl
 

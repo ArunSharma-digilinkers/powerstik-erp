@@ -15099,15 +15099,16 @@ function renderPostLoginRedirectPage(token) {
   const safeToken = String(token || '');
   const html =
     '<!doctype html><html><head><base target="_top"><meta charset="utf-8">' +
-    '<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#334155}.box{font-size:13px}</style>' +
-    '</head><body><div class="box">Opening PowerStik ERP...</div><script>' +
+    '<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#334155}.box{font-size:13px;text-align:center}.box a{display:inline-block;margin-top:12px;color:#2563eb;font-weight:700;text-decoration:none}</style>' +
+    '</head><body><div class="box">Opening PowerStik ERP...<br><a id="continueLink" target="_top" rel="noopener" style="display:none">Continue</a></div><script>' +
     '(function(){' +
     'var base=' + JSON.stringify(webUrl) + ';' +
     'var token=' + JSON.stringify(safeToken) + ';' +
     'try{localStorage.setItem("ERP_TOKEN",token);sessionStorage.setItem("ERP_TOKEN",token);localStorage.setItem("erp_token",token);sessionStorage.setItem("erp_token",token);}catch(err){}' +
     'var url=new URL(base,window.location.href);url.searchParams.set("p","menu");url.searchParams.set("token",token);' +
-    'try{if(window.top&&window.top.location){window.top.location.replace(url.toString());return;}}catch(err){}' +
-    'try{window.location.replace(url.toString());}catch(err){window.location.href=url.toString();}' +
+    'function showLink(){var a=document.getElementById("continueLink");if(a){a.href=url.toString();a.style.display="inline-block";}}' +
+    'function go(){try{var opened=window.open(url.toString(),"_top");if(opened!==null)return;}catch(err){}try{var a=document.getElementById("continueLink");if(a){a.href=url.toString();a.click();return;}}catch(err){}try{if(window.self===window.top){window.location.replace(url.toString());return;}}catch(err){}showLink();}' +
+    'go();window.setTimeout(showLink,1500);' +
     '})();' +
     '</script></body></html>';
 
@@ -15143,13 +15144,13 @@ function renderSessionRecoveryPage(requestParams) {
 
   const html =
     '<!doctype html><html><head><base target="_top"><meta charset="utf-8">' +
-    '<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#334155}.box{font-size:13px}</style>' +
-    '</head><body><div class="box">Opening PowerStik ERP...</div><script>' +
+    '<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f8fafc;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#334155}.box{font-size:13px;text-align:center}.box a{display:inline-block;margin-top:12px;color:#2563eb;font-weight:700;text-decoration:none}</style>' +
+    '</head><body><div class="box">Opening PowerStik ERP...<br><a id="continueLink" target="_top" rel="noopener" style="display:none">Continue</a></div><script>' +
     '(function(){' +
     'var base=' + JSON.stringify(webUrl) + ';' +
     'var params=' + JSON.stringify(params) + ';' +
     'function storedToken(){try{return localStorage.getItem("ERP_TOKEN")||sessionStorage.getItem("ERP_TOKEN")||localStorage.getItem("erp_token")||sessionStorage.getItem("erp_token")||"";}catch(err){return "";}}' +
-    'function go(url){try{if(window.top&&window.top.location){window.top.location.replace(url);return;}}catch(err){}try{window.location.replace(url);}catch(err){window.location.href=url;}}' +
+    'function go(targetUrl){var a=document.getElementById("continueLink");function show(){if(a){a.href=targetUrl;a.style.display="inline-block";}}try{var opened=window.open(targetUrl,"_top");if(opened!==null){window.setTimeout(show,1500);return;}}catch(err){}try{if(a){a.href=targetUrl;window.setTimeout(show,1500);a.click();return;}}catch(err){}try{if(window.self===window.top){window.location.replace(targetUrl);return;}}catch(err){}show();window.setTimeout(show,1500);}' +
     'var token=storedToken();' +
     'var url=new URL(base,window.location.href);' +
     'Object.keys(params).forEach(function(key){url.searchParams.set(key,params[key]);});' +
@@ -36565,6 +36566,10 @@ function _reportsJobProcessCostRows_(filters, allowedJobKeys) {
       productionMachine: row.production_machine || '',
       machineKey: row.machine_key || '',
       productionDate: row.production_date || '',
+      jobLengthMm: _reportsSafeNumber_(row.job_length_mm),
+      jobWidthMm: _reportsSafeNumber_(row.job_width_mm),
+      jobAreaMm2: _reportsSafeNumber_(row.job_area_mm2),
+      costAllocationBasis: row.cost_allocation_basis || '',
       processHours: _reportsSafeNumber_(row.process_hours),
       actualProcessHours: _reportsSafeNumber_(row.actual_process_hours),
       allocatedProcessHours: _reportsSafeNumber_(row.allocated_process_hours),
@@ -36598,6 +36603,7 @@ function _reportsJobProcessCostRows_(filters, allowedJobKeys) {
         'productionStage',
         'productionMachine',
         'machineKey',
+        'costAllocationBasis',
         'processHoursSource',
         'processCostStatus'
       ]) &&
@@ -36607,6 +36613,7 @@ function _reportsJobProcessCostRows_(filters, allowedJobKeys) {
         'productionStage',
         'productionMachine',
         'processHoursSource',
+        'costAllocationBasis',
         'processCostStatus'
       ]);
   });
@@ -36700,6 +36707,12 @@ function _reportsSectionJobProfitability_(token, params) {
       artworkNo: row.artwork_no || '',
       woCount: _reportsSafeNumber_(row.wo_count),
       woNumbers: row.wo_numbers || '',
+      jobLengthMm: _reportsSafeNumber_(row.job_length_mm),
+      jobWidthMm: _reportsSafeNumber_(row.job_width_mm),
+      jobAreaMm2: _reportsSafeNumber_(row.job_area_mm2),
+      totalJobAreaMm2: _reportsSafeNumber_(row.total_job_area_mm2),
+      costAllocationPct: _reportsSafeNumber_(row.cost_allocation_pct),
+      costAllocationBasis: row.cost_allocation_basis || '',
       orderQty: _reportsSafeNumber_(row.order_qty),
       unit: row.unit || '',
       rate: _reportsSafeNumber_(row.rate),
@@ -36711,6 +36724,14 @@ function _reportsSectionJobProfitability_(token, params) {
       billedValue: _reportsSafeNumber_(row.billed_value),
       rmIssuedQty: _reportsSafeNumber_(row.rm_issued_qty),
       rmIssuedValue: _reportsSafeNumber_(row.rm_issued_value),
+      rmRequiredQty: _reportsSafeNumber_(row.rm_required_qty),
+      rmNetIssuedQty: _reportsSafeNumber_(row.rm_net_issued_qty),
+      rmPendingQty: _reportsSafeNumber_(row.rm_pending_qty),
+      rmExcessQty: _reportsSafeNumber_(row.rm_excess_qty),
+      rmMaterialStatus: row.rm_material_status || '',
+      rmPendingMaterialLines: _reportsSafeNumber_(row.rm_pending_material_lines),
+      rmExcessMaterialLines: _reportsSafeNumber_(row.rm_excess_material_lines),
+      rmMaterialDetail: row.rm_material_detail || '',
       plateCost: _reportsSafeNumber_(row.plate_cost),
       dieCost: _reportsSafeNumber_(row.die_cost),
       toolingCost: _reportsSafeNumber_(row.tooling_cost),
@@ -36763,6 +36784,9 @@ function _reportsSectionJobProfitability_(token, params) {
         'jobReference',
         'artworkNo',
         'woNumbers',
+        'costAllocationBasis',
+        'rmMaterialStatus',
+        'rmMaterialDetail',
         'latestProductionStage',
         'latestProductionMachine',
         'processCostStatus',
@@ -36775,6 +36799,8 @@ function _reportsSectionJobProfitability_(token, params) {
         'billingStatus',
         'division',
         'jobType',
+        'costAllocationBasis',
+        'rmMaterialStatus',
         'processCostStatus'
       ]);
   });
@@ -36889,7 +36915,7 @@ function _reportsSectionJobProfitability_(token, params) {
       key: 'jobprofitability',
       title: 'Job Profitability Report',
       subtitle: 'Date range is based on Last Billing Date. Complete cost includes RM issued value, plate/die tooling cost, and MHR-based process cost.',
-      minWidth: 5700,
+      minWidth: 7050,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -36907,6 +36933,12 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'artworkNo', label:'Artwork No' },
         { key:'woCount', label:'WO Count', type:'number' },
         { key:'woNumbers', label:'WO Nos' },
+        { key:'jobLengthMm', label:'Job Length (mm)', type:'number' },
+        { key:'jobWidthMm', label:'Job Width (mm)', type:'number' },
+        { key:'jobAreaMm2', label:'Job Area (mm2)', type:'number' },
+        { key:'totalJobAreaMm2', label:'Total WO Job Area (mm2)', type:'number' },
+        { key:'costAllocationPct', label:'Cost Allocation %', type:'number' },
+        { key:'costAllocationBasis', label:'Cost Basis', type:'status' },
         { key:'orderQty', label:'Order Qty', type:'number' },
         { key:'unit', label:'Unit' },
         { key:'rate', label:'Rate', type:'money' },
@@ -36918,6 +36950,14 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'billedValue', label:'Billed Value', type:'money' },
         { key:'rmIssuedQty', label:'RM Issued Qty', type:'number' },
         { key:'rmIssuedValue', label:'RM Issued Value', type:'money' },
+        { key:'rmRequiredQty', label:'RM Required Qty', type:'number' },
+        { key:'rmNetIssuedQty', label:'RM Net Issued Qty', type:'number' },
+        { key:'rmPendingQty', label:'RM Pending Qty', type:'number' },
+        { key:'rmExcessQty', label:'RM Excess Qty', type:'number' },
+        { key:'rmMaterialStatus', label:'RM Material Status', type:'status' },
+        { key:'rmPendingMaterialLines', label:'RM Pending Lines', type:'number' },
+        { key:'rmExcessMaterialLines', label:'RM Excess Lines', type:'number' },
+        { key:'rmMaterialDetail', label:'RM Material Detail' },
         { key:'plateCost', label:'Plate Cost', type:'money' },
         { key:'dieCost', label:'Die Cost', type:'money' },
         { key:'toolingCost', label:'Tooling Cost', type:'money' },
@@ -36999,7 +37039,7 @@ function _reportsSectionJobProfitability_(token, params) {
       key: 'jobProcessCostLines',
       title: 'Process Cost Lines',
       subtitle: 'Actual production-entry net hours are used when all entries have start/end time; otherwise the machine/date allocation fallback is used. MHR_MISSING rows need a machine hour rate in Admin Console.',
-      minWidth: 4050,
+      minWidth: 4450,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -37011,6 +37051,10 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'category', label:'Category' },
         { key:'jobReference', label:'Job Ref' },
         { key:'productionDate', label:'Production Date', type:'date' },
+        { key:'jobLengthMm', label:'Job Length (mm)', type:'number' },
+        { key:'jobWidthMm', label:'Job Width (mm)', type:'number' },
+        { key:'jobAreaMm2', label:'Job Area (mm2)', type:'number' },
+        { key:'costAllocationBasis', label:'Cost Basis', type:'status' },
         { key:'productionStage', label:'Production Stage' },
         { key:'productionMachine', label:'Machine' },
         { key:'machineKey', label:'Machine Key' },
@@ -38417,6 +38461,7 @@ function _reportsSectionDepartmentMaterialIssues_(token, params) {
         gstValue: 0,
         totalValue: 0,
         reversalLines: 0,
+        returnLines: 0,
         items: {},
         workOrders: {},
         batches: {}
@@ -38429,6 +38474,7 @@ function _reportsSectionDepartmentMaterialIssues_(token, params) {
     bucket.gstValue += _reportsSafeNumber_(row.gstValue);
     bucket.totalValue += _reportsSafeNumber_(row.totalValue);
     if (String(row.issueRowType || '').toUpperCase() === 'REVERSAL') bucket.reversalLines += 1;
+    if (String(row.issueRowType || '').toUpperCase() === 'RETURN') bucket.returnLines += 1;
     if (row.itemCode || row.itemName) bucket.items[String(row.itemCode || row.itemName)] = true;
     if (row.woNumber) bucket.workOrders[row.woNumber] = true;
     if (row.batchNo) bucket.batches[row.batchNo] = true;
@@ -38440,6 +38486,7 @@ function _reportsSectionDepartmentMaterialIssues_(token, params) {
       department: row.department,
       issueLines: row.issueLines,
       reversalLines: row.reversalLines,
+      returnLines: row.returnLines,
       workOrderCount: Object.keys(row.workOrders).length,
       itemCount: Object.keys(row.items).length,
       batchCount: Object.keys(row.batches).length,
@@ -38459,6 +38506,7 @@ function _reportsSectionDepartmentMaterialIssues_(token, params) {
     metrics: {
       issueLines: rows.length,
       reversalLines: rows.filter(function(row){ return String(row.issueRowType || '').toUpperCase() === 'REVERSAL'; }).length,
+      returnLines: rows.filter(function(row){ return String(row.issueRowType || '').toUpperCase() === 'RETURN'; }).length,
       departments: summaryRows.length,
       basicValue: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.basicValue); }, 0), 2),
       gstValue: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.gstValue); }, 0), 2),
@@ -38467,11 +38515,12 @@ function _reportsSectionDepartmentMaterialIssues_(token, params) {
     tables: [{
       key: 'departmentIssueSummary',
       title: 'Department-wise Material Issue Summary',
-      subtitle: 'Summary of posted inventory ISSUE ledger rows. Total Value is GST-inclusive using item master GST %.',
+      subtitle: 'Summary of posted inventory issue rows net of WO returns and issue reversals. Total Value is GST-inclusive using item master GST %.',
       minWidth: 1180,
       columns: [
         { key:'department', label:'Department' },
         { key:'issueLines', label:'Issue Lines', type:'number' },
+        { key:'returnLines', label:'Return Lines', type:'number' },
         { key:'reversalLines', label:'Reversal Lines', type:'number' },
         { key:'workOrderCount', label:'Work Orders', type:'number' },
         { key:'itemCount', label:'Items', type:'number' },
@@ -38485,7 +38534,7 @@ function _reportsSectionDepartmentMaterialIssues_(token, params) {
     }, {
       key: 'materialIssueLines',
       title: 'Material Issue Line Details',
-      subtitle: 'One row per posted inventory issue with work order, SO, item, batch, basic value, GST, and GST-inclusive value.',
+      subtitle: 'One row per posted inventory issue, WO return, or issue reversal with work order, SO, item, batch, basic value, GST, and GST-inclusive value.',
       minWidth: 3100,
       columns: [
         { key:'issueDate', label:'Issue Date', type:'date' },
