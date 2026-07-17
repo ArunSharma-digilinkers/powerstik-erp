@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict V2yMhid4bTbXcu6FZ74Bgi0hdLlwsRAcfHTbmkp78V3jemDahLH4wKZY3ywAwpl
+\restrict i4UGB41ckAh1iLoa6fbkqZu9vy3P5uiibIDkCgHn3jE0H72IgdihdyGqMdqjBaM
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.3
@@ -283,7 +283,8 @@ CREATE TYPE realtime.equality_op AS ENUM (
 CREATE TYPE realtime.user_defined_filter AS (
 	column_name text,
 	op realtime.equality_op,
-	value text
+	value text,
+	negate boolean
 );
 
 
@@ -1742,6 +1743,81 @@ $$;
 
 
 --
+-- Name: bulk_update_item_dimensions(jsonb, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.bulk_update_item_dimensions(p_rows jsonb, p_updated_by text DEFAULT NULL::text) RETURNS jsonb
+    LANGUAGE plpgsql
+    AS $$
+declare
+  v_row jsonb;
+  v_item public.items%rowtype;
+  v_length numeric(12,3);
+  v_width numeric(12,3);
+  v_height numeric(12,3);
+  v_unit text;
+  v_display_length numeric;
+  v_display_width numeric;
+  v_display_height numeric;
+  v_updated integer := 0;
+begin
+  if jsonb_typeof(p_rows) <> 'array' or jsonb_array_length(p_rows) = 0 then
+    raise exception 'No dimension changes supplied';
+  end if;
+  if jsonb_array_length(p_rows) > 250 then
+    raise exception 'A maximum of 250 item dimensions can be saved at once';
+  end if;
+
+  for v_row in select value from jsonb_array_elements(p_rows)
+  loop
+    v_length := nullif(v_row->>'length_mm', '')::numeric;
+    v_width := nullif(v_row->>'width_mm', '')::numeric;
+    v_height := nullif(v_row->>'height_mm', '')::numeric;
+    v_unit := case upper(coalesce(nullif(v_row->>'dimension_unit', ''), 'MM'))
+      when 'IN' then 'INCH' when 'INCHES' then 'INCH' when 'INCH' then 'INCH' when 'CM' then 'CM' else 'MM' end;
+
+    if coalesce(v_length, 0) <= 0 or coalesce(v_width, 0) <= 0 then
+      raise exception 'Positive length and width are required for %', v_row->>'item_code';
+    end if;
+
+    select * into v_item from public.items where item_code = trim(v_row->>'item_code') for update;
+    if v_item.id is null then raise exception 'Item not found: %', v_row->>'item_code'; end if;
+
+    insert into public.item_dimension_audit (
+      item_code, old_length_mm, old_width_mm, old_height_mm, old_dimension_unit,
+      new_length_mm, new_width_mm, new_height_mm, new_dimension_unit, changed_by
+    ) values (
+      v_item.item_code, v_item.length_mm, v_item.width_mm, v_item.height_mm, v_item.dimension_unit,
+      v_length, v_width, v_height, v_unit, p_updated_by
+    );
+
+    update public.items set
+      length_mm = v_length, width_mm = v_width, height_mm = v_height, dimension_unit = v_unit
+    where id = v_item.id;
+
+    v_display_length := case v_unit when 'INCH' then round(v_length / 25.4, 3) when 'CM' then round(v_length / 10, 3) else v_length end;
+    v_display_width := case v_unit when 'INCH' then round(v_width / 25.4, 3) when 'CM' then round(v_width / 10, 3) else v_width end;
+    v_display_height := case when v_height is null then null when v_unit = 'INCH' then round(v_height / 25.4, 3) when v_unit = 'CM' then round(v_height / 10, 3) else v_height end;
+
+    update public.item_bom_revisions
+    set item_info_json = coalesce(item_info_json, '{}'::jsonb) || jsonb_build_object(
+      'dimensionUom', v_unit,
+      'length', v_display_length,
+      'width', v_display_width,
+      'height', v_display_height,
+      'dims', concat_ws('x', v_display_length::text, v_display_width::text, v_display_height::text)
+    ), updated_by = p_updated_by
+    where item_code = v_item.item_code and is_current = true;
+
+    v_updated := v_updated + 1;
+  end loop;
+
+  return jsonb_build_object('ok', true, 'updated', v_updated);
+end;
+$$;
+
+
+--
 -- Name: create_item_bom_revision(text, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2413,6 +2489,74 @@ $$;
 
 
 --
+-- Name: inv_record_wo_excess_issue_review(text, text, text, numeric, numeric, numeric, numeric, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.inv_record_wo_excess_issue_review(p_wo_no text, p_material_key text, p_action_type text, p_excess_qty numeric DEFAULT 0, p_excess_pct numeric DEFAULT 0, p_required_qty numeric DEFAULT 0, p_net_issued_qty numeric DEFAULT 0, p_remarks text DEFAULT ''::text, p_reviewed_by text DEFAULT ''::text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+declare
+  v_action text := upper(trim(coalesce(p_action_type, '')));
+  v_id uuid;
+begin
+  if trim(coalesce(p_wo_no, '')) = '' then
+    raise exception 'WO number is required.';
+  end if;
+
+  if trim(coalesce(p_material_key, '')) = '' then
+    raise exception 'Material key is required.';
+  end if;
+
+  if v_action not in ('ROUNDING_WRITE_OFF', 'REISSUE_REJECTION', 'RETURN_REQUIRED', 'COMMENT') then
+    raise exception 'Invalid review action: %', p_action_type;
+  end if;
+
+  if v_action = 'ROUNDING_WRITE_OFF' and coalesce(p_excess_pct, 0::numeric) > 5.0001 then
+    raise exception 'Write off is allowed only up to 5 percent excess. Current excess is % percent.', round(coalesce(p_excess_pct, 0::numeric), 2);
+  end if;
+
+  if v_action in ('ROUNDING_WRITE_OFF', 'REISSUE_REJECTION') and trim(coalesce(p_remarks, '')) = '' then
+    raise exception 'Remarks are required for this review action.';
+  end if;
+
+  insert into public.inv_wo_excess_issue_reviews (
+    wo_no,
+    material_key,
+    action_type,
+    excess_qty_snapshot,
+    excess_pct_snapshot,
+    required_qty_snapshot,
+    net_issued_qty_snapshot,
+    remarks,
+    reviewed_by
+  )
+  values (
+    trim(coalesce(p_wo_no, '')),
+    trim(coalesce(p_material_key, '')),
+    v_action,
+    round(coalesce(p_excess_qty, 0::numeric), 4),
+    round(coalesce(p_excess_pct, 0::numeric), 4),
+    round(coalesce(p_required_qty, 0::numeric), 4),
+    round(coalesce(p_net_issued_qty, 0::numeric), 4),
+    trim(coalesce(p_remarks, '')),
+    trim(coalesce(p_reviewed_by, ''))
+  )
+  returning id into v_id;
+
+  return jsonb_build_object('ok', true, 'reviewId', v_id);
+end;
+$$;
+
+
+--
+-- Name: FUNCTION inv_record_wo_excess_issue_review(p_wo_no text, p_material_key text, p_action_type text, p_excess_qty numeric, p_excess_pct numeric, p_required_qty numeric, p_net_issued_qty numeric, p_remarks text, p_reviewed_by text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.inv_record_wo_excess_issue_review(p_wo_no text, p_material_key text, p_action_type text, p_excess_qty numeric, p_excess_pct numeric, p_required_qty numeric, p_net_issued_qty numeric, p_remarks text, p_reviewed_by text) IS 'Appends an audit review decision for a WO excess issue row. Does not change stock or inventory ledger.';
+
+
+--
 -- Name: inv_replenishment_snapshot_ui(text, text, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2711,6 +2855,118 @@ $$;
 
 
 --
+-- Name: inv_wo_excess_issue_review_ui(text, date, date, text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.inv_wo_excess_issue_review_ui(p_search text DEFAULT NULL::text, p_date_from date DEFAULT NULL::date, p_date_to date DEFAULT NULL::date, p_review_filter text DEFAULT 'PENDING'::text, p_limit integer DEFAULT 500000, p_offset integer DEFAULT 0) RETURNS TABLE(wo_date date, wo_no text, job_card_no text, sales_orders text, client text, product text, artwork_no text, department text, material_key text, material text, gsm text, deckle_mm numeric, cut_mm numeric, uom text, required_qty numeric, issued_qty numeric, returned_qty numeric, net_issued_qty numeric, pending_qty numeric, excess_qty numeric, excess_pct numeric, within_writeoff_limit boolean, status text, issue_batches text, return_batches text, last_issue_date timestamp with time zone, last_return_date timestamp with time zone, production_rejected_qty numeric, production_rejection_hint text, review_action text, review_status text, review_remarks text, reviewed_by text, reviewed_at timestamp with time zone)
+    LANGUAGE sql STABLE
+    AS $$
+  with base as (
+    select *
+    from public.inv_wo_issue_variance_export_ui(
+      p_search,
+      p_date_from,
+      p_date_to,
+      greatest(coalesce(p_limit, 500000), 1),
+      greatest(coalesce(p_offset, 0), 0)
+    )
+  ),
+  production_rejection as (
+    select
+      wo.wo_number as wo_no,
+      sum(coalesce(pe.rejected_qty, 0::numeric))::numeric as rejected_qty
+    from public.work_orders wo
+    join public.production_entries pe on pe.wo_id = wo.id
+    where coalesce(pe.rejected_qty, 0::numeric) > 0
+    group by wo.wo_number
+  ),
+  latest_review as (
+    select distinct on (r.wo_no, r.material_key)
+      r.wo_no,
+      r.material_key,
+      r.action_type,
+      r.remarks,
+      r.reviewed_by,
+      r.reviewed_at
+    from public.inv_wo_excess_issue_reviews r
+    order by r.wo_no, r.material_key, r.reviewed_at desc, r.id desc
+  ),
+  enriched as (
+    select
+      b.*,
+      case
+        when coalesce(b.required_qty, 0::numeric) > 0
+          then round((coalesce(b.excess_qty, 0::numeric) / nullif(b.required_qty, 0::numeric) * 100.0)::numeric, 4)
+        else 0::numeric
+      end as excess_pct,
+      coalesce(pr.rejected_qty, 0::numeric) as production_rejected_qty,
+      lr.action_type as review_action,
+      lr.remarks as review_remarks,
+      lr.reviewed_by,
+      lr.reviewed_at
+    from base b
+    left join production_rejection pr on pr.wo_no = b.wo_no
+    left join latest_review lr on lr.wo_no = b.wo_no and lr.material_key = b.material_key
+  )
+  select
+    e.wo_date,
+    e.wo_no,
+    e.job_card_no,
+    e.sales_orders,
+    e.client,
+    e.product,
+    e.artwork_no,
+    e.department,
+    e.material_key,
+    e.material,
+    e.gsm,
+    e.deckle_mm,
+    e.cut_mm,
+    e.uom,
+    round(coalesce(e.required_qty, 0::numeric)::numeric, 2) as required_qty,
+    round(coalesce(e.issued_qty, 0::numeric)::numeric, 2) as issued_qty,
+    round(coalesce(e.returned_qty, 0::numeric)::numeric, 2) as returned_qty,
+    round(coalesce(e.net_issued_qty, 0::numeric)::numeric, 2) as net_issued_qty,
+    round(coalesce(e.pending_qty, 0::numeric)::numeric, 2) as pending_qty,
+    round(coalesce(e.excess_qty, 0::numeric)::numeric, 2) as excess_qty,
+    round(coalesce(e.excess_pct, 0::numeric)::numeric, 2) as excess_pct,
+    coalesce(e.excess_pct, 0::numeric) <= 5.0 as within_writeoff_limit,
+    coalesce(e.status, 'EXCESS') as status,
+    coalesce(e.issue_batches, '') as issue_batches,
+    coalesce(e.return_batches, '') as return_batches,
+    e.last_issue_date,
+    e.last_return_date,
+    round(coalesce(e.production_rejected_qty, 0::numeric)::numeric, 2) as production_rejected_qty,
+    case when coalesce(e.production_rejected_qty, 0::numeric) > 0 then 'Production rejection recorded' else '' end as production_rejection_hint,
+    coalesce(e.review_action, '') as review_action,
+    case
+      when e.review_action in ('ROUNDING_WRITE_OFF', 'REISSUE_REJECTION') then 'REVIEWED'
+      when e.review_action = 'RETURN_REQUIRED' then 'RETURN_REQUIRED'
+      when e.review_action = 'COMMENT' then 'PENDING'
+      else 'PENDING'
+    end as review_status,
+    coalesce(e.review_remarks, '') as review_remarks,
+    coalesce(e.reviewed_by, '') as reviewed_by,
+    e.reviewed_at
+  from enriched e
+  where (
+    upper(coalesce(p_review_filter, 'PENDING')) in ('', 'ALL')
+    or (upper(coalesce(p_review_filter, 'PENDING')) = 'PENDING' and coalesce(e.review_action, '') not in ('ROUNDING_WRITE_OFF', 'REISSUE_REJECTION'))
+    or (upper(coalesce(p_review_filter, 'PENDING')) = 'REVIEWED' and coalesce(e.review_action, '') in ('ROUNDING_WRITE_OFF', 'REISSUE_REJECTION'))
+    or (upper(coalesce(p_review_filter, 'PENDING')) = 'RETURN_REQUIRED' and coalesce(e.review_action, '') = 'RETURN_REQUIRED')
+  )
+  order by e.last_issue_date desc nulls last, e.wo_date desc nulls last, e.wo_no desc, e.material asc, e.material_key asc;
+$$;
+
+
+--
+-- Name: FUNCTION inv_wo_excess_issue_review_ui(p_search text, p_date_from date, p_date_to date, p_review_filter text, p_limit integer, p_offset integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.inv_wo_excess_issue_review_ui(p_search text, p_date_from date, p_date_to date, p_review_filter text, p_limit integer, p_offset integer) IS 'Returns current WO excess issue rows with manual review status, 5 percent write-off eligibility, and production rejection hints.';
+
+
+--
 -- Name: inv_wo_issue_variance_export_ui(text, date, date, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2976,6 +3232,122 @@ CREATE FUNCTION public.inv_work_orders_for_issue_ui() RETURNS TABLE(wo_no text, 
   from public.inv_wo_issue_requirement_v r
   join public.inv_wo_issue_status_v s on s.wo_number = r.wo_number
   order by r.wo_number desc, r.item_label asc, r.material_key asc;
+$$;
+
+
+--
+-- Name: item_master_dimension_to_mm(numeric, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.item_master_dimension_to_mm(p_value numeric, p_unit text) RETURNS numeric
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select case upper(coalesce(p_unit, 'MM'))
+    when 'IN' then round(p_value * 25.4, 3)
+    when 'INCH' then round(p_value * 25.4, 3)
+    when 'INCHES' then round(p_value * 25.4, 3)
+    when 'CM' then round(p_value * 10, 3)
+    else round(p_value, 3)
+  end;
+$$;
+
+
+--
+-- Name: item_master_register(text, text, text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.item_master_register(p_search text DEFAULT NULL::text, p_status text DEFAULT 'all'::text, p_dimension_status text DEFAULT 'all'::text, p_offset integer DEFAULT 0, p_limit integer DEFAULT 100) RETURNS jsonb
+    LANGUAGE sql STABLE
+    AS $$
+with prepared as (
+  select
+    i.item_code,
+    i.item_name,
+    i.category,
+    i.product_category,
+    i.unit,
+    i.active,
+    i.manufacturing_enabled,
+    i.current_revision_no,
+    i.item_lifecycle_status,
+    i.length_mm,
+    i.width_mm,
+    i.height_mm,
+    coalesce(nullif(upper(i.dimension_unit), ''), 'MM') as dimension_unit,
+    case
+      when coalesce(i.length_mm, 0) > 0 and coalesce(i.width_mm, 0) > 0 then 'COMPLETE'
+      else 'MISSING'
+    end as dimension_status,
+    case
+      when r.id is null or coalesce(public.item_master_try_numeric(r.item_info_json->>'length'), 0) <= 0 or coalesce(public.item_master_try_numeric(r.item_info_json->>'width'), 0) <= 0 then false
+      when coalesce(i.length_mm, 0) <= 0 or coalesce(i.width_mm, 0) <= 0 then false
+      else abs(i.length_mm - public.item_master_dimension_to_mm(public.item_master_try_numeric(r.item_info_json->>'length'), r.item_info_json->>'dimensionUom')) > 0.01
+        or abs(i.width_mm - public.item_master_dimension_to_mm(public.item_master_try_numeric(r.item_info_json->>'width'), r.item_info_json->>'dimensionUom')) > 0.01
+    end as dimension_conflict
+  from public.items i
+  left join lateral (
+    select br.id, br.item_info_json
+    from public.item_bom_revisions br
+    where br.item_code = i.item_code and br.is_current = true
+    order by br.revision_no desc
+    limit 1
+  ) r on true
+), filtered as (
+  select *
+  from prepared p
+  where
+    (coalesce(nullif(lower(p_status), ''), 'all') = 'all'
+      or (lower(p_status) = 'active' and p.active = true)
+      or (lower(p_status) = 'inactive' and p.active = false))
+    and (coalesce(nullif(trim(p_search), ''), '') = ''
+      or p.item_code ilike '%' || trim(p_search) || '%'
+      or p.item_name ilike '%' || trim(p_search) || '%'
+      or coalesce(p.category, '') ilike '%' || trim(p_search) || '%'
+      or coalesce(p.product_category, '') ilike '%' || trim(p_search) || '%')
+    and (coalesce(nullif(lower(p_dimension_status), ''), 'all') = 'all'
+      or lower(p.dimension_status) = lower(p_dimension_status)
+      or (lower(p_dimension_status) = 'conflict' and p.dimension_conflict = true))
+), totals as (
+  select
+    count(*)::integer as total,
+    count(*) filter (where active)::integer as active,
+    count(*) filter (where current_revision_no is not null)::integer as with_bom,
+    count(*) filter (where dimension_status = 'MISSING')::integer as missing_dimensions,
+    count(*) filter (where dimension_conflict)::integer as dimension_conflicts
+  from filtered
+), page_rows as (
+  select * from filtered
+  order by item_name asc, item_code asc
+  offset greatest(coalesce(p_offset, 0), 0)
+  limit least(greatest(coalesce(p_limit, 100), 1), 250)
+)
+select jsonb_build_object(
+  'rows', coalesce((select jsonb_agg(to_jsonb(page_rows) order by item_name, item_code) from page_rows), '[]'::jsonb),
+  'total', totals.total,
+  'summary', jsonb_build_object(
+    'total', totals.total,
+    'active', totals.active,
+    'withBom', totals.with_bom,
+    'missingDimensions', totals.missing_dimensions,
+    'dimensionConflicts', totals.dimension_conflicts
+  )
+)
+from totals;
+$$;
+
+
+--
+-- Name: item_master_try_numeric(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.item_master_try_numeric(p_value text) RETURNS numeric
+    LANGUAGE plpgsql IMMUTABLE
+    AS $$
+begin
+  return nullif(trim(p_value), '')::numeric;
+exception when invalid_text_representation then
+  return null;
+end;
 $$;
 
 
@@ -4578,39 +4950,105 @@ $$;
 
 
 --
+-- Name: check_equality_op(realtime.equality_op, regtype, text, text, boolean); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ regtype, val_1 text, val_2 text, negate boolean) RETURNS boolean
+    LANGUAGE plpgsql STABLE
+    AS $$
+declare
+    op_symbol text;
+    res boolean;
+begin
+    -- IS DISTINCT FROM / IS NOT DISTINCT FROM: infix, both sides typed literals
+    if op = 'isdistinct' then
+        execute format(
+            'select %L::%s %s %L::%s',
+            val_1,
+            type_::text,
+            case when negate then 'IS NOT DISTINCT FROM' else 'IS DISTINCT FROM' end,
+            val_2,
+            type_::text
+        ) into res;
+        return res;
+    end if;
+
+    -- IS requires a keyword RHS (NULL, TRUE, FALSE, UNKNOWN), not a typed literal
+    if op = 'is' then
+        if val_2 not in ('null', 'true', 'false', 'unknown') then
+            raise exception 'invalid value for is filter: must be null, true, false, or unknown';
+        end if;
+        execute format(
+            'select %L::%s %s %s',
+            val_1,
+            type_::text,
+            case when negate then 'IS NOT' else 'IS' end,
+            upper(val_2)
+        ) into res;
+        return res;
+    end if;
+
+    op_symbol = case
+        when op = 'eq'    then '='
+        when op = 'neq'   then '!='
+        when op = 'lt'    then '<'
+        when op = 'lte'   then '<='
+        when op = 'gt'    then '>'
+        when op = 'gte'   then '>='
+        when op = 'in'    then '= any'
+        when op = 'like'   then 'LIKE'
+        when op = 'ilike'  then 'ILIKE'
+        when op = 'match'  then '~'
+        when op = 'imatch' then '~*'
+        else null
+    end;
+
+    if op_symbol is null then
+        raise exception 'unsupported equality operator: %', op::text;
+    end if;
+
+    execute format(
+        'select %L::%s %s (%L::%s)',
+        val_1,
+        type_::text,
+        op_symbol,
+        val_2,
+        case when op = 'in' then type_::text || '[]' else type_::text end
+    ) into res;
+
+    return case when negate then not res else res end;
+end;
+$$;
+
+
+--
 -- Name: is_visible_through_filters(realtime.wal_column[], realtime.user_defined_filter[]); Type: FUNCTION; Schema: realtime; Owner: -
 --
 
 CREATE FUNCTION realtime.is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]) RETURNS boolean
-    LANGUAGE sql IMMUTABLE
-    AS $_$
-/*
-Should the record be visible (true) or filtered out (false) after *filters* are applied
-*/
+    LANGUAGE sql STABLE
+    AS $$
     select
-        -- Default to allowed when no filters present
-        $2 is null -- no filters. this should not happen because subscriptions has a default
-        or array_length($2, 1) is null -- array length of an empty array is null
-        or bool_and(
-            coalesce(
+        filters is null
+        or array_length(filters, 1) is null
+        or coalesce(
+            count(col.name) = count(1)
+            and sum(
                 realtime.check_equality_op(
                     op:=f.op,
-                    type_:=coalesce(
-                        col.type_oid::regtype, -- null when wal2json version <= 2.4
-                        col.type_name::regtype
-                    ),
-                    -- cast jsonb to text
+                    type_:=coalesce(col.type_oid::regtype, col.type_name::regtype),
                     val_1:=col.value #>> '{}',
-                    val_2:=f.value
-                ),
-                false -- if null, filter does not match
-            )
+                    val_2:=f.value,
+                    negate:=coalesce(f.negate, false)
+                )::int
+            ) filter (where col.name is not null) = count(col.name),
+            false
         )
     from
         unnest(filters) f
-        join unnest(columns) col
+        left join unnest(columns) col
             on f.column_name = col.name;
-$_$;
+$$;
 
 
 --
@@ -4808,7 +5246,48 @@ begin
             if coalesce(jsonb_array_length(in_val), 0) > 100 then
                 raise exception 'too many values for `in` filter. Maximum 100';
             end if;
+        elsif filter.op = 'is'::realtime.equality_op then
+            -- `is` requires a keyword RHS rather than a typed literal
+            if filter.value not in ('null', 'true', 'false', 'unknown') then
+                raise exception 'invalid value for is filter: must be null, true, false, or unknown';
+            end if;
+            -- IS NULL works for any type, but IS TRUE/FALSE/UNKNOWN require a boolean
+            -- operand. Reject the non-null keywords on non-boolean columns here so they
+            -- don't abort apply_rls at WAL time.
+            if filter.value <> 'null' and col_type <> 'boolean'::regtype then
+                raise exception 'is % filter requires a boolean column, got %', filter.value, col_type::text;
+            end if;
+        elsif filter.op in ('like'::realtime.equality_op, 'ilike'::realtime.equality_op) then
+            -- like/ilike apply the text pattern operator (~~); reject column types that
+            -- have no such operator instead of failing at WAL time
+            if not exists (
+                select 1 from pg_catalog.pg_operator
+                where oprname = '~~' and oprleft = col_type
+            ) then
+                raise exception 'operator % requires a text-compatible column type, got %', filter.op::text, col_type::text;
+            end if;
+        elsif filter.op in ('match'::realtime.equality_op, 'imatch'::realtime.equality_op) then
+            -- match/imatch apply the regex operators ~ / ~*; reject column types that have
+            -- no such operator (e.g. integer) instead of failing at WAL time, mirroring the
+            -- like/ilike guard above.
+            if not exists (
+                select 1 from pg_catalog.pg_operator
+                where oprname = case when filter.op = 'imatch'::realtime.equality_op then '~*' else '~' end
+                  and oprleft = col_type
+                  and oprright = col_type
+                  and oprresult = 'boolean'::regtype
+            ) then
+                raise exception 'operator % requires a text-compatible column type, got %', filter.op::text, col_type::text;
+            end if;
+            -- validate the regex eagerly so a bad pattern is rejected here, not inside
+            -- apply_rls where it would abort the WAL stream for the entity
+            begin
+                perform '' ~ filter.value;
+            exception when others then
+                raise exception 'invalid regular expression for % filter: %', filter.op::text, sqlerrm;
+            end;
         else
+            -- eq/neq/lt/lte/gt/gte: value must be coercable to the type
             perform realtime.cast(filter.value, col_type);
         end if;
     end loop;
@@ -4821,8 +5300,10 @@ begin
         end loop;
     end if;
 
+    -- Apply consistent order to filters so the unique constraint can't be tricked by a
+    -- different filter order. negate is part of the sort key.
     new.filters = coalesce(
-        array_agg(f order by f.column_name, f.op, f.value),
+        array_agg(f order by f.column_name, f.op, f.value, f.negate),
         '{}'
     ) from unnest(new.filters) f;
 
@@ -7331,6 +7812,48 @@ CREATE VIEW public.inv_issue_register_v AS
 
 
 --
+-- Name: inv_item_purchase_uom_rule_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inv_item_purchase_uom_rule_audit (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    rule_id uuid,
+    item_id uuid,
+    item_code text NOT NULL,
+    action text NOT NULL,
+    before_data jsonb,
+    after_data jsonb,
+    changed_by text,
+    changed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: inv_item_purchase_uom_rules; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inv_item_purchase_uom_rules (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    item_id uuid,
+    item_code text NOT NULL,
+    stock_uom text NOT NULL,
+    purchase_uom text NOT NULL,
+    conversion_type text DEFAULT 'SAME_AS_STOCK'::text NOT NULL,
+    fixed_factor numeric(18,6),
+    width_mm numeric(12,3),
+    length_mm numeric(12,3),
+    height_mm numeric(12,3),
+    gsm numeric(12,3),
+    notes text,
+    active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text,
+    CONSTRAINT inv_item_purchase_uom_rules_conversion_chk CHECK ((conversion_type = ANY (ARRAY['SAME_AS_STOCK'::text, 'FIXED_FACTOR'::text, 'AREA_WIDTH'::text, 'SHEET_AREA'::text, 'WEIGHT_GSM'::text])))
+);
+
+
+--
 -- Name: inv_item_sequences; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -7883,6 +8406,34 @@ CREATE VIEW public.inv_stock_reconciled_v WITH (security_invoker='on') AS
      JOIN public.inv_items i ON ((i.id = k.item_id)))
      LEFT JOIN ledger_balance lb ON (((lb.item_id = k.item_id) AND (lb.location = k.location))))
      LEFT JOIN lot_balance lotb ON (((lotb.item_id = k.item_id) AND (lotb.location = k.location))));
+
+
+--
+-- Name: inv_wo_excess_issue_reviews; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.inv_wo_excess_issue_reviews (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    wo_no text NOT NULL,
+    material_key text NOT NULL,
+    action_type text NOT NULL,
+    excess_qty_snapshot numeric(18,4) DEFAULT 0 NOT NULL,
+    excess_pct_snapshot numeric(10,4) DEFAULT 0 NOT NULL,
+    required_qty_snapshot numeric(18,4) DEFAULT 0 NOT NULL,
+    net_issued_qty_snapshot numeric(18,4) DEFAULT 0 NOT NULL,
+    remarks text DEFAULT ''::text NOT NULL,
+    reviewed_by text DEFAULT ''::text NOT NULL,
+    reviewed_at timestamp with time zone DEFAULT now() NOT NULL,
+    source text DEFAULT 'INVENTORY_WO_EXCESS'::text NOT NULL,
+    CONSTRAINT inv_wo_excess_issue_reviews_action_chk CHECK ((action_type = ANY (ARRAY['ROUNDING_WRITE_OFF'::text, 'REISSUE_REJECTION'::text, 'RETURN_REQUIRED'::text, 'COMMENT'::text])))
+);
+
+
+--
+-- Name: TABLE inv_wo_excess_issue_reviews; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.inv_wo_excess_issue_reviews IS 'Audit log of manual review decisions for WO excess material issue rows. Does not alter inventory ledger or stock.';
 
 
 --
@@ -8830,6 +9381,26 @@ CREATE SEQUENCE public.item_code_seq
 
 
 --
+-- Name: item_dimension_audit; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.item_dimension_audit (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    item_code text NOT NULL,
+    old_length_mm numeric(12,3),
+    old_width_mm numeric(12,3),
+    old_height_mm numeric(12,3),
+    old_dimension_unit text,
+    new_length_mm numeric(12,3) NOT NULL,
+    new_width_mm numeric(12,3) NOT NULL,
+    new_height_mm numeric(12,3),
+    new_dimension_unit text NOT NULL,
+    changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    changed_by text
+);
+
+
+--
 -- Name: item_sequences; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -9391,6 +9962,24 @@ CREATE TABLE public.production_fg_completion_log (
     remarks text,
     posted_at timestamp with time zone DEFAULT now() NOT NULL,
     posted_by text
+);
+
+
+--
+-- Name: production_machine_operators; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.production_machine_operators (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    machine_name text NOT NULL,
+    operator_name text NOT NULL,
+    operator_code text,
+    active boolean DEFAULT true NOT NULL,
+    sort_order integer DEFAULT 0 NOT NULL,
+    notes text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_by text
 );
 
 
@@ -11612,6 +12201,50 @@ COMMENT ON VIEW public.v_flexo_work_order_jobs IS 'Fast Flexo Work Order queue: 
 
 
 --
+-- Name: v_inv_item_purchase_uom_setup; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_inv_item_purchase_uom_setup WITH (security_invoker='on') AS
+ SELECT (i.id)::text AS item_id,
+    i.item_code,
+    i.item_name,
+    COALESCE(i.category, ''::text) AS category,
+    COALESCE(i.department, ''::text) AS department,
+    COALESCE(i.active, true) AS item_active,
+    COALESCE(i.uom, ''::text) AS stock_uom,
+    COALESCE(i.size_profile, ''::text) AS size_profile,
+    COALESCE(i.rm_type, ''::text) AS rm_type,
+    i.length_mm,
+    i.width_mm,
+    i.height_mm,
+    COALESCE(i.length_unit, i.width_unit, i.height_unit, 'MM'::text) AS dimension_unit,
+    i.gsm,
+    COALESCE(r.purchase_uom, i.uom, ''::text) AS purchase_uom,
+    COALESCE(r.conversion_type, 'SAME_AS_STOCK'::text) AS conversion_type,
+    r.fixed_factor,
+    COALESCE(r.width_mm, i.width_mm) AS rule_width_mm,
+    COALESCE(r.length_mm, i.length_mm) AS rule_length_mm,
+    COALESCE(r.height_mm, i.height_mm) AS rule_height_mm,
+    COALESCE(r.gsm, i.gsm) AS rule_gsm,
+    COALESCE(r.notes, ''::text) AS rule_notes,
+    COALESCE(r.active, true) AS rule_active,
+    r.updated_at,
+    COALESCE(r.updated_by, ''::text) AS updated_by,
+        CASE
+            WHEN (r.id IS NULL) THEN 'MISSING'::text
+            WHEN (COALESCE(r.purchase_uom, ''::text) = ''::text) THEN 'MISSING'::text
+            WHEN (COALESCE(r.conversion_type, ''::text) = ''::text) THEN 'MISSING'::text
+            WHEN ((r.conversion_type = 'FIXED_FACTOR'::text) AND (COALESCE(r.fixed_factor, (0)::numeric) <= (0)::numeric)) THEN 'INCOMPLETE'::text
+            WHEN ((r.conversion_type = ANY (ARRAY['AREA_WIDTH'::text, 'WEIGHT_GSM'::text])) AND (COALESCE(r.width_mm, i.width_mm, (0)::numeric) <= (0)::numeric)) THEN 'INCOMPLETE'::text
+            WHEN ((r.conversion_type = 'SHEET_AREA'::text) AND ((COALESCE(r.width_mm, i.width_mm, (0)::numeric) <= (0)::numeric) OR (COALESCE(r.length_mm, i.length_mm, (0)::numeric) <= (0)::numeric))) THEN 'INCOMPLETE'::text
+            WHEN ((r.conversion_type = 'WEIGHT_GSM'::text) AND (COALESCE(r.gsm, i.gsm, (0)::numeric) <= (0)::numeric)) THEN 'INCOMPLETE'::text
+            ELSE 'COMPLETE'::text
+        END AS setup_status
+   FROM (public.inv_items i
+     LEFT JOIN public.inv_item_purchase_uom_rules r ON ((upper(r.item_code) = upper(i.item_code))));
+
+
+--
 -- Name: v_inventory_item_purchase_rate_history; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -12819,11 +13452,20 @@ CREATE VIEW public.v_production_stage_queue_fast AS
             upper(COALESCE(r.status, ''::text)) AS routing_status,
             COALESCE(pt.gross_produced_qty, (0)::numeric) AS gross_produced_qty,
             COALESCE(pt.ok_produced_qty, (0)::numeric) AS ok_produced_qty,
+            corr_anchor.routing_id AS corr_top_sheet_anchor_routing_id,
+            COALESCE(corr_anchor.ok_produced_qty, (0)::numeric) AS corr_top_sheet_anchor_ok_qty,
             jm.stage1_plan_qty,
             row_number() OVER (PARTITION BY r.wo_id ORDER BY r.sequence_no, r.id) AS rn
-           FROM ((public.work_order_routing r
+           FROM (((public.work_order_routing r
              JOIN job_meta jm ON ((jm.wo_id = r.wo_id)))
              LEFT JOIN production_totals pt ON ((pt.routing_id = r.id)))
+             LEFT JOIN LATERAL ( SELECT anchor_r.id AS routing_id,
+                    COALESCE(anchor_pt.ok_produced_qty, (0)::numeric) AS ok_produced_qty
+                   FROM (public.work_order_routing anchor_r
+                     LEFT JOIN production_totals anchor_pt ON ((anchor_pt.routing_id = anchor_r.id)))
+                  WHERE ((jm.department_category = 'CORRUGATION'::text) AND (anchor_r.wo_id = r.wo_id) AND ((anchor_r.sequence_no < r.sequence_no) OR ((anchor_r.sequence_no = r.sequence_no) AND ((anchor_r.id)::text < (r.id)::text))) AND ((upper(COALESCE(NULLIF(anchor_r.process_name, ''::text), NULLIF(anchor_r.department, ''::text), ''::text)) ~~ '%PRINT%'::text) OR (upper(COALESCE(NULLIF(anchor_r.process_name, ''::text), NULLIF(anchor_r.department, ''::text), ''::text)) ~~ '%LAMINAT%'::text) OR (upper(COALESCE(NULLIF(anchor_r.process_name, ''::text), NULLIF(anchor_r.department, ''::text), ''::text)) ~~ '%COAT%'::text)))
+                  ORDER BY anchor_r.sequence_no DESC, anchor_r.id DESC
+                 LIMIT 1) corr_anchor ON (true))
           WHERE (upper(COALESCE(NULLIF(r.process_name, ''::text), NULLIF(r.department, ''::text), 'PROCESS'::text)) <> ALL (ARRAY['PACKING'::text, 'DISPATCH'::text, 'CUTTING PRE'::text, 'CUTTING POST'::text, 'QC'::text]))
         ), stage_calc AS (
          SELECT rb.routing_id,
@@ -12890,6 +13532,11 @@ CREATE VIEW public.v_production_stage_queue_fast AS
             rb.gross_produced_qty AS produced_qty,
             rb.ok_produced_qty,
                 CASE
+                    WHEN ((rb.department_category = 'CORRUGATION'::text) AND (upper(COALESCE(sc_1.process_name, ''::text)) ~~ '%SHEET PASTING%'::text) AND (upper(COALESCE(rb.process_name, ''::text)) !~~ '%2 PLY%'::text) AND (upper(COALESCE(rb.process_name, ''::text)) !~~ '%TWO PLY%'::text) AND (upper(COALESCE(rb.process_name, ''::text)) !~~ '%PLY MAKING%'::text) AND (upper(COALESCE(rb.process_name, ''::text)) !~~ '%SHEET PASTING%'::text)) THEN
+                    CASE
+                        WHEN (rb.corr_top_sheet_anchor_routing_id IS NOT NULL) THEN rb.corr_top_sheet_anchor_ok_qty
+                        ELSE rb.stage1_plan_qty
+                    END
                     WHEN (rb.department_category = 'FLEXO'::text) THEN sc_1.ok_produced_qty
                     WHEN (upper(rb.process_name) ~~ '%PRINT%'::text) THEN sc_1.ok_produced_qty
                     WHEN (upper(rb.process_name) ~~ '%LAMINAT%'::text) THEN sc_1.ok_produced_qty
@@ -12914,6 +13561,11 @@ CREATE VIEW public.v_production_stage_queue_fast AS
                 END AS planned_qty,
             GREATEST((
                 CASE
+                    WHEN ((rb.department_category = 'CORRUGATION'::text) AND (upper(COALESCE(sc_1.process_name, ''::text)) ~~ '%SHEET PASTING%'::text) AND (upper(COALESCE(rb.process_name, ''::text)) !~~ '%2 PLY%'::text) AND (upper(COALESCE(rb.process_name, ''::text)) !~~ '%TWO PLY%'::text) AND (upper(COALESCE(rb.process_name, ''::text)) !~~ '%PLY MAKING%'::text) AND (upper(COALESCE(rb.process_name, ''::text)) !~~ '%SHEET PASTING%'::text)) THEN
+                    CASE
+                        WHEN (rb.corr_top_sheet_anchor_routing_id IS NOT NULL) THEN rb.corr_top_sheet_anchor_ok_qty
+                        ELSE rb.stage1_plan_qty
+                    END
                     WHEN (rb.department_category = 'FLEXO'::text) THEN sc_1.ok_produced_qty
                     WHEN (upper(rb.process_name) ~~ '%PRINT%'::text) THEN sc_1.ok_produced_qty
                     WHEN (upper(rb.process_name) ~~ '%LAMINAT%'::text) THEN sc_1.ok_produced_qty
@@ -13057,7 +13709,11 @@ CREATE VIEW public.v_production_stage_rows_fast AS
             woj.so_number,
             (woj.line_no)::text AS line_no,
             woj.job_reference,
-            COALESCE(NULLIF(woj.job_reference, ''::text), ((COALESCE(woj.so_number, ''::text) || '||'::text) || COALESCE((woj.line_no)::text, ''::text))) AS job_key,
+                CASE
+                    WHEN ((COALESCE(woj.so_number, ''::text) <> ''::text) AND (COALESCE((woj.line_no)::text, ''::text) <> ''::text)) THEN ((woj.so_number || '||'::text) || (woj.line_no)::text)
+                    WHEN (COALESCE(woj.job_reference, ''::text) <> ''::text) THEN ('REF||'::text || woj.job_reference)
+                    ELSE ''::text
+                END AS job_key,
             max(NULLIF(woj.client_name, ''::text)) AS client_name,
             max(NULLIF(woj.product_name, ''::text)) AS product_name,
             max(NULLIF(woj.artwork_no, ''::text)) AS artwork_no,
@@ -13065,7 +13721,12 @@ CREATE VIEW public.v_production_stage_rows_fast AS
             max(woj.expected_delivery) AS expected_delivery,
             COALESCE(NULLIF(max(COALESCE(woj.ups, (0)::numeric)), (0)::numeric), NULLIF(max(COALESCE(woj.group_ups, (0)::numeric)), (0)::numeric), (1)::numeric) AS job_ups
            FROM public.work_order_jobs woj
-          GROUP BY woj.wo_id, woj.so_number, (woj.line_no)::text, woj.job_reference, COALESCE(NULLIF(woj.job_reference, ''::text), ((COALESCE(woj.so_number, ''::text) || '||'::text) || COALESCE((woj.line_no)::text, ''::text)))
+          GROUP BY woj.wo_id, woj.so_number, (woj.line_no)::text, woj.job_reference,
+                CASE
+                    WHEN ((COALESCE(woj.so_number, ''::text) <> ''::text) AND (COALESCE((woj.line_no)::text, ''::text) <> ''::text)) THEN ((woj.so_number || '||'::text) || (woj.line_no)::text)
+                    WHEN (COALESCE(woj.job_reference, ''::text) <> ''::text) THEN ('REF||'::text || woj.job_reference)
+                    ELSE ''::text
+                END
         ), routing_entry_totals AS (
          SELECT pe.routing_id,
             sum(GREATEST(COALESCE(pe.produced_qty, (0)::numeric), (0)::numeric)) AS gross_produced_qty,
@@ -13086,7 +13747,11 @@ CREATE VIEW public.v_production_stage_rows_fast AS
             jet.so_number,
             jet.line_no,
             jet.job_reference,
-            COALESCE(NULLIF(jet.job_reference, ''::text), ((COALESCE(jet.so_number, ''::text) || '||'::text) || COALESCE(jet.line_no, ''::text))) AS job_key,
+                CASE
+                    WHEN ((COALESCE(jet.so_number, ''::text) <> ''::text) AND (COALESCE(jet.line_no, ''::text) <> ''::text)) THEN ((jet.so_number || '||'::text) || jet.line_no)
+                    WHEN (COALESCE(jet.job_reference, ''::text) <> ''::text) THEN ('REF||'::text || jet.job_reference)
+                    ELSE ''::text
+                END AS job_key,
             jet.gross_produced_qty,
             jet.ok_produced_qty
            FROM job_entry_totals jet
@@ -13272,6 +13937,31 @@ UNION ALL
         END AS status
    FROM (job_stage_calc jsc
      JOIN post_split_routing psr ON ((psr.routing_id = jsc.routing_id)));
+
+
+--
+-- Name: v_production_summary_fast; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_production_summary_fast AS
+ SELECT wo_date,
+    department_category,
+    process_display_name,
+    status,
+    count(*) AS total_rows,
+    sum(COALESCE(balance_qty, (0)::numeric)) AS pending_qty,
+    sum(
+        CASE
+            WHEN (upper(COALESCE(status, ''::text)) = 'IN_PROGRESS'::text) THEN 1
+            ELSE 0
+        END) AS in_progress_rows,
+    sum(
+        CASE
+            WHEN (upper(COALESCE(status, ''::text)) = 'SHORT_CLOSED'::text) THEN 1
+            ELSE 0
+        END) AS short_closed_rows
+   FROM public.v_production_stage_rows_fast
+  GROUP BY wo_date, department_category, process_display_name, status;
 
 
 --
@@ -15405,14 +16095,12 @@ CREATE VIEW public.v_report_job_process_cost_lines AS
                     ec_1.candidate_qty,
                     ec_1.candidate_area_mm2,
                         CASE
-                            WHEN (sum(ec_1.candidate_area_mm2) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric) THEN (ec_1.candidate_area_mm2 / NULLIF(sum(ec_1.candidate_area_mm2) OVER (PARTITION BY ec_1.production_entry_id), (0)::numeric))
-                            WHEN (sum(ec_1.candidate_qty) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric) THEN (ec_1.candidate_qty / NULLIF(sum(ec_1.candidate_qty) OVER (PARTITION BY ec_1.production_entry_id), (0)::numeric))
+                            WHEN ((count(*) OVER (PARTITION BY ec_1.production_entry_id) > 0) AND (min(COALESCE(ec_1.candidate_area_mm2, (0)::numeric)) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric)) THEN (ec_1.candidate_area_mm2 / NULLIF(sum(ec_1.candidate_area_mm2) OVER (PARTITION BY ec_1.production_entry_id), (0)::numeric))
                             ELSE ((1)::numeric / (NULLIF(count(*) OVER (PARTITION BY ec_1.production_entry_id), 0))::numeric)
                         END AS entry_share,
                         CASE
-                            WHEN (sum(ec_1.candidate_area_mm2) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric) THEN 'JOB_AREA'::text
-                            WHEN (sum(ec_1.candidate_qty) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric) THEN 'JOB_QTY_FALLBACK'::text
-                            ELSE 'EQUAL_FALLBACK'::text
+                            WHEN ((count(*) OVER (PARTITION BY ec_1.production_entry_id) > 0) AND (min(COALESCE(ec_1.candidate_area_mm2, (0)::numeric)) OVER (PARTITION BY ec_1.production_entry_id) > (0)::numeric)) THEN 'JOB_AREA'::text
+                            ELSE 'EQUAL_FALLBACK_MISSING_SIZE'::text
                         END AS cost_allocation_basis
                    FROM entry_candidates ec_1) ec
         ), entry_with_net_hours AS (
@@ -16338,7 +17026,8 @@ CREATE VIEW public.v_report_job_profitability_complete AS
             count(*) FILTER (WHERE (pc.mhr_missing = true)) AS mhr_missing_count,
             string_agg(DISTINCT NULLIF(pc.production_machine, ''::text), ', '::text ORDER BY NULLIF(pc.production_machine, ''::text)) FILTER (WHERE (COALESCE(pc.production_machine, ''::text) <> ''::text)) AS process_cost_machines,
             string_agg(DISTINCT NULLIF(pc.machine_key, ''::text), ', '::text ORDER BY NULLIF(pc.machine_key, ''::text)) FILTER (WHERE (COALESCE(pc.machine_key, ''::text) <> ''::text)) AS process_cost_machine_keys,
-            string_agg(DISTINCT NULLIF(pc.hours_source, ''::text), ', '::text ORDER BY NULLIF(pc.hours_source, ''::text)) FILTER (WHERE (COALESCE(pc.hours_source, ''::text) <> ''::text)) AS process_hours_source
+            string_agg(DISTINCT NULLIF(pc.hours_source, ''::text), ', '::text ORDER BY NULLIF(pc.hours_source, ''::text)) FILTER (WHERE (COALESCE(pc.hours_source, ''::text) <> ''::text)) AS process_hours_source,
+            string_agg(DISTINCT NULLIF(pc.cost_allocation_basis, ''::text), ', '::text ORDER BY NULLIF(pc.cost_allocation_basis, ''::text)) FILTER (WHERE (COALESCE(pc.cost_allocation_basis, ''::text) <> ''::text)) AS process_cost_allocation_basis
            FROM public.v_report_job_process_cost_lines pc
           GROUP BY pc.so_line_id, pc.job_key
         ), complete_base AS (
@@ -16416,6 +17105,7 @@ CREATE VIEW public.v_report_job_profitability_complete AS
             COALESCE(pcj.process_cost_machines, ''::text) AS process_cost_machines,
             COALESCE(pcj.process_cost_machine_keys, ''::text) AS process_cost_machine_keys,
             COALESCE(pcj.process_hours_source, ''::text) AS process_hours_source,
+            COALESCE(pcj.process_cost_allocation_basis, ''::text) AS process_cost_allocation_basis,
                 CASE
                     WHEN (COALESCE(pcj.mhr_missing_count, (0)::bigint) > 0) THEN 'MHR_MISSING'::text
                     WHEN (COALESCE(pcj.process_cost, (0)::numeric) > (0)::numeric) THEN 'COSTED'::text
@@ -16518,7 +17208,8 @@ CREATE VIEW public.v_report_job_profitability_complete AS
     rm_material_status,
     rm_pending_material_lines,
     rm_excess_material_lines,
-    rm_material_detail
+    rm_material_detail,
+    process_cost_allocation_basis
    FROM complete_base cb;
 
 
@@ -16526,7 +17217,7 @@ CREATE VIEW public.v_report_job_profitability_complete AS
 -- Name: v_report_job_profitability_production_stages; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_report_job_profitability_production_stages AS
+CREATE VIEW public.v_report_job_profitability_production_stages WITH (security_invoker='on') AS
  WITH line_base AS (
          SELECT so.id AS so_id,
             sol.id AS so_line_id,
@@ -17664,6 +18355,342 @@ CREATE VIEW public.v_report_otif_job_detail WITH (security_invoker='on') AS
 --
 
 COMMENT ON VIEW public.v_report_otif_job_detail IS 'Job-wise OTIF detail by SO line. Uses date-only targets; SO after-5-PM cutoff is intentionally excluded until stakeholders confirm timing logic.';
+
+
+--
+-- Name: v_report_planning_lifecycle_fast; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_planning_lifecycle_fast WITH (security_invoker='on') AS
+ WITH posted_invoice_base AS (
+         SELECT il.so_line_id,
+            sum(COALESCE(il.qty, (0)::numeric)) AS posted_billed_qty,
+            (count(DISTINCT il.invoice_id))::integer AS posted_invoice_count,
+            min(inv.invoice_date) AS posted_first_invoice_date,
+            max(inv.invoice_date) AS posted_last_invoice_date,
+            max(inv.created_at) AS posted_last_billed_at,
+            string_agg(DISTINCT NULLIF(inv.invoice_no, ''::text), ', '::text ORDER BY NULLIF(inv.invoice_no, ''::text)) AS posted_invoice_nos,
+            string_agg(DISTINCT to_char((inv.invoice_date)::timestamp with time zone, 'YYYY-MM-DD'::text), ', '::text ORDER BY (to_char((inv.invoice_date)::timestamp with time zone, 'YYYY-MM-DD'::text))) FILTER (WHERE (inv.invoice_date IS NOT NULL)) AS posted_invoice_dates
+           FROM (public.invoice_lines il
+             JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+          WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          GROUP BY il.so_line_id
+        ), artwork_ranked AS (
+         SELECT a.so_id,
+            a.line_no,
+            a.artwork_no,
+            a.product_type,
+            a.plate_status,
+            a.die_status,
+            COALESCE(NULLIF(a.status, ''::text),
+                CASE
+                    WHEN (COALESCE(a.artwork_no, ''::text) <> ''::text) THEN 'PENDING_APPROVAL'::text
+                    ELSE 'NO_ART'::text
+                END) AS artwork_status,
+            a.artwork_at,
+            a.approved_at AS artwork_approved_at,
+            row_number() OVER (PARTITION BY a.so_id, a.line_no ORDER BY a.approved_at DESC NULLS LAST, a.artwork_at DESC NULLS LAST, a.id DESC) AS rn
+           FROM public.artworks a
+        ), artwork_base AS (
+         SELECT artwork_ranked.so_id,
+            artwork_ranked.line_no,
+            artwork_ranked.artwork_no,
+            artwork_ranked.product_type,
+            artwork_ranked.plate_status,
+            artwork_ranked.die_status,
+            artwork_ranked.artwork_status,
+            artwork_ranked.artwork_at,
+            artwork_ranked.artwork_approved_at,
+            artwork_ranked.rn
+           FROM artwork_ranked
+          WHERE (artwork_ranked.rn = 1)
+        ), wo_base AS (
+         SELECT woj.so_number,
+            woj.line_no,
+            count(DISTINCT woj.wo_id) AS wo_count,
+            string_agg(DISTINCT NULLIF(wo.wo_number, ''::text), ', '::text ORDER BY NULLIF(wo.wo_number, ''::text)) AS wo_numbers,
+            min(wo.wo_date) AS first_wo_at,
+            max(wo.wo_date) AS last_wo_at
+           FROM (public.work_order_jobs woj
+             JOIN public.work_orders wo ON ((wo.id = woj.wo_id)))
+          GROUP BY woj.so_number, woj.line_no
+        ), routing_step_rows AS (
+         SELECT DISTINCT woj.so_number,
+            woj.line_no,
+            COALESCE(r.sequence_no, 0) AS sequence_no,
+            COALESCE(NULLIF(r.process_name, ''::text), NULLIF(r.department, ''::text), 'PROCESS'::text) AS step_name,
+            upper(COALESCE(r.status, 'PENDING'::text)) AS step_status,
+            COALESCE(r.created_at, (wo.created_at)::timestamp with time zone, ((wo.wo_date)::timestamp without time zone)::timestamp with time zone) AS marked_at
+           FROM ((public.work_order_jobs woj
+             JOIN public.work_orders wo ON ((wo.id = woj.wo_id)))
+             JOIN public.work_order_routing r ON ((r.wo_id = woj.wo_id)))
+        ), routing_base AS (
+         SELECT routing_step_rows.so_number,
+            routing_step_rows.line_no,
+            count(*) AS routing_count,
+            min(routing_step_rows.marked_at) AS routing_marked_at,
+            string_agg(routing_step_rows.step_name, ' | '::text ORDER BY routing_step_rows.sequence_no, routing_step_rows.step_name) AS routing_steps,
+            string_agg((((routing_step_rows.step_name || ' ['::text) || routing_step_rows.step_status) || ']'::text), ' | '::text ORDER BY routing_step_rows.sequence_no, routing_step_rows.step_name) AS stage_summary,
+            max(routing_step_rows.marked_at) AS stage_last_updated_at
+           FROM routing_step_rows
+          GROUP BY routing_step_rows.so_number, routing_step_rows.line_no
+        ), current_stage AS (
+         SELECT DISTINCT ON (routing_step_rows.so_number, routing_step_rows.line_no) routing_step_rows.so_number,
+            routing_step_rows.line_no,
+            routing_step_rows.step_name AS current_stage,
+            routing_step_rows.step_status AS current_stage_status
+           FROM routing_step_rows
+          WHERE (routing_step_rows.step_status <> 'COMPLETED'::text)
+          ORDER BY routing_step_rows.so_number, routing_step_rows.line_no,
+                CASE
+                    WHEN (routing_step_rows.step_status = 'IN_PROGRESS'::text) THEN 0
+                    WHEN (routing_step_rows.step_status = 'PENDING'::text) THEN 1
+                    WHEN (routing_step_rows.step_status = 'HOLD'::text) THEN 2
+                    WHEN (routing_step_rows.step_status = 'SHORT_CLOSED'::text) THEN 3
+                    ELSE 4
+                END, routing_step_rows.sequence_no, routing_step_rows.step_name
+        ), base AS (
+         SELECT so.id AS so_id,
+            sol.id AS so_line_id,
+            so.so_number,
+            so.so_date,
+            so.po_number,
+            so.po_date,
+            COALESCE(so.created_at, (so.so_date)::timestamp without time zone) AS so_datetime,
+            so.created_at AS so_created_at,
+            to_char(COALESCE(so.created_at, (so.so_date)::timestamp without time zone), 'HH24:MI'::text) AS so_time,
+            so.client_code,
+            COALESCE(c_1.client_name, so.client_code, ''::text) AS client_name,
+            so.sales_rep,
+            sol.line_no,
+            COALESCE(sol.status, 'OPEN'::text) AS so_line_status,
+            sol.closed_by,
+            sol.closed_at,
+            sol.status_updated_at,
+            sol.product_code,
+            sol.product_name,
+            sol.category,
+            sol.division,
+            COALESCE(sol.qty, (0)::numeric) AS order_qty,
+            sol.unit,
+            COALESCE(sol.rate, (0)::numeric) AS rate,
+            sol.expected_delivery,
+            sol.final_delivery,
+            COALESCE(sol.accounts_status, 'PENDING'::text) AS accounts_status,
+            sol.accounts_at,
+            COALESCE(sol.business_status, 'PENDING'::text) AS business_status,
+            sol.business_at,
+                CASE
+                    WHEN ((upper(COALESCE(sol.accounts_status, 'PENDING'::text)) = 'APPROVED'::text) AND (upper(COALESCE(sol.business_status, 'PENDING'::text)) = 'APPROVED'::text)) THEN 'APPROVED'::text
+                    WHEN ((upper(COALESCE(sol.accounts_status, ''::text)) = 'HOLD'::text) OR (upper(COALESCE(sol.business_status, ''::text)) = 'HOLD'::text)) THEN 'HOLD'::text
+                    WHEN ((upper(COALESCE(sol.accounts_status, ''::text)) = 'REJECTED'::text) OR (upper(COALESCE(sol.business_status, ''::text)) = 'REJECTED'::text)) THEN 'REJECTED'::text
+                    ELSE 'PENDING'::text
+                END AS sales_approval_status,
+                CASE
+                    WHEN ((upper(COALESCE(sol.accounts_status, 'PENDING'::text)) = 'APPROVED'::text) AND (upper(COALESCE(sol.business_status, 'PENDING'::text)) = 'APPROVED'::text)) THEN GREATEST(COALESCE(sol.accounts_at, sol.business_at), COALESCE(sol.business_at, sol.accounts_at))
+                    ELSE NULL::timestamp with time zone
+                END AS sales_approval_at,
+            ab.artwork_no,
+            ab.product_type,
+            ab.plate_status,
+            ab.die_status,
+            COALESCE(ab.artwork_status, 'NO_ART'::text) AS artwork_status,
+            ab.artwork_at,
+            ab.artwork_approved_at,
+            COALESCE(wb.wo_count, (0)::bigint) AS wo_count,
+            COALESCE(wb.wo_numbers, ''::text) AS wo_numbers,
+            wb.first_wo_at,
+            wb.last_wo_at,
+            COALESCE(rb.routing_count, (0)::bigint) AS routing_count,
+            rb.routing_marked_at,
+            COALESCE(rb.routing_steps, ''::text) AS routing_steps,
+            COALESCE(cs.current_stage, ''::text) AS current_stage,
+            COALESCE(cs.current_stage_status, ''::text) AS current_stage_status,
+            COALESCE(rb.stage_summary, ''::text) AS stage_summary,
+            rb.stage_last_updated_at,
+            COALESCE(pib.posted_billed_qty, (0)::numeric) AS posted_billed_qty,
+            COALESCE(pib.posted_invoice_count, 0) AS posted_invoice_count,
+            pib.posted_first_invoice_date,
+            pib.posted_last_invoice_date,
+            pib.posted_last_billed_at,
+            COALESCE(pib.posted_invoice_nos, ''::text) AS posted_invoice_nos,
+            COALESCE(pib.posted_invoice_dates, ''::text) AS posted_invoice_dates
+           FROM (((((((public.sales_orders so
+             JOIN public.sales_order_lines sol ON ((sol.so_id = so.id)))
+             LEFT JOIN public.clients c_1 ON ((c_1.client_code = so.client_code)))
+             LEFT JOIN artwork_base ab ON (((ab.so_id = so.id) AND (ab.line_no = sol.line_no))))
+             LEFT JOIN wo_base wb ON (((wb.so_number = so.so_number) AND (wb.line_no = sol.line_no))))
+             LEFT JOIN routing_base rb ON (((rb.so_number = so.so_number) AND (rb.line_no = sol.line_no))))
+             LEFT JOIN current_stage cs ON (((cs.so_number = so.so_number) AND (cs.line_no = sol.line_no))))
+             LEFT JOIN posted_invoice_base pib ON ((pib.so_line_id = sol.id)))
+          WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text))
+        ), classified AS (
+         SELECT b.so_id,
+            b.so_line_id,
+            b.so_number,
+            b.so_date,
+            b.po_number,
+            b.po_date,
+            b.so_datetime,
+            b.so_created_at,
+            b.so_time,
+            b.client_code,
+            b.client_name,
+            b.sales_rep,
+            b.line_no,
+            b.so_line_status,
+            b.closed_by,
+            b.closed_at,
+            b.status_updated_at,
+            b.product_code,
+            b.product_name,
+            b.category,
+            b.division,
+            b.order_qty,
+            b.unit,
+            b.rate,
+            b.expected_delivery,
+            b.final_delivery,
+            b.accounts_status,
+            b.accounts_at,
+            b.business_status,
+            b.business_at,
+            b.sales_approval_status,
+            b.sales_approval_at,
+            b.artwork_no,
+            b.product_type,
+            b.plate_status,
+            b.die_status,
+            b.artwork_status,
+            b.artwork_at,
+            b.artwork_approved_at,
+            b.wo_count,
+            b.wo_numbers,
+            b.first_wo_at,
+            b.last_wo_at,
+            b.routing_count,
+            b.routing_marked_at,
+            b.routing_steps,
+            b.current_stage,
+            b.current_stage_status,
+            b.stage_summary,
+            b.stage_last_updated_at,
+            b.posted_billed_qty,
+            b.posted_invoice_count,
+            b.posted_first_invoice_date,
+            b.posted_last_invoice_date,
+            b.posted_last_billed_at,
+            b.posted_invoice_nos,
+            b.posted_invoice_dates,
+                CASE
+                    WHEN (upper(COALESCE(b.so_line_status, 'OPEN'::text)) = 'CANCELLED'::text) THEN 'CANCELLED'::text
+                    WHEN ((COALESCE(b.order_qty, (0)::numeric) > (0)::numeric) AND (COALESCE(b.posted_billed_qty, (0)::numeric) >= COALESCE(b.order_qty, (0)::numeric))) THEN 'CLOSED'::text
+                    WHEN ((upper(COALESCE(b.so_line_status, 'OPEN'::text)) = 'SHORT_CLOSED'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%SHORT%CLOSE%'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%SHORT_CLOSE%'::text)) THEN 'SHORT_CLOSED'::text
+                    WHEN (upper(COALESCE(b.so_line_status, 'OPEN'::text)) = 'PARTIAL_DISPATCHED'::text) THEN 'PARTIAL_DISPATCHED'::text
+                    WHEN ((upper(COALESCE(b.so_line_status, 'OPEN'::text)) = 'CLOSED'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%MANUAL CLOSE%'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%MANUAL BILLING%'::text) OR (upper(COALESCE(b.closed_by, ''::text)) ~~ '%LEGACY%'::text)) THEN 'CLOSED'::text
+                    ELSE 'OPEN'::text
+                END AS closure_status
+           FROM base b
+        )
+ SELECT so_id,
+    so_line_id,
+    so_number,
+    so_date,
+    po_number,
+    po_date,
+    so_datetime,
+    so_created_at,
+    so_time,
+    client_code,
+    client_name,
+    sales_rep,
+    line_no,
+    so_line_status,
+    closed_by,
+    closed_at,
+    status_updated_at,
+    product_code,
+    product_name,
+    category,
+    division,
+    order_qty,
+    unit,
+    rate,
+    expected_delivery,
+    final_delivery,
+    accounts_status,
+    accounts_at,
+    business_status,
+    business_at,
+    sales_approval_status,
+    sales_approval_at,
+    artwork_no,
+    product_type,
+    plate_status,
+    die_status,
+    artwork_status,
+    artwork_at,
+    artwork_approved_at,
+    wo_count,
+    wo_numbers,
+    first_wo_at,
+    last_wo_at,
+    routing_count,
+    routing_marked_at,
+    routing_steps,
+    current_stage,
+    current_stage_status,
+    stage_summary,
+    stage_last_updated_at,
+    posted_billed_qty,
+    posted_invoice_count,
+    posted_first_invoice_date,
+    posted_last_invoice_date,
+    posted_last_billed_at,
+    posted_invoice_nos,
+    posted_invoice_dates,
+    closure_status,
+        CASE
+            WHEN (closure_status = 'SHORT_CLOSED'::text) THEN COALESCE(NULLIF(closed_by, ''::text), 'Manual short close'::text)
+            WHEN (closure_status = 'PARTIAL_DISPATCHED'::text) THEN COALESCE(NULLIF(closed_by, ''::text), 'Marked for partial dispatch'::text)
+            WHEN ((closure_status = 'CLOSED'::text) AND (COALESCE(posted_billed_qty, (0)::numeric) >= COALESCE(order_qty, (0)::numeric))) THEN 'Fully billed'::text
+            WHEN (closure_status = 'CLOSED'::text) THEN COALESCE(NULLIF(closed_by, ''::text), 'Closed'::text)
+            WHEN (closure_status = 'CANCELLED'::text) THEN COALESCE(NULLIF(closed_by, ''::text), 'Cancelled'::text)
+            ELSE ''::text
+        END AS closure_reason,
+        CASE
+            WHEN (COALESCE(routing_count, (0)::bigint) > 0) THEN 'MARKED'::text
+            ELSE 'PENDING'::text
+        END AS routing_status,
+    GREATEST((COALESCE(order_qty, (0)::numeric) - COALESCE(posted_billed_qty, (0)::numeric)), (0)::numeric) AS billing_gap_qty,
+        CASE
+            WHEN (closure_status = 'SHORT_CLOSED'::text) THEN GREATEST((COALESCE(order_qty, (0)::numeric) - COALESCE(posted_billed_qty, (0)::numeric)), (0)::numeric)
+            ELSE (0)::numeric
+        END AS short_closed_qty,
+        CASE
+            WHEN (closure_status = ANY (ARRAY['CLOSED'::text, 'CANCELLED'::text, 'SHORT_CLOSED'::text])) THEN (0)::numeric
+            ELSE GREATEST((COALESCE(order_qty, (0)::numeric) - COALESCE(posted_billed_qty, (0)::numeric)), (0)::numeric)
+        END AS operational_billing_pending_qty,
+        CASE
+            WHEN (closure_status = ANY (ARRAY['CLOSED'::text, 'CANCELLED'::text, 'SHORT_CLOSED'::text, 'PARTIAL_DISPATCHED'::text])) THEN closure_status
+            WHEN (GREATEST((COALESCE(order_qty, (0)::numeric) - COALESCE(posted_billed_qty, (0)::numeric)), (0)::numeric) > (0)::numeric) THEN 'PENDING'::text
+            ELSE 'CLOSED'::text
+        END AS planning_billing_status,
+    ((COALESCE(posted_billed_qty, (0)::numeric) > (0)::numeric) AND (COALESCE(posted_billed_qty, (0)::numeric) < COALESCE(order_qty, (0)::numeric))) AS partially_billed_flag,
+    lower(concat_ws(' '::text, so_number, (line_no)::text, po_number, so_line_status, closed_by, client_name, client_code, division, product_code, product_name, category, sales_rep, artwork_no, wo_numbers, routing_steps, stage_summary, posted_invoice_nos)) AS match_text,
+    lower(concat_ws(' '::text, accounts_status, business_status, sales_approval_status, so_line_status, artwork_status, plate_status, die_status,
+        CASE
+            WHEN (COALESCE(routing_count, (0)::bigint) > 0) THEN 'MARKED'::text
+            ELSE 'PENDING'::text
+        END, current_stage_status, closure_status)) AS status_text
+   FROM classified c;
+
+
+--
+-- Name: VIEW v_report_planning_lifecycle_fast; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_report_planning_lifecycle_fast IS 'Fast Reports & MIS planning lifecycle view. Covers SO approval, artwork, WO/routing, current stage, closure, and posted billing without material/tooling procurement rollups.';
 
 
 --
@@ -21200,7 +22227,7 @@ CREATE VIEW public.v_report_pre_wip_ageing_summary WITH (security_invoker='on') 
 -- Name: v_report_production_bottleneck; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_report_production_bottleneck AS
+CREATE VIEW public.v_report_production_bottleneck WITH (security_invoker='on') AS
  SELECT routing_id,
     wo_id,
     wo_number,
@@ -21227,7 +22254,7 @@ CREATE VIEW public.v_report_production_bottleneck AS
 -- Name: v_report_production_entry_logs; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_report_production_entry_logs AS
+CREATE VIEW public.v_report_production_entry_logs WITH (security_invoker='on') AS
  WITH job_base AS (
          SELECT woj.wo_id,
             woj.so_number,
@@ -21346,7 +22373,7 @@ CREATE VIEW public.v_report_production_entry_logs AS
 -- Name: v_report_production_nop_daily; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_report_production_nop_daily AS
+CREATE VIEW public.v_report_production_nop_daily WITH (security_invoker='on') AS
  WITH machine_standards(machine_key, machine, standard_make_ready_minutes, target_hourly_output) AS (
          VALUES ('SM74'::text,'Heidelberg SM74'::text,(30)::numeric,(4125)::numeric), ('CD102'::text,'CD102'::text,(30)::numeric,(4125)::numeric), ('LAM1'::text,'Lamination Roll-1'::text,(10)::numeric,(1100)::numeric), ('LAM2'::text,'Lamination 02'::text,(10)::numeric,(1100)::numeric), ('LAM3'::text,'Lamination 03'::text,(10)::numeric,(1100)::numeric), ('DIE1'::text,'Die Cutting 01'::text,(30)::numeric,(880)::numeric), ('DIE2'::text,'Die Cutting 02'::text,(30)::numeric,(880)::numeric), ('DIE3'::text,'Die Cutting 03'::text,(30)::numeric,(880)::numeric), ('DIE4'::text,'Die Cutting 04'::text,(30)::numeric,(880)::numeric), ('DIE5'::text,'Die Cutting 05'::text,(30)::numeric,(880)::numeric), ('FLEXOPRINT'::text,'Markany Flexo E5'::text,(30)::numeric,(55)::numeric), ('FLEXODIE'::text,'Flexo Die Cutting Offline'::text,(30)::numeric,(44)::numeric), ('FLEXOSLIT'::text,'Rhyguan'::text,(30)::numeric,(88)::numeric), ('DIGITAL'::text,'Canon Digital Printing'::text,(10)::numeric,(660)::numeric), ('2PLY'::text,'2 Ply Making Machine'::text,(15)::numeric,(2000)::numeric), ('ROTARY'::text,'Rotary Cutting'::text,(0)::numeric,(650)::numeric), ('AUTOWINDOW'::text,'Auto Window Pasting'::text,(0)::numeric,(1500)::numeric), ('MSP1'::text,'Manual Sheet Pasting'::text,(0)::numeric,(600)::numeric), ('MSP2'::text,'Manual Pasting'::text,(0)::numeric,(600)::numeric), ('FMZ'::text,'Flute Laminator'::text,(0)::numeric,(2000)::numeric), ('DCMAN1'::text,'Manual Die Cutting 04'::text,(45)::numeric,(800)::numeric), ('DCMAN2'::text,'Manual Die Cutting 05'::text,(45)::numeric,(800)::numeric), ('DCAUTO'::text,'Automatic Die Cutting'::text,(90)::numeric,(2500)::numeric), ('STMAN1'::text,'Stitching Manual 01'::text,(0)::numeric,(250)::numeric), ('STMAN2'::text,'Stitching Manual 02'::text,(0)::numeric,(250)::numeric), ('STAUTO'::text,'Auto Stitching'::text,(0)::numeric,(200)::numeric), ('FOLDER'::text,'Folder Gluer'::text,(45)::numeric,(15000)::numeric), ('RS4'::text,'RS4 Printing'::text,(60)::numeric,(1500)::numeric)
         ), entry_base AS (
@@ -21514,7 +22541,7 @@ CREATE VIEW public.v_report_production_nop_daily AS
 -- Name: v_report_production_nop_entry_lines; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_report_production_nop_entry_lines AS
+CREATE VIEW public.v_report_production_nop_entry_lines WITH (security_invoker='on') AS
  WITH machine_standards(machine_key, machine, standard_make_ready_minutes, target_hourly_output) AS (
          VALUES ('SM74'::text,'Heidelberg SM74'::text,(30)::numeric,(4125)::numeric), ('CD102'::text,'CD102'::text,(30)::numeric,(4125)::numeric), ('LAM1'::text,'Lamination Roll-1'::text,(10)::numeric,(1100)::numeric), ('LAM2'::text,'Lamination 02'::text,(10)::numeric,(1100)::numeric), ('LAM3'::text,'Lamination 03'::text,(10)::numeric,(1100)::numeric), ('DIE1'::text,'Die Cutting 01'::text,(30)::numeric,(880)::numeric), ('DIE2'::text,'Die Cutting 02'::text,(30)::numeric,(880)::numeric), ('DIE3'::text,'Die Cutting 03'::text,(30)::numeric,(880)::numeric), ('DIE4'::text,'Die Cutting 04'::text,(30)::numeric,(880)::numeric), ('DIE5'::text,'Die Cutting 05'::text,(30)::numeric,(880)::numeric), ('FLEXOPRINT'::text,'Markany Flexo E5'::text,(30)::numeric,(55)::numeric), ('FLEXODIE'::text,'Flexo Die Cutting Offline'::text,(30)::numeric,(44)::numeric), ('FLEXOSLIT'::text,'Rhyguan'::text,(30)::numeric,(88)::numeric), ('DIGITAL'::text,'Canon Digital Printing'::text,(10)::numeric,(660)::numeric), ('2PLY'::text,'2 Ply Making Machine'::text,(15)::numeric,(2000)::numeric), ('ROTARY'::text,'Rotary Cutting'::text,(0)::numeric,(650)::numeric), ('AUTOWINDOW'::text,'Auto Window Pasting'::text,(0)::numeric,(1500)::numeric), ('MSP1'::text,'Manual Sheet Pasting'::text,(0)::numeric,(600)::numeric), ('MSP2'::text,'Manual Pasting'::text,(0)::numeric,(600)::numeric), ('FMZ'::text,'Flute Laminator'::text,(0)::numeric,(2000)::numeric), ('DCMAN1'::text,'Manual Die Cutting 04'::text,(45)::numeric,(800)::numeric), ('DCMAN2'::text,'Manual Die Cutting 05'::text,(45)::numeric,(800)::numeric), ('DCAUTO'::text,'Automatic Die Cutting'::text,(90)::numeric,(2500)::numeric), ('STMAN1'::text,'Stitching Manual 01'::text,(0)::numeric,(250)::numeric), ('STMAN2'::text,'Stitching Manual 02'::text,(0)::numeric,(250)::numeric), ('STAUTO'::text,'Auto Stitching'::text,(0)::numeric,(200)::numeric), ('FOLDER'::text,'Folder Gluer'::text,(45)::numeric,(15000)::numeric), ('RS4'::text,'RS4 Printing'::text,(60)::numeric,(1500)::numeric)
         ), job_base AS (
@@ -21701,7 +22728,7 @@ CREATE VIEW public.v_report_production_nop_entry_lines AS
 -- Name: v_report_production_nop_machine_cleanup; Type: VIEW; Schema: public; Owner: -
 --
 
-CREATE VIEW public.v_report_production_nop_machine_cleanup AS
+CREATE VIEW public.v_report_production_nop_machine_cleanup WITH (security_invoker='on') AS
  WITH machine_standards(machine_key, machine, standard_make_ready_minutes, target_hourly_output) AS (
          VALUES ('SM74'::text,'Heidelberg SM74'::text,(30)::numeric,(4125)::numeric), ('CD102'::text,'CD102'::text,(30)::numeric,(4125)::numeric), ('LAM1'::text,'Lamination Roll-1'::text,(10)::numeric,(1100)::numeric), ('LAM2'::text,'Lamination 02'::text,(10)::numeric,(1100)::numeric), ('LAM3'::text,'Lamination 03'::text,(10)::numeric,(1100)::numeric), ('DIE1'::text,'Die Cutting 01'::text,(30)::numeric,(880)::numeric), ('DIE2'::text,'Die Cutting 02'::text,(30)::numeric,(880)::numeric), ('DIE3'::text,'Die Cutting 03'::text,(30)::numeric,(880)::numeric), ('DIE4'::text,'Die Cutting 04'::text,(30)::numeric,(880)::numeric), ('DIE5'::text,'Die Cutting 05'::text,(30)::numeric,(880)::numeric), ('FLEXOPRINT'::text,'Markany Flexo E5'::text,(30)::numeric,(55)::numeric), ('FLEXODIE'::text,'Flexo Die Cutting Offline'::text,(30)::numeric,(44)::numeric), ('FLEXOSLIT'::text,'Rhyguan'::text,(30)::numeric,(88)::numeric), ('DIGITAL'::text,'Canon Digital Printing'::text,(10)::numeric,(660)::numeric), ('2PLY'::text,'2 Ply Making Machine'::text,(15)::numeric,(2000)::numeric), ('ROTARY'::text,'Rotary Cutting'::text,(0)::numeric,(650)::numeric), ('AUTOWINDOW'::text,'Auto Window Pasting'::text,(0)::numeric,(1500)::numeric), ('MSP1'::text,'Manual Sheet Pasting'::text,(0)::numeric,(600)::numeric), ('MSP2'::text,'Manual Pasting'::text,(0)::numeric,(600)::numeric), ('FMZ'::text,'Flute Laminator'::text,(0)::numeric,(2000)::numeric), ('DCMAN1'::text,'Manual Die Cutting 04'::text,(45)::numeric,(800)::numeric), ('DCMAN2'::text,'Manual Die Cutting 05'::text,(45)::numeric,(800)::numeric), ('DCAUTO'::text,'Automatic Die Cutting'::text,(90)::numeric,(2500)::numeric), ('STMAN1'::text,'Stitching Manual 01'::text,(0)::numeric,(250)::numeric), ('STMAN2'::text,'Stitching Manual 02'::text,(0)::numeric,(250)::numeric), ('STAUTO'::text,'Auto Stitching'::text,(0)::numeric,(200)::numeric), ('FOLDER'::text,'Folder Gluer'::text,(45)::numeric,(15000)::numeric), ('RS4'::text,'RS4 Printing'::text,(60)::numeric,(1500)::numeric)
         ), entry_base AS (
@@ -21815,6 +22842,125 @@ CREATE VIEW public.v_report_production_nop_machine_cleanup AS
    FROM (entry_normalized en
      LEFT JOIN machine_standards ms ON ((ms.machine_key = en.normalized_machine_key)))
   WHERE ((en.raw_machine_upper = ANY (ARRAY['MANUAL'::text, 'AUTOMATIC'::text, 'AUTO'::text, 'PASTING'::text, 'SIDE PASTING'::text, 'STITCHING'::text])) OR (en.raw_machine_upper ~~ '%ROTARY%'::text) OR (en.raw_machine_upper ~~ '%WINDOW%'::text) OR (en.raw_machine_upper ~~ '%UV%'::text) OR (ms.machine_key IS NULL));
+
+
+--
+-- Name: v_report_sales_order_lines_fast; Type: VIEW; Schema: public; Owner: -
+--
+
+CREATE VIEW public.v_report_sales_order_lines_fast WITH (security_invoker='on') AS
+ WITH posted_invoice_base AS (
+         SELECT il.so_line_id,
+            sum(COALESCE(il.qty, (0)::numeric)) AS billed_qty,
+            (count(DISTINCT il.invoice_id))::integer AS invoice_count,
+            min(inv.invoice_date) AS first_invoice_date,
+            max(inv.invoice_date) AS last_invoice_date,
+            string_agg(DISTINCT NULLIF(inv.invoice_no, ''::text), ', '::text ORDER BY NULLIF(inv.invoice_no, ''::text)) AS invoice_nos,
+            string_agg(DISTINCT to_char((inv.invoice_date)::timestamp with time zone, 'YYYY-MM-DD'::text), ', '::text ORDER BY (to_char((inv.invoice_date)::timestamp with time zone, 'YYYY-MM-DD'::text))) FILTER (WHERE (inv.invoice_date IS NOT NULL)) AS invoice_dates
+           FROM (public.invoice_lines il
+             JOIN public.invoices inv ON ((inv.id = il.invoice_id)))
+          WHERE ((il.so_line_id IS NOT NULL) AND (upper(COALESCE(inv.status, 'POSTED'::text)) = 'POSTED'::text) AND (upper(COALESCE(inv.document_type, 'INVOICE'::text)) <> 'CHALLAN'::text) AND (COALESCE(inv.invoice_no, ''::text) !~~ 'DC-H/%'::text))
+          GROUP BY il.so_line_id
+        ), base AS (
+         SELECT so.id AS so_id,
+            sol.id AS so_line_id,
+            so.so_number,
+            so.so_date,
+            so.po_number,
+            so.po_date,
+            COALESCE(so.created_at, (so.so_date)::timestamp without time zone) AS so_datetime,
+            so.created_at AS so_created_at,
+            to_char(COALESCE(so.created_at, (so.so_date)::timestamp without time zone), 'HH24:MI'::text) AS so_time,
+            so.client_code,
+            COALESCE(c.client_name, so.client_code, ''::text) AS client_name,
+            so.sales_rep,
+            sol.line_no,
+            COALESCE(sol.status, 'OPEN'::text) AS so_line_status,
+            sol.product_code,
+            sol.product_name,
+            sol.category,
+            sol.division,
+            COALESCE(sol.qty, (0)::numeric) AS order_qty,
+            sol.unit,
+            COALESCE(sol.rate, (0)::numeric) AS rate,
+            round((COALESCE(sol.qty, (0)::numeric) * COALESCE(sol.rate, (0)::numeric)), 2) AS line_amount,
+            sol.expected_delivery,
+            sol.final_delivery,
+            COALESCE(sol.accounts_status, 'PENDING'::text) AS accounts_status,
+            sol.accounts_at,
+            COALESCE(sol.business_status, 'PENDING'::text) AS business_status,
+            sol.business_at,
+                CASE
+                    WHEN ((upper(COALESCE(sol.accounts_status, 'PENDING'::text)) = 'APPROVED'::text) AND (upper(COALESCE(sol.business_status, 'PENDING'::text)) = 'APPROVED'::text)) THEN 'APPROVED'::text
+                    WHEN ((upper(COALESCE(sol.accounts_status, ''::text)) = 'HOLD'::text) OR (upper(COALESCE(sol.business_status, ''::text)) = 'HOLD'::text)) THEN 'HOLD'::text
+                    WHEN ((upper(COALESCE(sol.accounts_status, ''::text)) = 'REJECTED'::text) OR (upper(COALESCE(sol.business_status, ''::text)) = 'REJECTED'::text)) THEN 'REJECTED'::text
+                    ELSE 'PENDING'::text
+                END AS sales_approval_status,
+            COALESCE(pib.billed_qty, (0)::numeric) AS billed_qty,
+            GREATEST((COALESCE(sol.qty, (0)::numeric) - COALESCE(pib.billed_qty, (0)::numeric)), (0)::numeric) AS billing_pending_qty,
+            COALESCE(pib.invoice_count, 0) AS invoice_count,
+            COALESCE(pib.invoice_nos, ''::text) AS invoice_nos,
+            COALESCE(pib.invoice_dates, ''::text) AS invoice_dates,
+            pib.first_invoice_date,
+            pib.last_invoice_date,
+                CASE
+                    WHEN (upper(COALESCE(sol.status, 'OPEN'::text)) = ANY (ARRAY['CLOSED'::text, 'CANCELLED'::text])) THEN upper(COALESCE(sol.status, 'OPEN'::text))
+                    WHEN ((COALESCE(sol.qty, (0)::numeric) > (0)::numeric) AND (COALESCE(pib.billed_qty, (0)::numeric) >= COALESCE(sol.qty, (0)::numeric))) THEN 'CLOSED'::text
+                    ELSE 'PENDING'::text
+                END AS billing_status
+           FROM (((public.sales_orders so
+             JOIN public.sales_order_lines sol ON ((sol.so_id = so.id)))
+             LEFT JOIN public.clients c ON ((c.client_code = so.client_code)))
+             LEFT JOIN posted_invoice_base pib ON ((pib.so_line_id = sol.id)))
+          WHERE ((upper(COALESCE(so.status, 'OPEN'::text)) <> 'CANCELLED'::text) AND (upper(COALESCE(sol.status, 'OPEN'::text)) <> 'CANCELLED'::text))
+        )
+ SELECT so_id,
+    so_line_id,
+    so_number,
+    so_date,
+    po_number,
+    po_date,
+    so_datetime,
+    so_created_at,
+    so_time,
+    client_code,
+    client_name,
+    sales_rep,
+    line_no,
+    so_line_status,
+    product_code,
+    product_name,
+    category,
+    division,
+    order_qty,
+    unit,
+    rate,
+    line_amount,
+    expected_delivery,
+    final_delivery,
+    accounts_status,
+    accounts_at,
+    business_status,
+    business_at,
+    sales_approval_status,
+    billed_qty,
+    billing_pending_qty,
+    invoice_count,
+    invoice_nos,
+    invoice_dates,
+    first_invoice_date,
+    last_invoice_date,
+    billing_status,
+    lower(concat_ws(' '::text, so_number, (line_no)::text, po_number, sales_rep, client_name, client_code, division, product_code, product_name, category, invoice_nos)) AS match_text,
+    lower(concat_ws(' '::text, so_line_status, accounts_status, business_status, sales_approval_status, billing_status, division, category)) AS status_text
+   FROM base b;
+
+
+--
+-- Name: VIEW v_report_sales_order_lines_fast; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON VIEW public.v_report_sales_order_lines_fast IS 'Fast Reports & MIS sales order line view. Avoids planning material/tooling/routing-heavy rollups and exposes match_text/status_text for Supabase-side filtering.';
 
 
 --
@@ -24610,6 +25756,42 @@ COMMENT ON TABLE public.work_order_deletion_audit_log IS 'Immutable snapshot arc
 
 
 --
+-- Name: work_order_wastage_approvals; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.work_order_wastage_approvals (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    request_ref text NOT NULL,
+    status text DEFAULT 'PENDING'::text NOT NULL,
+    module text DEFAULT 'WORK_ORDER'::text NOT NULL,
+    default_wastage_sheets integer DEFAULT 0 NOT NULL,
+    requested_wastage_sheets integer DEFAULT 0 NOT NULL,
+    approved_wastage_sheets integer,
+    sheet_basis integer DEFAULT 0 NOT NULL,
+    rule_label text DEFAULT ''::text NOT NULL,
+    reason text DEFAULT ''::text NOT NULL,
+    approval_remarks text DEFAULT ''::text NOT NULL,
+    payload_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    summary_json jsonb DEFAULT '{}'::jsonb NOT NULL,
+    final_wo_no text DEFAULT ''::text NOT NULL,
+    requested_by text DEFAULT ''::text NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    decided_by text DEFAULT ''::text NOT NULL,
+    decided_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT work_order_wastage_approval_status_chk CHECK ((status = ANY (ARRAY['PENDING'::text, 'APPROVED'::text, 'REJECTED'::text, 'CANCELLED'::text])))
+);
+
+
+--
+-- Name: TABLE work_order_wastage_approvals; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.work_order_wastage_approvals IS 'Draft Work Order wastage override requests. Approved rows release the real work order; pending/rejected rows do not create work_orders records.';
+
+
+--
 -- Name: messages; Type: TABLE; Schema: realtime; Owner: -
 --
 
@@ -25382,6 +26564,30 @@ ALTER TABLE ONLY public.idempotency_keys
 
 
 --
+-- Name: inv_item_purchase_uom_rule_audit inv_item_purchase_uom_rule_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inv_item_purchase_uom_rule_audit
+    ADD CONSTRAINT inv_item_purchase_uom_rule_audit_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: inv_item_purchase_uom_rules inv_item_purchase_uom_rules_item_code_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inv_item_purchase_uom_rules
+    ADD CONSTRAINT inv_item_purchase_uom_rules_item_code_key UNIQUE (item_code);
+
+
+--
+-- Name: inv_item_purchase_uom_rules inv_item_purchase_uom_rules_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inv_item_purchase_uom_rules
+    ADD CONSTRAINT inv_item_purchase_uom_rules_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: inv_item_sequences inv_item_sequences_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -25510,6 +26716,14 @@ ALTER TABLE ONLY public.inv_sheet_conversions
 
 
 --
+-- Name: inv_wo_excess_issue_reviews inv_wo_excess_issue_reviews_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inv_wo_excess_issue_reviews
+    ADD CONSTRAINT inv_wo_excess_issue_reviews_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: invoice_lines invoice_lines_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -25595,6 +26809,14 @@ ALTER TABLE ONLY public.item_bom_routing
 
 ALTER TABLE ONLY public.item_bom_routing
     ADD CONSTRAINT item_bom_routing_revision_seq_uk UNIQUE (revision_id, sequence_no);
+
+
+--
+-- Name: item_dimension_audit item_dimension_audit_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_dimension_audit
+    ADD CONSTRAINT item_dimension_audit_pkey PRIMARY KEY (id);
 
 
 --
@@ -25838,6 +27060,14 @@ ALTER TABLE ONLY public.production_fg_completion_log
 
 
 --
+-- Name: production_machine_operators production_machine_operators_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.production_machine_operators
+    ADD CONSTRAINT production_machine_operators_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: purchase_artwork_procurement purchase_artwork_procurement_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -26059,6 +27289,22 @@ ALTER TABLE ONLY public.work_order_materials
 
 ALTER TABLE ONLY public.work_order_routing
     ADD CONSTRAINT work_order_routing_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: work_order_wastage_approvals work_order_wastage_approvals_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_order_wastage_approvals
+    ADD CONSTRAINT work_order_wastage_approvals_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: work_order_wastage_approvals work_order_wastage_approvals_request_ref_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.work_order_wastage_approvals
+    ADD CONSTRAINT work_order_wastage_approvals_request_ref_key UNIQUE (request_ref);
 
 
 --
@@ -26994,6 +28240,27 @@ CREATE INDEX idx_flexowo_work_order_jobs_so_line ON public.work_order_jobs USING
 
 
 --
+-- Name: idx_inv_item_purchase_uom_rule_audit_item_code; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_item_purchase_uom_rule_audit_item_code ON public.inv_item_purchase_uom_rule_audit USING btree (upper(item_code), changed_at DESC);
+
+
+--
+-- Name: idx_inv_item_purchase_uom_rules_item_code; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_item_purchase_uom_rules_item_code ON public.inv_item_purchase_uom_rules USING btree (upper(item_code));
+
+
+--
+-- Name: idx_inv_item_purchase_uom_rules_item_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_item_purchase_uom_rules_item_id ON public.inv_item_purchase_uom_rules USING btree (item_id);
+
+
+--
 -- Name: idx_inv_items_active; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -27348,6 +28615,20 @@ CREATE UNIQUE INDEX idx_inv_stock_mv_item_location ON public.inv_stock_mv USING 
 --
 
 CREATE INDEX idx_inv_stock_mv_search ON public.inv_stock_mv USING btree (location, item_code, item_name);
+
+
+--
+-- Name: idx_inv_wo_excess_issue_reviews_action; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_wo_excess_issue_reviews_action ON public.inv_wo_excess_issue_reviews USING btree (action_type, reviewed_at DESC);
+
+
+--
+-- Name: idx_inv_wo_excess_issue_reviews_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_inv_wo_excess_issue_reviews_lookup ON public.inv_wo_excess_issue_reviews USING btree (wo_no, material_key, reviewed_at DESC);
 
 
 --
@@ -27750,6 +29031,13 @@ CREATE INDEX idx_production_fg_completion_log_so_line ON public.production_fg_co
 
 
 --
+-- Name: idx_production_machine_operators_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_production_machine_operators_lookup ON public.production_machine_operators USING btree (machine_name, active, sort_order, operator_name);
+
+
+--
 -- Name: idx_purchase_artwork_procurement_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -27964,6 +29252,55 @@ CREATE INDEX idx_purchase_vendors_category ON public.purchase_vendors USING btre
 --
 
 CREATE INDEX idx_purchase_vendors_name ON public.purchase_vendors USING btree (vendor_name);
+
+
+--
+-- Name: idx_reports_artworks_latest_line; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reports_artworks_latest_line ON public.artworks USING btree (so_id, line_no, approved_at DESC, artwork_at DESC, id DESC);
+
+
+--
+-- Name: idx_reports_invoice_lines_so_line_invoice; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reports_invoice_lines_so_line_invoice ON public.invoice_lines USING btree (so_line_id, invoice_id);
+
+
+--
+-- Name: idx_reports_invoices_status_doc_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reports_invoices_status_doc_date ON public.invoices USING btree (status, document_type, invoice_date);
+
+
+--
+-- Name: idx_reports_sales_order_lines_so_status_line; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reports_sales_order_lines_so_status_line ON public.sales_order_lines USING btree (so_id, status, line_no);
+
+
+--
+-- Name: idx_reports_sales_orders_so_date_number; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reports_sales_orders_so_date_number ON public.sales_orders USING btree (so_date DESC, so_number);
+
+
+--
+-- Name: idx_reports_work_order_jobs_so_line_wo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reports_work_order_jobs_so_line_wo ON public.work_order_jobs USING btree (so_number, line_no, wo_id);
+
+
+--
+-- Name: idx_reports_work_order_routing_wo_status_seq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reports_work_order_routing_wo_status_seq ON public.work_order_routing USING btree (wo_id, status, sequence_no);
 
 
 --
@@ -28373,6 +29710,27 @@ CREATE INDEX idx_work_order_routing_wo_sequence ON public.work_order_routing USI
 
 
 --
+-- Name: idx_work_order_wastage_approvals_final_wo; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_order_wastage_approvals_final_wo ON public.work_order_wastage_approvals USING btree (final_wo_no) WHERE (final_wo_no <> ''::text);
+
+
+--
+-- Name: idx_work_order_wastage_approvals_ref; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_order_wastage_approvals_ref ON public.work_order_wastage_approvals USING btree (request_ref);
+
+
+--
+-- Name: idx_work_order_wastage_approvals_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_work_order_wastage_approvals_status ON public.work_order_wastage_approvals USING btree (status, requested_at DESC);
+
+
+--
 -- Name: idx_work_orders_issue_active; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -28468,6 +29826,34 @@ CREATE INDEX item_bom_revisions_item_code_idx ON public.item_bom_revisions USING
 --
 
 CREATE INDEX item_bom_routing_revision_idx ON public.item_bom_routing USING btree (revision_id, sequence_no);
+
+
+--
+-- Name: item_dimension_audit_item_changed_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX item_dimension_audit_item_changed_idx ON public.item_dimension_audit USING btree (item_code, changed_at DESC);
+
+
+--
+-- Name: items_dimension_completeness_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX items_dimension_completeness_idx ON public.items USING btree (active, item_code) WHERE ((length_mm IS NULL) OR (length_mm <= (0)::numeric) OR (width_mm IS NULL) OR (width_mm <= (0)::numeric));
+
+
+--
+-- Name: items_item_code_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX items_item_code_trgm_idx ON public.items USING gin (item_code public.gin_trgm_ops);
+
+
+--
+-- Name: items_item_name_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX items_item_name_trgm_idx ON public.items USING gin (item_name public.gin_trgm_ops);
 
 
 --
@@ -28587,6 +29973,13 @@ CREATE UNIQUE INDEX uq_packing_records_so_line_id ON public.packing_records USIN
 --
 
 CREATE UNIQUE INDEX uq_production_fg_completion_log_entry_line ON public.production_fg_completion_log USING btree (production_entry_id, so_line_id) WHERE (production_entry_id IS NOT NULL);
+
+
+--
+-- Name: uq_production_machine_operators_machine_operator; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_production_machine_operators_machine_operator ON public.production_machine_operators USING btree (lower(TRIM(BOTH FROM machine_name)), lower(TRIM(BOTH FROM operator_name)));
 
 
 --
@@ -29214,6 +30607,14 @@ ALTER TABLE ONLY public.fg_opening_dispatch_entries
 
 
 --
+-- Name: inv_item_purchase_uom_rules inv_item_purchase_uom_rules_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.inv_item_purchase_uom_rules
+    ADD CONSTRAINT inv_item_purchase_uom_rules_item_id_fkey FOREIGN KEY (item_id) REFERENCES public.inv_items(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: inv_ledger inv_ledger_item_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -29363,6 +30764,14 @@ ALTER TABLE ONLY public.item_bom_revisions
 
 ALTER TABLE ONLY public.item_bom_routing
     ADD CONSTRAINT item_bom_routing_revision_id_fkey FOREIGN KEY (revision_id) REFERENCES public.item_bom_revisions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: item_dimension_audit item_dimension_audit_item_code_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.item_dimension_audit
+    ADD CONSTRAINT item_dimension_audit_item_code_fkey FOREIGN KEY (item_code) REFERENCES public.items(item_code) ON UPDATE CASCADE ON DELETE RESTRICT;
 
 
 --
@@ -29956,6 +31365,18 @@ ALTER TABLE public.grn ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.idempotency_keys ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: inv_item_purchase_uom_rule_audit; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inv_item_purchase_uom_rule_audit ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: inv_item_purchase_uom_rules; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inv_item_purchase_uom_rules ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: inv_item_sequences; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -30034,6 +31455,12 @@ ALTER TABLE public.inv_sheet_conversion_sequences ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.inv_sheet_conversions ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: inv_wo_excess_issue_reviews; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.inv_wo_excess_issue_reviews ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: invoice_lines; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -30068,6 +31495,12 @@ ALTER TABLE public.item_bom_revisions ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.item_bom_routing ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: item_dimension_audit; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.item_dimension_audit ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: item_sequences; Type: ROW SECURITY; Schema: public; Owner: -
@@ -30214,6 +31647,12 @@ ALTER TABLE public.production_entry_audit_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.production_fg_completion_log ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: production_machine_operators; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.production_machine_operators ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: purchase_artwork_procurement; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -30340,6 +31779,12 @@ ALTER TABLE public.work_order_materials ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.work_order_routing ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: work_order_wastage_approvals; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.work_order_wastage_approvals ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: work_orders; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -30462,5 +31907,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict V2yMhid4bTbXcu6FZ74Bgi0hdLlwsRAcfHTbmkp78V3jemDahLH4wKZY3ywAwpl
+\unrestrict i4UGB41ckAh1iLoa6fbkqZu9vy3P5uiibIDkCgHn3jE0H72IgdihdyGqMdqjBaM
 

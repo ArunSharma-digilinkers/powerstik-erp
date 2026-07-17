@@ -74,7 +74,7 @@ headers: {
   return text ? JSON.parse(text) : null;
 }
 
-function supabaseSelect(table, opts) {
+function supabaseSelect_(table, opts) {
   const q = {};
   if (opts?.select) q.select = opts.select;
   if (opts?.filters) {
@@ -121,7 +121,7 @@ function _supabaseSelectAll_(table, opts, pageSize, maxRows) {
   const out = [];
   let offset = 0;
   while (offset < cap) {
-    const rows = supabaseSelect(table, Object.assign({}, base, {
+    const rows = supabaseSelect_(table, Object.assign({}, base, {
       limit: Math.min(size, cap - offset),
       offset: offset
     })) || [];
@@ -145,7 +145,7 @@ function _selectArtworkJobsFromView_(viewName, opts) {
       .replace(/^,|,$/g, '');
   };
   try {
-    return supabaseSelect(viewName, query) || [];
+    return supabaseSelect_(viewName, query) || [];
   } catch (e) {
     const msg = String((e && e.message) || e || '');
     const select = String(query.select || '');
@@ -160,7 +160,7 @@ function _selectArtworkJobsFromView_(viewName, opts) {
 
     while (true) {
       try {
-        const rows = supabaseSelect(viewName, Object.assign({}, query, {
+        const rows = supabaseSelect_(viewName, Object.assign({}, query, {
           select: fallbackSelect
         })) || [];
         return rows.map(function(row) {
@@ -223,7 +223,7 @@ function _supabaseSelectAllUnbounded_(table, opts, pageSize) {
   const out = [];
   let offset = 0;
   while (true) {
-    const rows = supabaseSelect(table, Object.assign({}, base, {
+    const rows = supabaseSelect_(table, Object.assign({}, base, {
       limit: size,
       offset: offset
     })) || [];
@@ -238,7 +238,7 @@ function _supabaseSelectAllUnbounded_(table, opts, pageSize) {
 function _selectArtworkGroupsFromView_(viewName, opts) {
   const query = opts || {};
   try {
-    return supabaseSelect(viewName, query) || [];
+    return supabaseSelect_(viewName, query) || [];
   } catch (err) {
     if (_supabaseRelationMissing_(err, viewName)) return null;
     throw err;
@@ -251,14 +251,14 @@ function selectArtworkGroupsView_(opts) {
 
 function selectArtworkWorkbenchActiveView_(opts) {
   try {
-    return supabaseSelect('v_artwork_workbench_active', opts || {}) || [];
+    return supabaseSelect_('v_artwork_workbench_active', opts || {}) || [];
   } catch (err) {
     if (_supabaseRelationMissing_(err, 'v_artwork_workbench_active')) return null;
     throw err;
   }
 }
 
-function supabaseInsert(table, payload) {
+function supabaseInsert_(table, payload) {
   return _supabaseFetch_(
     `/rest/v1/${table}`,
     'post',
@@ -266,7 +266,7 @@ function supabaseInsert(table, payload) {
   );
 }
 
-function supabaseBulkInsert(table, rows) {
+function supabaseBulkInsert_(table, rows) {
   if (!Array.isArray(rows) || !rows.length) return [];
   return _supabaseFetch_(
     `/rest/v1/${table}`,
@@ -275,7 +275,7 @@ function supabaseBulkInsert(table, rows) {
   );
 }
 
-function supabaseUpsert(table, payload, options) {
+function supabaseUpsert_(table, payload, options) {
   let path = `/rest/v1/${table}`;
   const headers = {
     'Prefer': 'return=representation,resolution=merge-duplicates'
@@ -295,7 +295,7 @@ function supabaseUpsert(table, payload, options) {
 }
 
 
-function supabaseRpc(fn, params) {
+function supabaseRpc_(fn, params) {
   return _supabaseFetch_(
     `/rest/v1/rpc/${fn}`,
     'post',
@@ -303,7 +303,7 @@ function supabaseRpc(fn, params) {
   );
 }
 
-function supabaseUpdate(table, filters, data) {
+function supabaseUpdate_(table, filters, data) {
   const params = {};
   Object.keys(filters).forEach(k => {
     params[k] = filters[k];
@@ -317,7 +317,7 @@ function supabaseUpdate(table, filters, data) {
   );
 }
 
-function supabaseDelete(table, filters) {
+function supabaseDelete_(table, filters) {
   const params = {};
   Object.keys(filters).forEach(k => {
     params[k] = filters[k];
@@ -331,7 +331,7 @@ function supabaseDelete(table, filters) {
   );
 }
 
-function supabaseDeleteMinimal(table, filters) {
+function supabaseDeleteMinimal_(table, filters) {
   const params = {};
   Object.keys(filters).forEach(k => {
     params[k] = filters[k];
@@ -346,7 +346,7 @@ function supabaseDeleteMinimal(table, filters) {
   );
 }
 
-function supabaseBulkInsertMinimal(table, rows) {
+function supabaseBulkInsertMinimal_(table, rows) {
   if (!Array.isArray(rows) || !rows.length) return [];
   return _supabaseFetch_(
     `/rest/v1/${table}`,
@@ -357,7 +357,7 @@ function supabaseBulkInsertMinimal(table, rows) {
   );
 }
 
-function supabaseInsertMinimal(table, payload) {
+function supabaseInsertMinimal_(table, payload) {
   return _supabaseFetch_(
     `/rest/v1/${table}`,
     'post',
@@ -367,7 +367,7 @@ function supabaseInsertMinimal(table, payload) {
   );
 }
 
-function supabaseUpsertMinimal(table, payload, options) {
+function supabaseUpsertMinimal_(table, payload, options) {
   let path = `/rest/v1/${table}`;
   const headers = {
     'Prefer': 'return=minimal,resolution=merge-duplicates'
@@ -386,7 +386,7 @@ function supabaseUpsertMinimal(table, payload, options) {
   );
 }
 
-function supabaseUpdateMinimal(table, filters, data) {
+function supabaseUpdateMinimal_(table, filters, data) {
   const params = {};
   Object.keys(filters).forEach(k => {
     params[k] = filters[k];
@@ -466,7 +466,7 @@ function _auditTryInsertEvent_(entry) {
   if (!row.entity_type || !row.action || !row.source_module) return false;
 
   try {
-    supabaseInsertMinimal(AUDIT_EVENTS_TABLE, row);
+    supabaseInsertMinimal_(AUDIT_EVENTS_TABLE, row);
     return true;
   } catch (err) {
     if (_supabaseRelationMissing_(err, AUDIT_EVENTS_TABLE)) {
@@ -488,7 +488,7 @@ function _auditSnapshotError_(scope, err) {
 function _auditSelectRowsSafe_(table, opts) {
   if (_auditEventsSuppressed_()) return [_auditSnapshotError_(table, 'audit_events unavailable')];
   try {
-    return supabaseSelect(table, opts || {}) || [];
+    return supabaseSelect_(table, opts || {}) || [];
   } catch (err) {
     return [_auditSnapshotError_(table, err)];
   }
@@ -560,7 +560,6 @@ function _supabaseSelectByKeyInBatches_(table, select, key, values, order, chunk
   return out;
 }
 
-const APP_SECRET_KEY = 'AJangra';
 const SPREADSHEET_ID = '1voKg25EsXIYWquE78E3MtNSCTLiNssM6-HaWi1O_ngk';
 const EXTERNAL_SO_DB_ID = '1voKg25EsXIYWquE78E3MtNSCTLiNssM6-HaWi1O_ngk';
 const MASTER_DB_ID = '1kJpXEhwjhf74PutuvkoVF5WlMdl0v3P7orTbJ6SenHs';
@@ -881,7 +880,7 @@ function getMasters() {
   const masters = getUnifiedMasters();
 
   try {
-    const clients = supabaseSelect('clients', {
+    const clients = supabaseSelect_('clients', {
       filters: { active: 'eq.true' },
       order: 'client_name.asc'
     }) || [];
@@ -1273,7 +1272,7 @@ function _clientNormalizeRow_(row) {
 function _clientSelectRows_(opts) {
   const query = opts || {};
   try {
-    return (supabaseSelect('clients', Object.assign({}, query, {
+    return (supabaseSelect_('clients', Object.assign({}, query, {
       select: 'id,client_code,client_name,state,gstin,credit_days,category,active,pan_no,payment_terms,bill_to_address,bill_to_city,bill_to_state,bill_to_pincode,ship_to_address,ship_to_city,ship_to_state,ship_to_pincode'
     })) || []).map(_clientNormalizeRow_);
   } catch (err) {
@@ -1292,7 +1291,7 @@ function _clientSelectRows_(opts) {
     if (!missingNewColumns) throw err;
 
     try {
-      return (supabaseSelect('clients', Object.assign({}, query, {
+      return (supabaseSelect_('clients', Object.assign({}, query, {
         select: 'id,client_code,client_name,state,gstin,credit_days,category,active,address,city,pincode'
       })) || []).map(_clientNormalizeRow_);
     } catch (legacyErr) {
@@ -1302,7 +1301,7 @@ function _clientSelectRows_(opts) {
         _clientColumnMissing_(legacyMsg, 'city') ||
         _clientColumnMissing_(legacyMsg, 'pincode');
       if (!missingLegacyAddress) throw legacyErr;
-      return (supabaseSelect('clients', Object.assign({}, query, {
+      return (supabaseSelect_('clients', Object.assign({}, query, {
         select: 'id,client_code,client_name,state,gstin,credit_days,category,active'
       })) || []).map(_clientNormalizeRow_);
     }
@@ -1439,7 +1438,7 @@ function _mastersClientPayloadFromView_(row) {
 }
 
 function _mastersGetBootstrapFromView_() {
-  const rows = supabaseSelect('v_client_master_register', {
+  const rows = supabaseSelect_('v_client_master_register', {
     order: 'client_name.asc',
     limit: 3000
   }) || [];
@@ -1671,13 +1670,13 @@ function mastersSaveClient(payload, token) {
   };
 
   if (existing && existing.id) {
-    supabaseUpdateMinimal('clients', { id: 'eq.' + existing.id }, dbRow);
-    supabaseDeleteMinimal('client_parties', { client_id: 'eq.' + existing.id });
+    supabaseUpdateMinimal_('clients', { id: 'eq.' + existing.id }, dbRow);
+    supabaseDeleteMinimal_('client_parties', { client_id: 'eq.' + existing.id });
   } else {
-    supabaseInsertMinimal('clients', dbRow);
+    supabaseInsertMinimal_('clients', dbRow);
   }
 
-  supabaseBulkInsertMinimal('client_parties', partyRows.map(function(row) {
+  supabaseBulkInsertMinimal_('client_parties', partyRows.map(function(row) {
     return {
       id: row.id,
       client_id: row.client_id,
@@ -1709,7 +1708,7 @@ function mastersToggleClientStatus(clientId, active, token) {
   const id = String(clientId || '').trim();
   if (!id) throw new Error('Client id is required.');
   const nextActive = active === true;
-  supabaseUpdateMinimal('clients', { id: 'eq.' + id }, { active: nextActive });
+  supabaseUpdateMinimal_('clients', { id: 'eq.' + id }, { active: nextActive });
   _touchMastersCacheVersion_();
   return { ok: true, clientId: id, active: nextActive };
 }
@@ -2133,7 +2132,7 @@ function savePlateDieBulk(rows) {
 
       let existing = null;
       try {
-        existing = supabaseSelect('purchase_artwork_procurement', {
+        existing = supabaseSelect_('purchase_artwork_procurement', {
           filters: {
             artwork_key: 'eq.' + artworkKey,
             type: 'eq.' + type
@@ -2165,14 +2164,14 @@ function savePlateDieBulk(rows) {
 
       try {
         if (existing?.id) {
-          supabaseUpdate(
+          supabaseUpdate_(
             'purchase_artwork_procurement',
             { id: 'eq.' + existing.id },
             finalPayload
           );
         } else {
           finalPayload.created_at = new Date().toISOString();
-          supabaseInsert('purchase_artwork_procurement', finalPayload);
+          supabaseInsert_('purchase_artwork_procurement', finalPayload);
         }
       } catch (e) {
         throw new Error('Run purchase_plate_die_po_schema.sql in Supabase before saving the updated plate and die planning fields.');
@@ -2337,7 +2336,7 @@ function _purchaseListPOHeaders_() {
 function _purchaseGetPOHeaderByNo_(poNo) {
   const key = String(poNo || '').trim();
   if (!key) return null;
-  const rows = supabaseSelect('purchase_orders', {
+  const rows = supabaseSelect_('purchase_orders', {
     filters: { po_no: 'eq.' + key },
     limit: 1
   }) || [];
@@ -2353,7 +2352,7 @@ function _purchaseListPOLines_() {
 function _purchaseListPOLinesForPO_(poNo) {
   const key = String(poNo || '').trim();
   if (!key) return [];
-  return (supabaseSelect('purchase_order_lines', {
+  return (supabaseSelect_('purchase_order_lines', {
     filters: { po_no: 'eq.' + key },
     order: 'line_no.asc',
     limit: 5000
@@ -2364,7 +2363,7 @@ function _purchaseGetPOLineById_(poNo, lineId) {
   const key = String(poNo || '').trim();
   const id = String(lineId || '').trim();
   if (!key || !id) return null;
-  const rows = supabaseSelect('purchase_order_lines', {
+  const rows = supabaseSelect_('purchase_order_lines', {
     filters: { po_no: 'eq.' + key, id: 'eq.' + id },
     limit: 1
   }) || [];
@@ -2453,7 +2452,7 @@ function _purchaseMaybeSyncPOHeaderStatus_(poNo, poId, storedStatus, liveStatus)
     const filters = poId
       ? { id: 'eq.' + String(poId || '').trim() }
       : { po_no: 'eq.' + key };
-    supabaseUpdate('purchase_orders', filters, {
+    supabaseUpdate_('purchase_orders', filters, {
       status: nextStatus,
       updated_at: _purchaseNowIso_()
     });
@@ -2590,7 +2589,7 @@ function _purchaseFilterActivePOReceiptRows_(rows, lineRows) {
     chunks.forEach(function(chunk) {
       const filters = { id: _supabaseInFilter_(chunk) };
       if (poNos.length === 1) filters.ref_no = 'eq.' + poNos[0];
-      const chunkRows = supabaseSelect('inv_ledger', {
+      const chunkRows = supabaseSelect_('inv_ledger', {
         select: `
           id,
           item_id,
@@ -2800,21 +2799,21 @@ function _purchaseReceiptDbRow_(row, includeOptionalLinkage) {
 
 function _purchaseInsertPOReceipt_(row) {
   try {
-    supabaseInsertMinimal('purchase_po_receipts', _purchaseReceiptDbRow_(row, true));
+    supabaseInsertMinimal_('purchase_po_receipts', _purchaseReceiptDbRow_(row, true));
   } catch (err) {
     if (!_purchaseReceiptHasOptionalLinkageColumnError_(err)) throw err;
-    supabaseInsertMinimal('purchase_po_receipts', _purchaseReceiptDbRow_(row, false));
+    supabaseInsertMinimal_('purchase_po_receipts', _purchaseReceiptDbRow_(row, false));
   }
 }
 
 function _purchaseBulkInsertPOReceipts_(rows) {
   try {
-    supabaseBulkInsertMinimal('purchase_po_receipts', rows.map(function(row) {
+    supabaseBulkInsertMinimal_('purchase_po_receipts', rows.map(function(row) {
       return _purchaseReceiptDbRow_(row, true);
     }));
   } catch (err) {
     if (!_purchaseReceiptHasOptionalLinkageColumnError_(err)) throw err;
-    supabaseBulkInsertMinimal('purchase_po_receipts', rows.map(function(row) {
+    supabaseBulkInsertMinimal_('purchase_po_receipts', rows.map(function(row) {
       return _purchaseReceiptDbRow_(row, false);
     }));
   }
@@ -2823,7 +2822,7 @@ function _purchaseBulkInsertPOReceipts_(rows) {
 function _purchaseUpdatePOReceipt_(receiptId, row) {
   const id = String(receiptId || '').trim();
   if (!id) throw new Error('Receipt entry reference is required');
-  supabaseUpdateMinimal('purchase_po_receipts', { id: 'eq.' + id }, {
+  supabaseUpdateMinimal_('purchase_po_receipts', { id: 'eq.' + id }, {
     receipt_date: row.receiptDate || _purchaseIsoDate_(new Date()),
     challan_no: String(row.challanNo || '').trim(),
     qty: Number(row.qty || 0),
@@ -2906,7 +2905,7 @@ function _purchaseLedgerPOReceiptEntriesByLine_(lineRows) {
   const ledgerRows = [];
   const poNoChunks = _supabaseChunkValuesByFilterLength_(poNos, 900, 20);
   poNoChunks.forEach(function(chunk) {
-    const rows = supabaseSelect('inv_ledger', {
+    const rows = supabaseSelect_('inv_ledger', {
       select: `
         id,
         item_id,
@@ -2950,7 +2949,7 @@ function _purchaseLedgerPOReceiptEntriesByLine_(lineRows) {
   const fallbackItemCodeById = {};
   const missingItemChunks = _supabaseChunkValuesByFilterLength_(missingItemIds, 900, 20);
   missingItemChunks.forEach(function(chunk) {
-    (supabaseSelect('inv_items', {
+    (supabaseSelect_('inv_items', {
       select: 'id,item_code',
       filters: { id: _supabaseInFilter_(chunk) },
       limit: 500
@@ -3189,9 +3188,9 @@ function purchaseSaveVendor(payload) {
   };
 
   if (existing?.id) {
-    supabaseUpdate('purchase_vendors', { id: 'eq.' + existing.id }, dbRow);
+    supabaseUpdate_('purchase_vendors', { id: 'eq.' + existing.id }, dbRow);
   } else {
-    supabaseInsert('purchase_vendors', dbRow);
+    supabaseInsert_('purchase_vendors', dbRow);
   }
   PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
   return { ok: true, vendor: record };
@@ -3202,7 +3201,7 @@ function purchaseSetVendorStatus(payload) {
   const existing = _purchaseListVendors_().find(v => v.id === String(payload.id || '').trim());
   if (!existing) throw new Error('Vendor not found');
   const isActive = payload.isActive === false ? false : true;
-  supabaseUpdate('purchase_vendors', { id: 'eq.' + existing.id }, {
+  supabaseUpdate_('purchase_vendors', { id: 'eq.' + existing.id }, {
     is_active: isActive,
     updated_at: _purchaseNowIso_()
   });
@@ -3220,7 +3219,7 @@ function purchaseListLeadTimeItemsJSON(opts = {}) {
 
   let rows = null;
   try {
-    rows = (supabaseSelect('v_purchase_lead_time_items', {
+    rows = (supabaseSelect_('v_purchase_lead_time_items', {
       order: 'item_name.asc',
       limit: request.limit
     }) || []).map(function(row) {
@@ -3325,7 +3324,7 @@ function purchaseSaveLeadTimeBulk(payload) {
       throw new Error('MOQ must be zero or greater for item ' + (itemMap[id].itemCode || id));
     }
 
-    supabaseUpdate('inv_items', { id: 'eq.' + id }, {
+    supabaseUpdate_('inv_items', { id: 'eq.' + id }, {
       lead_time_days: leadTime,
       moq_qty: moqQty,
       lead_time_updated_at: now,
@@ -3525,7 +3524,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
     return result;
   }
 
-  const rows = supabaseSelect('inv_purchase_requests', {
+  const rows = supabaseSelect_('inv_purchase_requests', {
     select: `
       pr_no,
       created_at,
@@ -4071,7 +4070,7 @@ function purchaseGetPODetail(poNo, opts) {
     if (cached) return cached;
   }
   try {
-    const fastRows = supabaseSelect('v_purchase_po_detail_fast', {
+    const fastRows = supabaseSelect_('v_purchase_po_detail_fast', {
       filters: { po_no: 'eq.' + key },
       order: 'line_no.asc',
       limit: 5000
@@ -4105,7 +4104,7 @@ function purchaseListPOsForPRJSON(prNo) {
     throw new Error('PR No is required');
   }
 
-  const baseLines = (supabaseSelect('purchase_order_lines', {
+  const baseLines = (supabaseSelect_('purchase_order_lines', {
     filters: { source_ref: 'eq.' + refNo },
     order: 'po_no.asc,line_no.asc'
   }) || []);
@@ -4115,7 +4114,7 @@ function purchaseListPOsForPRJSON(prNo) {
   }
 
   const poIds = [...new Set(baseLines.map(line => line.po_id).filter(Boolean))];
-  const lines = (supabaseSelect('purchase_order_lines', {
+  const lines = (supabaseSelect_('purchase_order_lines', {
     filters: { po_id: _supabaseInFilter_(poIds) },
     order: 'po_no.asc,line_no.asc'
   }) || []).map(l => ({
@@ -4141,7 +4140,7 @@ function purchaseListPOsForPRJSON(prNo) {
   const headers = [];
   for (let i = 0; i < poIds.length; i += 10) {
     const chunk = poIds.slice(i, i + 10);
-    headers.push.apply(headers, (supabaseSelect('purchase_orders', {
+    headers.push.apply(headers, (supabaseSelect_('purchase_orders', {
       filters: { id: 'in.(' + chunk.join(',') + ')' },
       order: 'order_date.desc,created_at.desc'
     }) || []).map(h => ({
@@ -4166,7 +4165,7 @@ function purchaseListPOsForPRJSON(prNo) {
   const vendorMap = {};
   for (let i = 0; i < vendorIds.length; i += 20) {
     const chunk = vendorIds.slice(i, i + 20);
-    (supabaseSelect('purchase_vendors', {
+    (supabaseSelect_('purchase_vendors', {
       select: 'id,gstin',
       filters: { id: _supabaseInFilter_(chunk) }
     }) || []).forEach(function(vendor) {
@@ -4292,7 +4291,9 @@ function purchaseListPOsForPRJSON(prNo) {
   return { ok: true, rows: rows };
 }
 
-function purchaseCreatePO(payload) {
+function purchaseCreatePO(payload, token) {
+  const user = _requireModuleAccess_(_authTokenFromPayload_(payload, token), 'PURCHASE', 'can_create');
+  const actor = _authActorName_(user);
   if (!payload || !payload.vendorId) {
     throw new Error('Vendor is required');
   }
@@ -4353,7 +4354,7 @@ function purchaseCreatePO(payload) {
   const headerId = Utilities.getUuid();
 
   try {
-    supabaseInsert('purchase_orders', {
+    supabaseInsert_('purchase_orders', {
       id: headerId,
       po_no: poNo,
       order_date: payload.orderDate || _purchaseIsoDate_(new Date()),
@@ -4372,7 +4373,7 @@ function purchaseCreatePO(payload) {
       basic_total: basicTotal,
       tax_total: taxTotal,
       total_value: totalValue,
-      created_by: String(payload.createdBy || '').trim(),
+      created_by: actor,
       created_at: now,
       updated_at: now
     });
@@ -4380,7 +4381,7 @@ function purchaseCreatePO(payload) {
     throw new Error('Run purchase_freight_value_schema.sql in Supabase before creating freight-valued purchase orders.');
   }
 
-  supabaseBulkInsert('purchase_order_lines', lines.map(line => ({
+  supabaseBulkInsert_('purchase_order_lines', lines.map(line => ({
     id: line.id,
     po_id: headerId,
     po_no: line.poNo,
@@ -4405,7 +4406,9 @@ function purchaseCreatePO(payload) {
   return { ok: true, poNo: poNo };
 }
 
-function purchaseCreateArtworkPO(payload) {
+function purchaseCreateArtworkPO(payload, token) {
+  const user = _requireModuleAccess_(_authTokenFromPayload_(payload, token), 'PURCHASE', 'can_create');
+  const actor = _authActorName_(user);
   if (!payload || !payload.vendorId) throw new Error('Vendor is required');
   const type = String(payload.type || '').trim().toUpperCase();
   if (type !== 'PLATE' && type !== 'DIE') throw new Error('Plate or die type is required');
@@ -4487,7 +4490,7 @@ function purchaseCreateArtworkPO(payload) {
   const totalQty = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
 
   try {
-    supabaseInsert('purchase_orders', {
+    supabaseInsert_('purchase_orders', {
       id: headerId,
       po_no: poNo,
       order_date: payload.orderDate || _purchaseIsoDate_(new Date()),
@@ -4506,7 +4509,7 @@ function purchaseCreateArtworkPO(payload) {
       basic_total: basicTotal,
       tax_total: taxTotal,
       total_value: totalValue,
-      created_by: String(payload.createdBy || '').trim(),
+      created_by: actor,
       created_at: now,
       updated_at: now
     });
@@ -4514,7 +4517,7 @@ function purchaseCreateArtworkPO(payload) {
     throw new Error('Run purchase_freight_value_schema.sql in Supabase before creating freight-valued purchase orders.');
   }
 
-  supabaseBulkInsert('purchase_order_lines', lines.map(line => ({
+  supabaseBulkInsert_('purchase_order_lines', lines.map(line => ({
     id: line.id,
     po_id: headerId,
     po_no: line.poNo,
@@ -4539,7 +4542,9 @@ function purchaseCreateArtworkPO(payload) {
   return { ok: true, poNo: poNo };
 }
 
-function _purchasePOAuditActor_(payload) {
+function _purchasePOAuditActor_(payload, user) {
+  const sessionActor = _authActorName_(user);
+  if (sessionActor && sessionActor !== 'ERP User') return sessionActor;
   const explicit = String(payload && (payload.updatedBy || payload.changedBy || payload.createdBy) || '').trim();
   if (explicit) return explicit;
   try {
@@ -4597,7 +4602,7 @@ function _purchaseAuditSnapshotsDiffer_(beforeData, afterData) {
 
 function _purchaseInsertPOAuditLog_(entry) {
   try {
-    supabaseInsertMinimal('purchase_po_audit_log', {
+    supabaseInsertMinimal_('purchase_po_audit_log', {
       po_id: entry.poId || null,
       po_no: String(entry.poNo || '').trim(),
       po_line_id: entry.poLineId || null,
@@ -4621,7 +4626,8 @@ function _purchaseRecordPOAuditLogs_(entries) {
   });
 }
 
-function purchaseUpdatePO(payload) {
+function purchaseUpdatePO(payload, token) {
+  const user = _requireModuleAccess_(_authTokenFromPayload_(payload, token), 'PURCHASE', 'can_edit');
   if (!payload || !payload.poNo) throw new Error('PO No is required');
 
   const header = _purchaseListPOHeaders_().find(row => row.poNo === String(payload.poNo || '').trim());
@@ -4631,7 +4637,7 @@ function purchaseUpdatePO(payload) {
   const vendor = _purchaseListVendors_().find(v => v.id === payload.vendorId);
   if (!vendor) throw new Error('Vendor not found');
 
-  const changedBy = _purchasePOAuditActor_(payload);
+  const changedBy = _purchasePOAuditActor_(payload, user);
   const changedAt = _purchaseNowIso_();
   const auditEntries = [];
   const livePO = ((purchaseListPOsJSON({ poNo: header.poNo, forceRefresh: true }).rows || [])[0]) || { lines: [] };
@@ -4697,7 +4703,7 @@ function purchaseUpdatePO(payload) {
       if (Number(live.receivedQty || 0) > 0) {
         throw new Error('Cannot delete line ' + line.lineNo + ' because receipts already exist.');
       }
-      supabaseDelete('purchase_order_lines', { id: 'eq.' + line.id });
+      supabaseDelete_('purchase_order_lines', { id: 'eq.' + line.id });
       auditEntries.push({
         poId: header.id,
         poNo: header.poNo,
@@ -4815,7 +4821,7 @@ function purchaseUpdatePO(payload) {
       if (line.hasReceipts) {
         throw new Error('Received PO line ' + (beforeLine.lineNo || line.lineNo) + ' cannot be edited after GRN activity. Edit only lines with no received quantity.');
       }
-      supabaseUpdate('purchase_order_lines', { id: 'eq.' + line.id }, {
+      supabaseUpdate_('purchase_order_lines', { id: 'eq.' + line.id }, {
         line_no: line.lineNo,
         source_type: line.sourceType,
         source_ref: line.sourceRef,
@@ -4849,7 +4855,7 @@ function purchaseUpdatePO(payload) {
       for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
         const insertId = Utilities.getUuid();
         try {
-          supabaseInsert('purchase_order_lines', {
+          supabaseInsert_('purchase_order_lines', {
             id: insertId,
             po_id: header.id,
             po_no: header.poNo,
@@ -4925,7 +4931,7 @@ function purchaseUpdatePO(payload) {
       taxTotal: headerUpdate.tax_total,
       totalValue: headerUpdate.total_value
     });
-    supabaseUpdate('purchase_orders', { id: 'eq.' + header.id }, headerUpdate);
+    supabaseUpdate_('purchase_orders', { id: 'eq.' + header.id }, headerUpdate);
     if (_purchaseAuditSnapshotsDiffer_(beforeHeader, afterHeader)) {
       auditEntries.push({
         poId: header.id,
@@ -4973,7 +4979,7 @@ function _purchaseUpdatePOStatus_(poNo) {
     return sum + Math.max(0, Number(row.qty || 0) - lineReceivedQty - lineShortClosedQty);
   }, 0);
   const status = _purchaseDerivePOStatusFromPending_(totalQty, receivedQty, pendingQty, shortClosedQty);
-  supabaseUpdate('purchase_orders', { id: 'eq.' + header.id }, {
+  supabaseUpdate_('purchase_orders', { id: 'eq.' + header.id }, {
     status: status,
     updated_at: _purchaseNowIso_()
   });
@@ -5012,7 +5018,7 @@ function purchaseShortClosePOLines(payload) {
       ' by=' + actor.replace(/\]/g, '') +
       ' at=' + now +
       ' reason=' + reason.replace(/\]/g, ')') + ']';
-    supabaseUpdate('purchase_order_lines', { id: 'eq.' + lineId }, {
+    supabaseUpdate_('purchase_order_lines', { id: 'eq.' + lineId }, {
       remarks: [existingRemark, marker].filter(Boolean).join('\n')
     });
     closed.push({
@@ -5041,7 +5047,8 @@ function purchaseShortClosePO(payload) {
   return purchaseShortClosePOLines(Object.assign({}, payload || {}, { poNo: poNo, lineIds: pendingLineIds }));
 }
 
-function purchaseCancelPOs(payload) {
+function purchaseCancelPOs(payload, token) {
+  const user = _requireModuleAccess_(_authTokenFromPayload_(payload, token), 'PURCHASE', 'can_edit');
   const poNos = Array.isArray(payload && payload.poNos)
     ? [...new Set(payload.poNos.map(function(v) { return String(v || '').trim(); }).filter(Boolean))]
     : [];
@@ -5114,12 +5121,12 @@ function purchaseCancelPOs(payload) {
   }
 
   const now = _purchaseNowIso_();
-  const actor = String(payload && payload.cancelledBy || '').trim() || 'ERP User';
+  const actor = _authActorName_(user);
   const reason = String(payload && payload.reason || '').trim();
   cancellable.forEach(function(header) {
     const notes = String(header.notes || '').trim();
     const cancelNote = 'Cancelled on ' + now + ' by ' + actor + (reason ? ' | ' + reason : '');
-    supabaseUpdate('purchase_orders', { id: 'eq.' + header.id }, {
+    supabaseUpdate_('purchase_orders', { id: 'eq.' + header.id }, {
       status: 'CANCELLED',
       notes: notes ? (notes + '\n' + cancelNote) : cancelNote,
       updated_at: now
@@ -5134,7 +5141,12 @@ function purchaseCancelPOs(payload) {
   };
 }
 
-function purchaseReceivePOLine(payload) {
+function purchaseReceivePOLine(payload, token) {
+  _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+    { module: 'PURCHASE', action: 'can_create' },
+    { module: 'PURCHASE', action: 'can_edit' },
+    { module: 'INVENTORY', action: 'can_create' }
+  ]);
   if (!payload || !payload.poNo || !payload.lineId) {
     throw new Error('PO line reference is required');
   }
@@ -5174,7 +5186,7 @@ function purchaseReceivePOLine(payload) {
   refreshStockMV_();
 
   if (line.sourceType === 'INVENTORY_PR' && line.sourceRef) {
-    const pr = supabaseSelect('inv_purchase_requests', {
+    const pr = supabaseSelect_('inv_purchase_requests', {
       filters: { pr_no: 'eq.' + line.sourceRef },
       limit: 1
     })[0];
@@ -5183,7 +5195,7 @@ function purchaseReceivePOLine(payload) {
       const newReceived = Number(pr.received_qty || 0) + qty;
       const reqQty = Number(pr.requested_qty || 0);
       const newStatus = newReceived >= reqQty ? 'CLOSED' : 'OPEN';
-      supabaseUpdate(
+      supabaseUpdate_(
         'inv_purchase_requests',
         { pr_no: 'eq.' + line.sourceRef },
         { received_qty: newReceived, status: newStatus }
@@ -5197,7 +5209,11 @@ function purchaseReceivePOLine(payload) {
   return { ok: true };
 }
 
-function purchaseReceiveArtworkPOLine(payload) {
+function purchaseReceiveArtworkPOLine(payload, token) {
+  _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+    { module: 'PURCHASE', action: 'can_create' },
+    { module: 'PURCHASE', action: 'can_edit' }
+  ]);
   if (!payload || !payload.poNo || !payload.lineId) {
     throw new Error('PO line reference is required');
   }
@@ -5319,7 +5335,11 @@ function purchaseUpdateArtworkPOReceipt(payload, token) {
   return { ok: true, poNo: poNo, receiptId: receiptId, receiptIds: [receiptId] };
 }
 
-function purchaseReceiveArtworkPOBulk(payload) {
+function purchaseReceiveArtworkPOBulk(payload, token) {
+  _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+    { module: 'PURCHASE', action: 'can_create' },
+    { module: 'PURCHASE', action: 'can_edit' }
+  ]);
   if (!payload || !payload.poNo) {
     throw new Error('PO reference is required');
   }
@@ -5405,7 +5425,7 @@ function purchaseReceiveArtworkPOBulk(payload) {
 function purchaseGetPOPrintData(poNo) {
   if (!poNo) throw new Error('PO number is required');
   try {
-    const rows = supabaseSelect('v_purchase_po_print_lines', {
+    const rows = supabaseSelect_('v_purchase_po_print_lines', {
       filters: { po_no: 'eq.' + poNo },
       order: 'line_no.asc'
     }) || [];
@@ -5634,15 +5654,15 @@ function purchaseGetPOPrintData(poNo) {
 function purchaseDashboardSummaryJSON(opts = {}) {
   const type = String(opts.type || 'PLATE').toUpperCase();
   try {
-    const core = (supabaseSelect('v_purchase_dashboard_core_metrics', {
+    const core = (supabaseSelect_('v_purchase_dashboard_core_metrics', {
       limit: 1
     }) || [])[0] || null;
-    const recentRows = supabaseSelect('v_purchase_order_summary', {
+    const recentRows = supabaseSelect_('v_purchase_order_summary', {
       select: 'po_no,order_date,vendor_name,status,total_value,pending_qty,created_at',
       order: 'order_date.desc,created_at.desc',
       limit: 8
     }) || [];
-    const tooling = (supabaseSelect('v_purchase_tooling_pending_summary', {
+    const tooling = (supabaseSelect_('v_purchase_tooling_pending_summary', {
       filters: { type: 'eq.' + type },
       limit: 1
     }) || [])[0] || null;
@@ -5776,20 +5796,20 @@ function _fyString_(d) {
 
 function _nextWOSeq_() {
 
-  const seq = supabaseSelect('wo_sequence', {
+  const seq = supabaseSelect_('wo_sequence', {
     limit: 1
   })[0];
 
   if (!seq) {
 
-    supabaseInsert('wo_sequence',{last_no:1});
+    supabaseInsert_('wo_sequence',{last_no:1});
     return 1;
 
   }
 
   const next = (seq.last_no || 0) + 1;
 
-  supabaseUpdate(
+  supabaseUpdate_(
     'wo_sequence',
     { id: 'eq.' + seq.id },
     { last_no: next }
@@ -5867,7 +5887,7 @@ function _isMissingInventoryReservationsTable_(err) {
 function _deleteInventoryReservationsForWO_(woNo) {
   if (!woNo) return;
   try {
-    supabaseDelete('inventory_reservations', {
+    supabaseDelete_('inventory_reservations', {
       reference_type: 'eq.WORK_ORDER',
       reference_no: 'eq.' + woNo
     });
@@ -5883,7 +5903,7 @@ function _deleteInventoryReservationsForWO_(woNo) {
 function _insertInventoryReservationForWO_(woNo, materialRow) {
   if (!woNo || !materialRow?.item_id) return;
   try {
-    supabaseInsertMinimal('inventory_reservations', {
+    supabaseInsertMinimal_('inventory_reservations', {
       item_id: materialRow.item_id,
       reference_type: 'WORK_ORDER',
       reference_no: woNo,
@@ -6010,10 +6030,10 @@ function _excludeClosedSalesOrderLines_(rows, soKey, lineKey) {
 
 function _selectWorkOrderCandidateRows_(query) {
   try {
-    return supabaseSelect('v_workorder_candidates_active', query) || [];
+    return supabaseSelect_('v_workorder_candidates_active', query) || [];
   } catch (err) {
     if (!_supabaseRelationMissing_(err, 'v_workorder_candidates_active')) throw err;
-    return _excludeClosedSalesOrderLines_(supabaseSelect('v_workorder_candidates', query) || [], 'so_number', 'line_no');
+    return _excludeClosedSalesOrderLines_(supabaseSelect_('v_workorder_candidates', query) || [], 'so_number', 'line_no');
   }
 }
 
@@ -6069,7 +6089,7 @@ function _workOrderProductionQty_(orderQty, stockQtyToBill) {
 function _opsLoadArtworkStockClosureRows_() {
   let artRows = [];
   try {
-    artRows = supabaseSelect('artworks', {
+    artRows = supabaseSelect_('artworks', {
       select: 'id,so_id,line_no,artwork_no,product_type,status,stock_qty_to_bill,approved_at',
       filters: {
         stock_qty_to_bill: 'gt.0',
@@ -6565,7 +6585,7 @@ function _unwrapWorkOrderQueueRpc_(res) {
 function _listSOWithStatusFromRpc_(req) {
   let payload = null;
   try {
-    payload = _unwrapWorkOrderQueueRpc_(supabaseRpc('workorder_candidates_queue', {
+    payload = _unwrapWorkOrderQueueRpc_(supabaseRpc_('workorder_candidates_queue', {
       p_date_from: req.dateFrom || null,
       p_date_to: req.dateTo || null
     }));
@@ -6751,7 +6771,7 @@ function _fetchWOCandidateRowsBySoNumbers_(soNumbers) {
 function _listSOWithStatusLegacy_(limit = 200, offset = 0, seedCandidateMap) {
   const pageLimit = Math.max(1, Number(limit || 0) || 200);
   const pageOffset = Math.max(0, Number(offset || 0) || 0);
-  const rawApprovalRows = supabaseSelect(
+  const rawApprovalRows = supabaseSelect_(
     'v_sales_order_lines_for_approval',
     {
       select: `
@@ -6959,7 +6979,7 @@ function _listSOWithStatusLegacy_(limit = 200, offset = 0, seedCandidateMap) {
 function _listSOWithStatusHybrid_(limit = 200, offset = 0) {
   const pageLimit = Math.max(1, Number(limit || 0) || 200);
   const pageOffset = Math.max(0, Number(offset || 0) || 0);
-  const rawApprovalRows = supabaseSelect(
+  const rawApprovalRows = supabaseSelect_(
     'v_sales_order_lines_for_approval',
     {
       select: `
@@ -7712,8 +7732,37 @@ function _validateFlexoWorkOrderPayload_(payload) {
     throw new Error('Flexo Effective Qty must be derived from the saved WO quantity.');
   }
 
+  const wastage = _safeJsonObject_(p.wastage);
+  const makeReadyRm = Number(wastage.makeReadyRm != null ? wastage.makeReadyRm : flexoDetails.makeReadyRm || 0);
+  const processValue = Number(wastage.processValue != null ? wastage.processValue : flexoDetails.processWastageValue || 0);
+  const processType = String(wastage.processType || flexoDetails.processWastageType || '').trim().toUpperCase();
+  if (!Number.isFinite(makeReadyRm) || makeReadyRm < 0 || !Number.isFinite(processValue) || processValue < 0) {
+    throw new Error('Flexo make-ready and process wastage must be non-negative numeric values.');
+  }
+  if (['%','RM'].indexOf(processType) === -1) {
+    throw new Error('Flexo process wastage type must be Percent (%) or Running Meter (RM).');
+  }
+
   p.jobDetails = jobDetails;
   p.flexoDetails = flexoDetails;
+}
+
+function _workOrderDateOnly_(value) {
+  if (value === null || typeof value === 'undefined' || value === '') return null;
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    if (isNaN(value.getTime())) return null;
+    return Utilities.formatDate(value, Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyy-MM-dd');
+  }
+
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return iso[1] + '-' + iso[2] + '-' + iso[3];
+  const display = raw.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/);
+  if (display) {
+    return display[3] + '-' + ('0' + display[2]).slice(-2) + '-' + ('0' + display[1]).slice(-2);
+  }
+  return null;
 }
 
 function _workOrderAuditSnapshot_(woId) {
@@ -7728,7 +7777,7 @@ function _workOrderAuditSnapshot_(woId) {
   const errors = [];
 
   try {
-    header = (supabaseSelect('work_orders', {
+    header = (supabaseSelect_('work_orders', {
       filters: { id: 'eq.' + id },
       limit: 1
     }) || [])[0] || null;
@@ -7737,7 +7786,7 @@ function _workOrderAuditSnapshot_(woId) {
   }
 
   try {
-    jobs = supabaseSelect('work_order_jobs', {
+    jobs = supabaseSelect_('work_order_jobs', {
       filters: { wo_id: 'eq.' + id },
       order: 'line_no.asc'
     }) || [];
@@ -7746,7 +7795,7 @@ function _workOrderAuditSnapshot_(woId) {
   }
 
   try {
-    materials = supabaseSelect('work_order_materials', {
+    materials = supabaseSelect_('work_order_materials', {
       filters: { wo_id: 'eq.' + id },
       order: 'material_type.asc,material_key.asc'
     }) || [];
@@ -7755,7 +7804,7 @@ function _workOrderAuditSnapshot_(woId) {
   }
 
   try {
-    routing = supabaseSelect('work_order_routing', {
+    routing = supabaseSelect_('work_order_routing', {
       filters: { wo_id: 'eq.' + id },
       order: 'sequence_no.asc'
     }) || [];
@@ -7766,7 +7815,7 @@ function _workOrderAuditSnapshot_(woId) {
   let reservations = [];
   try {
     reservations = header && header.wo_number
-      ? (supabaseSelect('inventory_reservations', {
+      ? (supabaseSelect_('inventory_reservations', {
           filters: {
             reference_type: 'eq.WORK_ORDER',
             reference_no: 'eq.' + header.wo_number
@@ -7787,17 +7836,414 @@ function _workOrderAuditSnapshot_(woId) {
   };
 }
 
-function saveWorkOrder(payload, options) {
+function _normalizeWOWastageText_(value) {
+  return String(value == null ? '' : value).trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+}
+
+function _workOrderUsesRunningMeterWastage_(payload) {
+  const jobType = String(payload && payload.jobDetails && payload.jobDetails.type || '').trim().toUpperCase();
+  const wastageBasis = String(payload && payload.wastage && payload.wastage.basis || '').trim().toUpperCase();
+  return wastageBasis === 'RUNNING_METER' || jobType === 'FLEXO' || !!(payload && payload.flexoDetails);
+}
+
+function _workOrderWastageSheetBasis_(payload) {
+  // Flexo wastage is stored as running meters/percent and must never enter sheet-slab approval.
+  if (_workOrderUsesRunningMeterWastage_(payload)) return 0;
+  const jobs = Array.isArray(payload && payload.jobs) ? payload.jobs : [];
+  const groupUpsFromDetails = Number(payload && payload.jobDetails && payload.jobDetails.ups || 0) || 0;
+  const groupUps = groupUpsFromDetails > 0
+    ? groupUpsFromDetails
+    : jobs.reduce(function(sum, job) { return sum + (Number(job.ups || 0) || 0); }, 0);
+  const totalQty = jobs.reduce(function(sum, job) { return sum + (Number(job.qty || 0) || 0); }, 0);
+  if (groupUps > 0 && totalQty > 0) return Math.ceil(totalQty / groupUps);
+
+  const papers = Array.isArray(payload && payload.papers) ? payload.papers : [];
+  return papers.reduce(function(max, paper) {
+    const sheets = Number(paper && (paper.sheets || paper.coreSheets || 0)) || 0;
+    return sheets > max ? sheets : max;
+  }, 0);
+}
+
+function _workOrderHasKraftPrimaryPaper_(payload) {
+  const papers = Array.isArray(payload && payload.papers) ? payload.papers : [];
+  const first = papers[0] || {};
+  const sheetSpec = payload && payload.sheetSpec || {};
+  const text = _normalizeWOWastageText_([
+    first.stock,
+    first.itemLabel,
+    first.parentName,
+    sheetSpec.stock,
+    sheetSpec.parentName
+  ].join(' '));
+  return /\bkraft\b/.test(text);
+}
+
+function _workOrderHasPrintingRouting_(payload) {
+  const routing = Array.isArray(payload && payload.routing) ? payload.routing : [];
+  return routing.some(function(row) {
+    const text = _normalizeWOWastageText_([row && row.dept, row && row.operation].join(' '));
+    return /\bprint/.test(text);
+  });
+}
+
+function _workOrderIsDripOff_(payload) {
+  const coat = _normalizeWOWastageText_(payload && payload.jobDetails && payload.jobDetails.coating || '');
+  return coat === 'drip off' || coat === 'dripoff';
+}
+
+function _getDefaultWorkOrderWastageRule_(payload) {
+  if (_workOrderUsesRunningMeterWastage_(payload)) return null;
+  const sheets = _workOrderWastageSheetBasis_(payload);
+  if (!(sheets > 0)) return null;
+
+  const kraftPrimary = _workOrderHasKraftPrimaryPaper_(payload);
+  const printedBrownBox = kraftPrimary && _workOrderHasPrintingRouting_(payload);
+  const nonPrintedBrownBox = kraftPrimary && !printedBrownBox;
+  const dripOff = _workOrderIsDripOff_(payload);
+  let value = 0;
+  let label = '';
+
+  if (printedBrownBox) {
+    value = sheets <= 500 ? 50 : 100;
+    label = sheets <= 500 ? 'Printed brown box: up to 500 sheets' : 'Printed brown box: above 500 sheets';
+  } else if (nonPrintedBrownBox) {
+    value = 10;
+    label = 'Non-printed brown box';
+  } else if (dripOff) {
+    if (sheets <= 1000) {
+      value = 150;
+      label = 'Drip Off: up to 1000 sheets';
+    } else if (sheets <= 3000) {
+      value = 200;
+      label = 'Drip Off: 1001 to 3000 sheets';
+    } else {
+      value = 300;
+      label = 'Drip Off: above 3000 sheets';
+    }
+  } else if (sheets <= 500) {
+    value = 100;
+    label = 'Non Drip Off: up to 500 sheets';
+  } else if (sheets <= 1000) {
+    value = 150;
+    label = 'Non Drip Off: 501 to 1000 sheets';
+  } else {
+    value = 200;
+    label = 'Non Drip Off: above 1000 sheets';
+  }
+
+  return { value: value, sheets: sheets, label: label };
+}
+
+function _workOrderWastageApprovalTableMissing_(err) {
+  return _supabaseRelationMissing_(err, 'work_order_wastage_approvals');
+}
+
+function _workOrderWastageApprovalInstallMessage_() {
+  return 'Work order wastage approval table is not installed. Apply supabase_work_order_wastage_approval.sql before using wastage override approval.';
+}
+
+function _workOrderWastageApprovalRequireSession_(token) {
+  const user = getSessionUser(token);
+  if (!user) throw new Error('Unauthorized');
+  const roleCode = String(user.role || '').trim().toUpperCase();
+  if (roleCode === 'ADMIN') return user;
+  if (['ACCOUNT','ACCOUNTS','ACCOUNT_HEAD','ACCOUNTS_HEAD','BUSINESS','BUSINESS_HEAD','BUSINESS HEAD'].indexOf(roleCode) !== -1) return user;
+  if (_userHasPermission_(user, 'SALES_ORDER_APPROVAL', 'can_approve_accounts')) return user;
+  if (_userHasPermission_(user, 'SALES_ORDER_APPROVAL', 'can_approve_business')) return user;
+  throw new Error('You do not have permission to approve Work Order wastage overrides.');
+}
+
+function _workOrderWastageSummary_(payload) {
+  const jobs = Array.isArray(payload && payload.jobs) ? payload.jobs : [];
+  return {
+    soNumbers: [...new Set(jobs.map(function(j) { return String(j.so || '').trim(); }).filter(Boolean))],
+    client: jobs.map(function(j) { return String(j.client || '').trim(); }).filter(Boolean)[0] || '',
+    products: jobs.map(function(j) { return String(j.productName || '').trim(); }).filter(Boolean).slice(0, 6),
+    jobCount: jobs.length,
+    totalQty: jobs.reduce(function(sum, j) { return sum + (Number(j.qty || 0) || 0); }, 0),
+    type: String(payload && payload.jobDetails && payload.jobDetails.type || ''),
+    coating: String(payload && payload.jobDetails && payload.jobDetails.coating || ''),
+    primaryPaper: String(payload && payload.sheetSpec && (payload.sheetSpec.stock || payload.sheetSpec.parentName) || '')
+  };
+}
+
+function _selectWOWastageApprovalById_(id) {
+  const rows = supabaseSelect_('work_order_wastage_approvals', {
+    select: '*',
+    filters: { id: 'eq.' + String(id || '').trim() },
+    limit: 1
+  }) || [];
+  return rows[0] || null;
+}
+
+function _validateWorkOrderWastageApproval_(payload, context) {
+  if (_workOrderUsesRunningMeterWastage_(payload)) return;
+  const rule = _getDefaultWorkOrderWastageRule_(payload);
+  if (!rule) return;
+  const requested = Number(payload && payload.wastage && payload.wastage.processSheets || 0) || 0;
+  if (requested === Number(rule.value || 0)) return;
+
+  const ctx = context || {};
+  const existingSnapshot = ctx.existingSnapshot || null;
+  if (ctx.isUpdate && existingSnapshot) {
+    const existingWaste = Number(existingSnapshot && existingSnapshot.wastage && existingSnapshot.wastage.processSheets || 0) || 0;
+    if (existingWaste === requested) return;
+  }
+
+  const approval = payload && payload.wastageOverride || {};
+  const requestId = String(approval.requestId || '').trim();
+  const optionRow = ctx.wastageApprovalRow || null;
+  if (ctx.approvalRelease && optionRow && String(optionRow.id || '') === requestId) {
+    const rowRequested = Number(optionRow.requested_wastage_sheets || 0) || 0;
+    const rowDefault = Number(optionRow.default_wastage_sheets || 0) || 0;
+    if (String(optionRow.status || '').toUpperCase() === 'PENDING' &&
+        rowRequested === requested &&
+        rowDefault === Number(rule.value || 0)) {
+      return;
+    }
+  }
+
+  if (requestId) {
+    const row = _selectWOWastageApprovalById_(requestId);
+    if (row &&
+        String(row.status || '').toUpperCase() === 'APPROVED' &&
+        Number(row.approved_wastage_sheets || row.requested_wastage_sheets || 0) === requested &&
+        Number(row.default_wastage_sheets || 0) === Number(rule.value || 0)) {
+      return;
+    }
+  }
+
+  throw new Error('Process wastage differs from the approved slab. Submit and approve a Work Order wastage override before saving this WO.');
+}
+
+function submitWorkOrderWastageOverride(payload, reason, token) {
+  const authToken = _authTokenFromPayload_(payload, token);
+  const sessionUser = _requireAnyModuleAccess_(authToken, [
+    { module: 'WOW', action: 'can_create' },
+    { module: 'WOW', action: 'can_edit' }
+  ]);
+  if (!payload || !Array.isArray(payload.jobs) || !payload.jobs.length) throw new Error('No jobs to submit.');
+  _validateCorrugatedWorkOrderPayload_(payload);
+  _validateFlexoWorkOrderPayload_(payload);
+
+  const rule = _getDefaultWorkOrderWastageRule_(payload);
+  if (!rule) throw new Error('Unable to calculate slab wastage for this request.');
+  const requested = Number(payload && payload.wastage && payload.wastage.processSheets || 0) || 0;
+  if (requested === Number(rule.value || 0)) {
+    throw new Error('Requested wastage is same as the slab default. Approval is not required.');
+  }
+  const cleanReason = String(reason || '').trim();
+  if (!cleanReason) throw new Error('Reason is mandatory for wastage override request.');
+
+  const requestRef = 'WOWR-' + Utilities.getUuid().slice(0, 8).toUpperCase();
+  const actor = _authActorName_(sessionUser);
+  const row = {
+    request_ref: requestRef,
+    status: 'PENDING',
+    default_wastage_sheets: Number(rule.value || 0),
+    requested_wastage_sheets: requested,
+    sheet_basis: Number(rule.sheets || 0),
+    rule_label: rule.label || '',
+    reason: cleanReason,
+    payload_json: payload,
+    summary_json: _workOrderWastageSummary_(payload),
+    requested_by: actor
+  };
+
+  try {
+    supabaseInsertMinimal_('work_order_wastage_approvals', row);
+  } catch (err) {
+    if (_workOrderWastageApprovalTableMissing_(err)) throw new Error(_workOrderWastageApprovalInstallMessage_());
+    throw err;
+  }
+
+  const saved = (supabaseSelect_('work_order_wastage_approvals', {
+    select: '*',
+    filters: { request_ref: 'eq.' + requestRef },
+    limit: 1
+  }) || [])[0] || row;
+
+  _auditTryInsertEvent_({
+    entityType: 'WORK_ORDER_WASTAGE_APPROVAL',
+    entityId: saved.id || requestRef,
+    entityKey: requestRef,
+    action: 'REQUEST',
+    sourceModule: 'SALES_ORDER_APPROVAL',
+    actor: actor,
+    reason: cleanReason,
+    beforeJson: null,
+    afterJson: saved,
+    metadata: { requestRef: requestRef }
+  });
+
+  return {
+    ok: true,
+    id: saved.id || '',
+    requestRef: requestRef,
+    status: 'PENDING',
+    defaultWastageSheets: Number(rule.value || 0),
+    requestedWastageSheets: requested
+  };
+}
+
+function listWorkOrderWastageApprovals(status, token) {
+  _workOrderWastageApprovalRequireSession_(token);
+  const normalizedStatus = String(status || 'PENDING').trim().toUpperCase();
+  const filters = {};
+  if (normalizedStatus && normalizedStatus !== 'ALL') filters.status = 'eq.' + normalizedStatus;
+
+  let rows;
+  try {
+    rows = _supabaseSelectAll_('work_order_wastage_approvals', {
+      select: '*',
+      filters: filters,
+      order: 'requested_at.desc'
+    }, 1000, 5000) || [];
+  } catch (err) {
+    if (_workOrderWastageApprovalTableMissing_(err)) throw new Error(_workOrderWastageApprovalInstallMessage_());
+    throw err;
+  }
+
+  return {
+    rows: rows.map(function(row) {
+      const summary = row.summary_json || {};
+      return {
+        id: row.id || '',
+        requestRef: row.request_ref || '',
+        status: row.status || '',
+        defaultWastageSheets: Number(row.default_wastage_sheets || 0),
+        requestedWastageSheets: Number(row.requested_wastage_sheets || 0),
+        approvedWastageSheets: row.approved_wastage_sheets == null ? null : Number(row.approved_wastage_sheets || 0),
+        deltaSheets: Number(row.requested_wastage_sheets || 0) - Number(row.default_wastage_sheets || 0),
+        sheetBasis: Number(row.sheet_basis || 0),
+        ruleLabel: row.rule_label || '',
+        reason: row.reason || '',
+        approvalRemarks: row.approval_remarks || '',
+        requestedBy: row.requested_by || '',
+        requestedAt: row.requested_at || row.created_at || '',
+        decidedBy: row.decided_by || '',
+        decidedAt: row.decided_at || '',
+        finalWoNo: row.final_wo_no || '',
+        soNumbers: Array.isArray(summary.soNumbers) ? summary.soNumbers : [],
+        client: summary.client || '',
+        products: Array.isArray(summary.products) ? summary.products : [],
+        totalQty: Number(summary.totalQty || 0),
+        jobCount: Number(summary.jobCount || 0),
+        type: summary.type || '',
+        coating: summary.coating || '',
+        primaryPaper: summary.primaryPaper || ''
+      };
+    })
+  };
+}
+
+function decideWorkOrderWastageApproval(requestId, decision, remarks, token) {
+  const sessionUser = _workOrderWastageApprovalRequireSession_(token);
+  const id = String(requestId || '').trim();
+  const normalizedDecision = String(decision || '').trim().toUpperCase();
+  if (!id) throw new Error('Request id is required.');
+  if (['APPROVED','REJECTED'].indexOf(normalizedDecision) === -1) throw new Error('Invalid approval decision.');
+
+  let row;
+  try {
+    row = _selectWOWastageApprovalById_(id);
+  } catch (err) {
+    if (_workOrderWastageApprovalTableMissing_(err)) throw new Error(_workOrderWastageApprovalInstallMessage_());
+    throw err;
+  }
+  if (!row) throw new Error('Wastage approval request not found.');
+  if (String(row.status || '').toUpperCase() !== 'PENDING') throw new Error('This request is already ' + row.status + '.');
+
+  const actor = _authActorName_(sessionUser);
+  const now = new Date().toISOString();
+  const cleanRemarks = String(remarks || '').trim();
+
+  if (normalizedDecision === 'REJECTED') {
+    supabaseUpdateMinimal_('work_order_wastage_approvals', { id: 'eq.' + id }, {
+      status: 'REJECTED',
+      approval_remarks: cleanRemarks,
+      decided_by: actor,
+      decided_at: now,
+      updated_at: now
+    });
+    _auditTryInsertEvent_({
+      entityType: 'WORK_ORDER_WASTAGE_APPROVAL',
+      entityId: id,
+      entityKey: row.request_ref || id,
+      action: 'REJECT',
+      sourceModule: 'SALES_ORDER_APPROVAL',
+      actor: actor,
+      reason: cleanRemarks || 'Wastage override rejected',
+      beforeJson: row,
+      afterJson: Object.assign({}, row, { status: 'REJECTED', approval_remarks: cleanRemarks }),
+      metadata: { requestRef: row.request_ref || '' }
+    });
+    return { ok: true, status: 'REJECTED' };
+  }
+
+  const payload = row.payload_json || {};
+  payload.wastage = payload.wastage || {};
+  payload.wastage.processSheets = Number(row.requested_wastage_sheets || 0) || 0;
+  payload.wastageOverride = {
+    requestId: id,
+    requestRef: row.request_ref || '',
+    status: 'APPROVED',
+    defaultWastageSheets: Number(row.default_wastage_sheets || 0) || 0,
+    approvedWastageSheets: Number(row.requested_wastage_sheets || 0) || 0,
+    approvedBy: actor,
+    approvedAt: now,
+    approvalRemarks: cleanRemarks
+  };
+
+  const saved = saveWorkOrder(payload, {
+    approvalRelease: true,
+    wastageApprovalRow: row
+  }, token);
+
+  supabaseUpdateMinimal_('work_order_wastage_approvals', { id: 'eq.' + id }, {
+    status: 'APPROVED',
+    approved_wastage_sheets: Number(row.requested_wastage_sheets || 0) || 0,
+    approval_remarks: cleanRemarks,
+    final_wo_no: saved && saved.woNo || '',
+    decided_by: actor,
+    decided_at: now,
+    updated_at: now
+  });
+
+  _auditTryInsertEvent_({
+    entityType: 'WORK_ORDER_WASTAGE_APPROVAL',
+    entityId: id,
+    entityKey: row.request_ref || id,
+    action: 'APPROVE_RELEASE',
+    sourceModule: 'SALES_ORDER_APPROVAL',
+    actor: actor,
+    reason: cleanRemarks || 'Wastage override approved and work order released',
+    beforeJson: row,
+    afterJson: Object.assign({}, row, { status: 'APPROVED', final_wo_no: saved && saved.woNo || '' }),
+    metadata: { requestRef: row.request_ref || '', woNo: saved && saved.woNo || '' }
+  });
+
+  return { ok: true, status: 'APPROVED', woNo: saved && saved.woNo || '' };
+}
+
+function saveWorkOrder(payload, options, token) {
+  const saveOpts = options || {};
+  const authToken = _authTokenFromPayload_(payload, token || saveOpts.token);
+  const sessionUser = saveOpts.approvalRelease
+    ? _workOrderWastageApprovalRequireSession_(authToken)
+    : _requireAnyModuleAccess_(authToken, [
+        { module: 'WOW', action: 'can_create' },
+        { module: 'WOW', action: 'can_edit' }
+      ]);
 
   if (!payload?.jobs?.length) {
     throw new Error('No jobs to save.');
   }
   _validateCorrugatedWorkOrderPayload_(payload);
   _validateFlexoWorkOrderPayload_(payload);
-  const saveOpts = options || {};
-
   const now = new Date().toISOString();
-  const user = Session.getActiveUser?.().getEmail?.() || 'user';
+  const workOrderDate = _workOrderDateOnly_(now);
+  const user = _authActorName_(sessionUser);
   const requestedWoNo = String(payload.woNo || '').trim();
   const woNo = requestedWoNo || generateWorkOrderNumber();
 
@@ -7805,13 +8251,19 @@ function saveWorkOrder(payload, options) {
      0️⃣ Check Duplicate WO
   ========================= */
 
-  const existing = supabaseSelect('work_orders', {
-    select: 'id,wo_number',
+  const existing = supabaseSelect_('work_orders', {
+    select: 'id,wo_number,snapshot_json',
     filters: { wo_number: 'eq.' + woNo },
     limit: 1
   });
 
   const isUpdate = !!(requestedWoNo && existing.length);
+  _validateWorkOrderWastageApproval_(payload, {
+    isUpdate: isUpdate,
+    existingSnapshot: isUpdate ? (existing[0].snapshot_json || null) : null,
+    approvalRelease: saveOpts.approvalRelease === true,
+    wastageApprovalRow: saveOpts.wastageApprovalRow || null
+  });
   let wo = null;
   let previousSoNumbers = [];
   let auditBefore = null;
@@ -7824,7 +8276,7 @@ function saveWorkOrder(payload, options) {
     wo = existing[0];
     auditBefore = _workOrderAuditSnapshot_(wo.id);
 
-    const existingJobs = supabaseSelect('work_order_jobs', {
+    const existingJobs = supabaseSelect_('work_order_jobs', {
       select: 'so_number',
       filters: { wo_id: 'eq.' + wo.id }
     }) || [];
@@ -7832,24 +8284,24 @@ function saveWorkOrder(payload, options) {
     previousSoNumbers = [...new Set(existingJobs.map(j => j.so_number).filter(Boolean))];
 
     _deleteInventoryReservationsForWO_(woNo);
-    supabaseDelete('work_order_routing', { wo_id: 'eq.' + wo.id });
-    supabaseDelete('work_order_materials', { wo_id: 'eq.' + wo.id });
-    supabaseDelete('work_order_jobs', { wo_id: 'eq.' + wo.id });
+    supabaseDelete_('work_order_routing', { wo_id: 'eq.' + wo.id });
+    supabaseDelete_('work_order_materials', { wo_id: 'eq.' + wo.id });
+    supabaseDelete_('work_order_jobs', { wo_id: 'eq.' + wo.id });
 
-    supabaseUpdateMinimal('work_orders', { id: 'eq.' + wo.id }, {
+    supabaseUpdateMinimal_('work_orders', { id: 'eq.' + wo.id }, {
       status: payload.status || 'Pending',
       snapshot_json: payload
     });
   } else {
-    supabaseInsertMinimal('work_orders', {
+    supabaseInsertMinimal_('work_orders', {
       wo_number: woNo,
-      wo_date: now,
+      wo_date: workOrderDate,
       status: payload.status || 'Pending',
       created_by: user,
       snapshot_json: payload
     });
 
-    wo = (supabaseSelect('work_orders', {
+    wo = (supabaseSelect_('work_orders', {
       select: 'id,wo_number',
       filters: { wo_number: 'eq.' + woNo },
       limit: 1
@@ -7864,31 +8316,37 @@ function saveWorkOrder(payload, options) {
      2️⃣ Insert Jobs
   ========================= */
 
-  const jobRows = payload.jobs.map(j => ({
-    wo_id: wo.id,
-    so_number: j.so,
-    line_no: j.lineNo,
-    product_name: j.productName,
-    qty: Number(j.qty) || 0,
-    unit: j.unit || '',
-    ups: Number(j.ups) || 0,
-    group_ups: Number(payload.jobDetails?.ups || 0),
-    category: j.category || '',
-    sales_rep: j.salesRep || '',
-    so_date: j.soDate || null,
-    artwork_no: j.artworkNo || '',
-    client_name: j.client || '',
-    expected_delivery: j.expected_delivery || null,
-    po_number: j.po_number || '',
-    job_priority: j.job_priority || '',
-    product_remarks: j.product_remarks || '',
-    so_remarks: j.so_remarks || '',
-    job_reference: j.job_reference || '',
-    prepress_remark: j.prepress_remark || ''
-  }));
+  const jobRows = payload.jobs.map(function(j, index) {
+    const lineNo = Number(j && j.lineNo);
+    if (!Number.isFinite(lineNo)) {
+      throw new Error('Invalid sales order line number for work order job ' + (index + 1) + '.');
+    }
+    return {
+      wo_id: wo.id,
+      so_number: j.so,
+      line_no: Math.trunc(lineNo),
+      product_name: j.productName,
+      qty: Number(j.qty) || 0,
+      unit: j.unit || '',
+      ups: Number(j.ups) || 0,
+      group_ups: Number(payload.jobDetails?.ups || 0),
+      category: j.category || '',
+      sales_rep: j.salesRep || '',
+      so_date: _workOrderDateOnly_(j.soDate),
+      artwork_no: j.artworkNo || '',
+      client_name: j.client || '',
+      expected_delivery: _workOrderDateOnly_(j.expected_delivery),
+      po_number: j.po_number || '',
+      job_priority: j.job_priority || '',
+      product_remarks: j.product_remarks || '',
+      so_remarks: j.so_remarks || '',
+      job_reference: j.job_reference || '',
+      prepress_remark: j.prepress_remark || ''
+    };
+  });
 
   if (jobRows.length) {
-    supabaseBulkInsertMinimal('work_order_jobs', jobRows);
+    supabaseBulkInsertMinimal_('work_order_jobs', jobRows);
   }
 
   /* =========================
@@ -8029,7 +8487,7 @@ function pushMaterial(m, type) {
   });
 
   if (mergedMaterialRows.length) {
-    supabaseBulkInsertMinimal('work_order_materials', mergedMaterialRows);
+    supabaseBulkInsertMinimal_('work_order_materials', mergedMaterialRows);
     mergedMaterialRows.forEach(m => _insertInventoryReservationForWO_(woNo, m));
   }
 
@@ -8060,7 +8518,7 @@ function pushMaterial(m, type) {
   });
 
   if (routingRows.length) {
-    supabaseBulkInsertMinimal('work_order_routing', routingRows);
+    supabaseBulkInsertMinimal_('work_order_routing', routingRows);
   }
 
   const touchedSoNumbers = [
@@ -8107,7 +8565,7 @@ function getWorkOrder(woNo) {
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
 
-  const wo = supabaseSelect('work_orders', {
+  const wo = supabaseSelect_('work_orders', {
     select: `id, wo_number, status, snapshot_json`,
     filters: { wo_number: 'eq.' + normalizedWoNo },
     limit: 1
@@ -8122,7 +8580,7 @@ function getWorkOrder(woNo) {
       !String(row.productName || row.product_name || '').trim() ||
       !String(row.category || '').trim();
   });
-  const workOrderJobRows = needsJobRows ? (supabaseSelect('work_order_jobs', {
+  const workOrderJobRows = needsJobRows ? (supabaseSelect_('work_order_jobs', {
     select: 'so_number,line_no,product_name,qty,unit,ups,group_ups,category,sales_rep,so_date,artwork_no,client_name,expected_delivery,po_number,job_priority,product_remarks,so_remarks,job_reference,prepress_remark',
     filters: { wo_id: 'eq.' + wo.id },
     order: 'line_no.asc'
@@ -8144,7 +8602,7 @@ function getWorkOrder(woNo) {
       !String(row.soDate || row.so_date || '').trim() ||
       !String(row.po_number || '').trim();
   });
-  const soHeaders = (needsSoHeaderLookup && soNumbers.length) ? (supabaseSelect('sales_orders', {
+  const soHeaders = (needsSoHeaderLookup && soNumbers.length) ? (supabaseSelect_('sales_orders', {
     select: 'id,so_number,so_date,sales_rep,po_number',
     filters: { so_number: _supabaseInFilter_(soNumbers) }
   }) || []) : [];
@@ -8241,7 +8699,7 @@ function getWorkOrder(woNo) {
     return !String(row.dept || row.department || '').trim() ||
       !String(row.operation || row.process_name || '').trim();
   });
-  const routingRows = needsRoutingRows ? (supabaseSelect('work_order_routing', {
+  const routingRows = needsRoutingRows ? (supabaseSelect_('work_order_routing', {
     filters: { wo_id: 'eq.' + wo.id },
     order: 'sequence_no.asc'
   }) || []) : [];
@@ -8602,18 +9060,161 @@ function printSalesOrder(soNumber, token) {
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
-function saveFlexoWorkOrder(payload) {
+function saveFlexoWorkOrder(payload, token) {
   if (!payload) throw new Error('Payload is required.');
+  const authToken = _authTokenFromPayload_(payload, token);
   try {
     payload.jobDetails = payload.jobDetails || {};
     payload.jobDetails.type = 'Flexo';
     payload.status = payload.status || 'RELEASED';
     payload.woNo = String(payload.woNo || '').trim() || generateFlexoWorkOrderNumber();
-    const result = saveWorkOrder(payload, { skipSoStatusRefresh: true });
+    const result = saveWorkOrder(payload, { skipSoStatusRefresh: true }, authToken);
     return result;
   } catch (err) {
     Logger.log('saveFlexoWorkOrder failed: ' + (err && err.stack ? err.stack : err));
     throw err;
+  }
+}
+
+function _flexoWorkOrderSaveErrorMessage_(err) {
+  const raw = String((err && err.message) || err || '').trim();
+  if (!raw) return 'The Flexo work order could not be saved.';
+  const jsonStart = raw.indexOf('{');
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(raw.slice(jsonStart));
+      const parts = [parsed && parsed.message, parsed && parsed.details, parsed && parsed.hint]
+        .map(function(value) { return String(value || '').trim(); })
+        .filter(Boolean);
+      if (parts.length) return parts.join(' ');
+    } catch (parseErr) {}
+  }
+  return raw.replace(/^Error:\s*/i, '') || 'The Flexo work order could not be saved.';
+}
+
+function _inspectFlexoWorkOrderSave_(woNo, payload) {
+  const result = {
+    stage: 'database',
+    coreSaved: false,
+    headerCount: 0,
+    jobCount: 0,
+    materialCount: 0,
+    routingCount: 0
+  };
+  const normalizedWoNo = String(woNo || '').trim();
+  if (!normalizedWoNo) {
+    result.stage = 'work order number';
+    return result;
+  }
+
+  try {
+    const header = (supabaseSelect_('work_orders', {
+      select: 'id,wo_number',
+      filters: { wo_number: 'eq.' + normalizedWoNo },
+      limit: 1
+    }) || [])[0];
+    if (!header || !header.id) {
+      result.stage = 'work order header';
+      return result;
+    }
+    result.headerCount = 1;
+
+    result.jobCount = (supabaseSelect_('work_order_jobs', {
+      select: 'id',
+      filters: { wo_id: 'eq.' + header.id }
+    }) || []).length;
+    result.materialCount = (supabaseSelect_('work_order_materials', {
+      select: 'id,material_key',
+      filters: { wo_id: 'eq.' + header.id }
+    }) || []).length;
+    result.routingCount = (supabaseSelect_('work_order_routing', {
+      select: 'id',
+      filters: { wo_id: 'eq.' + header.id }
+    }) || []).length;
+
+    const expectedJobs = Array.isArray(payload && payload.jobs) ? payload.jobs.length : 0;
+    const expectedRouting = (Array.isArray(payload && payload.routing) ? payload.routing : []).filter(function(row) {
+      return !!String(row && (row.dept || row.operation) || '').trim();
+    }).length;
+    const expectedMaterialKeys = {};
+    (Array.isArray(payload && payload.extraMaterials) ? payload.extraMaterials : []).forEach(function(row) {
+      const requiredQty = Number(row && (row.requiredQty || row.qtyPerUnit) || 0) || 0;
+      if (!(requiredQty > 0)) return;
+      const label = String(row && (row.materialItemCode || row.materialName || row.itemLabel) || '').trim();
+      const key = [label, String(row && row.gsm || '').trim(), String(row && row.uom || 'NOS').trim()].join('|');
+      if (label) expectedMaterialKeys[key] = true;
+    });
+    const expectedMaterials = Object.keys(expectedMaterialKeys).length;
+
+    if (result.jobCount < expectedJobs) result.stage = 'work order jobs';
+    else if (result.materialCount < expectedMaterials) result.stage = 'work order materials';
+    else if (result.routingCount < expectedRouting) result.stage = 'work order routing';
+    else {
+      result.stage = 'post-save finalization';
+      result.coreSaved = true;
+    }
+  } catch (inspectErr) {
+    result.inspectError = _flexoWorkOrderSaveErrorMessage_(inspectErr);
+  }
+  return result;
+}
+
+// Versioned Flexo endpoint: always returns a serializable result and verifies partial database failures.
+function saveFlexoWorkOrderV2(payload, token) {
+  const requestId = String(payload && payload.clientRequestId || '').trim();
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, error: 'Payload is required.', stage: 'request', requestId: requestId };
+  }
+
+  try {
+    const authToken = _authTokenFromPayload_(payload, token);
+    payload.jobDetails = payload.jobDetails || {};
+    payload.jobDetails.type = 'Flexo';
+    payload.status = payload.status || 'RELEASED';
+    payload.woNo = String(payload.woNo || '').trim() || generateFlexoWorkOrderNumber();
+    const saved = saveWorkOrder(payload, { skipSoStatusRefresh: true }, authToken);
+    const savedWoNo = String(saved && saved.woNo || '').trim();
+    if (!(saved && saved.ok === true && savedWoNo)) {
+      throw new Error('The database save completed without a valid work order confirmation.');
+    }
+    return {
+      ok: true,
+      woNo: savedWoNo,
+      soNumbers: Array.isArray(saved.soNumbers) ? saved.soNumbers : [],
+      requestId: requestId
+    };
+  } catch (err) {
+    const diagnosis = _inspectFlexoWorkOrderSave_(payload.woNo, payload);
+    const errorMessage = _flexoWorkOrderSaveErrorMessage_(err);
+    Logger.log('saveFlexoWorkOrderV2 failed [' + diagnosis.stage + ']: ' + errorMessage);
+
+    // A late cache/audit failure must not make a fully persisted WO look unsaved.
+    if (diagnosis.coreSaved) {
+      return {
+        ok: true,
+        woNo: payload.woNo,
+        soNumbers: [...new Set((payload.jobs || []).map(function(job) {
+          return String(job && job.so || '').trim();
+        }).filter(Boolean))],
+        warning: 'The work order was saved, but post-save finalization reported: ' + errorMessage,
+        requestId: requestId
+      };
+    }
+
+    return {
+      ok: false,
+      error: errorMessage,
+      stage: diagnosis.stage,
+      woNo: payload.woNo,
+      diagnostics: {
+        headerCount: diagnosis.headerCount,
+        jobCount: diagnosis.jobCount,
+        materialCount: diagnosis.materialCount,
+        routingCount: diagnosis.routingCount,
+        inspectError: diagnosis.inspectError || ''
+      },
+      requestId: requestId
+    };
   }
 }
 
@@ -8639,16 +9240,17 @@ function _workOrderDeleteErrorMessage_(err) {
   return raw || 'Work order deletion failed.';
 }
 
-function deleteWorkOrder(woNo, reason) {
+function deleteWorkOrder(woNo, reason, token) {
+  const sessionUser = _requireModuleAccess_(token, 'WOW', 'can_edit');
   const normalizedWoNo = String(woNo || '').trim();
   if (!normalizedWoNo) {
     throw new Error('Work Order number is required.');
   }
 
-  const user = Session.getActiveUser?.().getEmail?.() || 'user';
+  const user = _authActorName_(sessionUser);
   let rpcResult;
   try {
-    rpcResult = supabaseRpc('delete_work_order_with_audit', {
+    rpcResult = supabaseRpc_('delete_work_order_with_audit', {
       p_wo_number: normalizedWoNo,
       p_deleted_by: user,
       p_reason: String(reason || 'Deleted from Work Order module').trim()
@@ -8684,9 +9286,9 @@ function deleteWorkOrder(woNo, reason) {
   };
 }
 
-function saveAndExportWO(payload) {
+function saveAndExportWO(payload, token) {
 
-  const saved = saveWorkOrder(payload);
+  const saved = saveWorkOrder(payload, null, token);
 
   return {
     ok: true,
@@ -8697,7 +9299,13 @@ function saveAndExportWO(payload) {
 /* =========================
    Items (master)
    ========================= */
-function saveItem(item) {
+function saveItem(item, token) {
+  _requireAnyModuleAccess_(_authTokenFromPayload_(item, token), [
+    { module: 'ITEMMASTER', action: 'can_create' },
+    { module: 'ITEMMASTER', action: 'can_edit' },
+    { module: 'SALES_ORDER_ENTRY', action: 'can_create' },
+    { module: 'SALES_ORDER_ENTRY', action: 'can_edit' }
+  ]);
   if (!item) {
     throw new Error('Item details are required');
   }
@@ -8742,7 +9350,7 @@ function saveItem(item) {
     active: item.active !== false
   };
 
-  const res = supabaseUpsert('items', row, { onConflict: 'item_code' });
+  const res = supabaseUpsert_('items', row, { onConflict: 'item_code' });
 
   // ✅ SAFETY: Supabase may still return null
   const savedRow = Array.isArray(res) && res.length ? res[0] : row;
@@ -8875,7 +9483,7 @@ function _salesOrderItemPickerViewRows_(params) {
   };
 
   if (orderPrefix === 'M') {
-    return mapRows(supabaseSelect('v_sales_order_item_picker', {
+    return mapRows(supabaseSelect_('v_sales_order_item_picker', {
       select: select,
       filters: Object.assign({
         active: 'eq.true',
@@ -8887,7 +9495,7 @@ function _salesOrderItemPickerViewRows_(params) {
   }
 
   if (orderPrefix === 'SL' && p.clientCode) {
-    const dbRows = supabaseSelect('v_sales_order_item_picker', {
+    const dbRows = supabaseSelect_('v_sales_order_item_picker', {
       select: select,
       filters: Object.assign({
         active: 'eq.true',
@@ -8897,7 +9505,7 @@ function _salesOrderItemPickerViewRows_(params) {
       order: 'sort_rank.asc,item_name.asc,item_code.asc',
       limit: limit
     }) || [];
-    const slRows = supabaseSelect('v_sales_order_item_picker', {
+    const slRows = supabaseSelect_('v_sales_order_item_picker', {
       select: select,
       filters: Object.assign({
         active: 'eq.true',
@@ -8918,7 +9526,7 @@ function _salesOrderItemPickerViewRows_(params) {
   }
   if (qFilter) filters.or = qFilter;
 
-  return mapRows(supabaseSelect('v_sales_order_item_picker', {
+  return mapRows(supabaseSelect_('v_sales_order_item_picker', {
     select: select,
     filters: filters,
     order: 'sort_rank.asc,item_name.asc,item_code.asc',
@@ -8967,7 +9575,7 @@ function getItems(params) {
   ]);
   if (orFilter) filters.or = orFilter;
 
-  const rows = supabaseSelect('items', {
+  const rows = supabaseSelect_('items', {
     select: 'item_code,item_name,category,hsn_group,unit,default_rate,gst_pct,description,length_mm,width_mm,height_mm,dimension_unit,client_code,client_name,active',
     filters,
     order: 'item_name.asc',
@@ -9032,6 +9640,37 @@ function _requireModuleAccess_(token, moduleCode, action) {
   return user;
 }
 
+function _requireAnyModuleAccess_(token, pairs) {
+  const user = getSessionUser(token);
+  if (!user) throw new Error('Unauthorized');
+  if (user.role === 'ADMIN') return user;
+  const allowed = (pairs || []).some(function(pair) {
+    return _userHasPermission_(user, pair.module, pair.action || 'can_view');
+  });
+  if (!allowed) throw new Error('Unauthorized');
+  return user;
+}
+
+function _authTokenFromPayload_(payload, explicitToken) {
+  const direct = String(explicitToken || '').trim();
+  if (direct) return direct;
+  if (payload && typeof payload === 'object') {
+    return String(payload.token || payload.erpToken || payload.authToken || '').trim();
+  }
+  return '';
+}
+
+function _authActorName_(user) {
+  return String((user && (user.displayName || user.fullName || user.userId || user.email)) || 'ERP User').trim();
+}
+
+function _requireArtworkMutationAccess_(token, payload) {
+  return _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+    { module: 'ARTWORK', action: 'can_edit' },
+    { module: 'ARTWORK', action: 'can_create' }
+  ]);
+}
+
 function _safeJsonObject_(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -9089,12 +9728,20 @@ function itemMasterListItems(params, token) {
   _requireModuleAccess_(token, 'ITEMMASTER', 'can_view');
 
   const p = params || {};
-  const q = String(p.q || '').trim().toLowerCase();
+  const q = String(p.q || '').trim();
+  const status = String(p.status || 'all').trim().toLowerCase();
+  const dimensionStatus = String(p.dimensionStatus || 'all').trim().toLowerCase();
+  const pageSize = Math.min(250, Math.max(25, Number(p.pageSize || p.limit || 100) || 100));
+  const page = Math.max(1, Number(p.page || 1) || 1);
+  const offset = (page - 1) * pageSize;
   const version = PropertiesService.getScriptProperties().getProperty('ITEM_MASTER_CACHE_VERSION') || '0';
   const cacheKey = _cacheKeyHash_('ITEM_MASTER_LIST', JSON.stringify({
     v: version,
     q: q,
-    limit: p.limit || 500
+    status: status,
+    dimensionStatus: dimensionStatus,
+    page: page,
+    pageSize: pageSize
   }));
   const cache = CacheService.getScriptCache();
   const cached = cache.get(cacheKey);
@@ -9102,25 +9749,52 @@ function itemMasterListItems(params, token) {
     try { return JSON.parse(cached); } catch (e) { cache.remove(cacheKey); }
   }
 
-  let rows = supabaseSelect('items', {
-    select: 'item_code,item_name,category,product_category,unit,active,manufacturing_enabled,current_revision_no,item_lifecycle_status',
-    order: 'item_name.asc',
-    limit: p.limit || 500
-  }) || [];
-
-  if (q) {
-    rows = rows.filter(function(row) {
-      return [
-        row.item_code,
-        row.item_name,
-        row.category,
-        row.product_category,
-        row.unit
-      ].join(' ').toLowerCase().includes(q);
+  let rpcPayload = null;
+  try {
+    rpcPayload = supabaseRpc_('item_master_register', {
+      p_search: q || null,
+      p_status: status,
+      p_dimension_status: dimensionStatus,
+      p_offset: offset,
+      p_limit: pageSize
     });
+    if (Array.isArray(rpcPayload)) rpcPayload = rpcPayload[0] || null;
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'item_master_register')) throw err;
   }
 
-  const payload = rows.map(function(row) {
+  if (rpcPayload && Array.isArray(rpcPayload.rows)) {
+    const normalizedRpcPayload = {
+      rows: rpcPayload.rows.map(_itemMasterMapRegisterRow_),
+      page: page,
+      pageSize: pageSize,
+      total: Number(rpcPayload.total || 0),
+      hasMore: offset + rpcPayload.rows.length < Number(rpcPayload.total || 0),
+      summary: rpcPayload.summary || {}
+    };
+    try { cache.put(cacheKey, JSON.stringify(normalizedRpcPayload), q ? 60 : 180); } catch (e) {}
+    return normalizedRpcPayload;
+  }
+
+  // Compatibility fallback until the item_master_register migration is applied.
+  // It is intentionally complete, so older deployments no longer stop at 500 rows.
+  let allRows = _supabaseSelectAll_('items', {
+    select: 'item_code,item_name,category,product_category,unit,active,manufacturing_enabled,current_revision_no,item_lifecycle_status,length_mm,width_mm,height_mm,dimension_unit',
+    order: 'item_name.asc,item_code.asc'
+  }, 1000, 50000) || [];
+  const qLower = q.toLowerCase();
+  allRows = allRows.filter(function(row) {
+    if (status === 'active' && row.active === false) return false;
+    if (status === 'inactive' && row.active !== false) return false;
+    const complete = Number(row.length_mm || 0) > 0 && Number(row.width_mm || 0) > 0;
+    if (dimensionStatus === 'missing' && complete) return false;
+    if (dimensionStatus === 'complete' && !complete) return false;
+    if (!qLower) return true;
+    return [row.item_code, row.item_name, row.category, row.product_category, row.unit].join(' ').toLowerCase().includes(qLower);
+  });
+  const total = allRows.length;
+  const pageRows = allRows.slice(offset, offset + pageSize);
+  const payload = pageRows.map(function(row) {
     return {
       itemCode: row.item_code,
       itemName: row.item_name,
@@ -9130,11 +9804,451 @@ function itemMasterListItems(params, token) {
       active: row.active !== false,
       manufacturingEnabled: row.manufacturing_enabled === true,
       currentRevisionNo: row.current_revision_no || null,
-      lifecycleStatus: row.item_lifecycle_status || (row.active === false ? 'INACTIVE' : 'ACTIVE')
+      lifecycleStatus: row.item_lifecycle_status || (row.active === false ? 'INACTIVE' : 'ACTIVE'),
+      lengthMm: row.length_mm == null ? '' : Number(row.length_mm),
+      widthMm: row.width_mm == null ? '' : Number(row.width_mm),
+      heightMm: row.height_mm == null ? '' : Number(row.height_mm),
+      dimensionUnit: _normalizeItemDimensionUnit_(row.dimension_unit || 'MM') || 'MM',
+      dimensionStatus: Number(row.length_mm || 0) > 0 && Number(row.width_mm || 0) > 0 ? 'COMPLETE' : 'MISSING',
+      dimensionConflict: false
     };
   });
-  try { cache.put(cacheKey, JSON.stringify(payload), q ? 120 : 300); } catch (e) {}
-  return payload;
+  const response = {
+    rows: payload,
+    page: page,
+    pageSize: pageSize,
+    total: total,
+    hasMore: offset + pageRows.length < total,
+    summary: {
+      total: total,
+      active: allRows.filter(function(row){ return row.active !== false; }).length,
+      withBom: allRows.filter(function(row){ return Number(row.current_revision_no || 0) > 0; }).length,
+      missingDimensions: allRows.filter(function(row){ return !(Number(row.length_mm || 0) > 0 && Number(row.width_mm || 0) > 0); }).length
+    }
+  };
+  try { cache.put(cacheKey, JSON.stringify(response), q ? 60 : 180); } catch (e) {}
+  return response;
+}
+
+function _itemMasterMapRegisterRow_(row) {
+  const src = row || {};
+  return {
+    itemCode: src.item_code || src.itemCode || '',
+    itemName: src.item_name || src.itemName || '',
+    category: src.category || '',
+    productCategory: src.product_category || src.productCategory || '',
+    unit: src.unit || '',
+    active: src.active !== false,
+    manufacturingEnabled: src.manufacturing_enabled === true || src.manufacturingEnabled === true,
+    currentRevisionNo: src.current_revision_no || src.currentRevisionNo || null,
+    lifecycleStatus: src.item_lifecycle_status || src.lifecycleStatus || (src.active === false ? 'INACTIVE' : 'ACTIVE'),
+    lengthMm: src.length_mm == null ? (src.lengthMm == null ? '' : Number(src.lengthMm)) : Number(src.length_mm),
+    widthMm: src.width_mm == null ? (src.widthMm == null ? '' : Number(src.widthMm)) : Number(src.width_mm),
+    heightMm: src.height_mm == null ? (src.heightMm == null ? '' : Number(src.heightMm)) : Number(src.height_mm),
+    dimensionUnit: _normalizeItemDimensionUnit_(src.dimension_unit || src.dimensionUnit || 'MM') || 'MM',
+    dimensionStatus: String(src.dimension_status || src.dimensionStatus || 'MISSING').toUpperCase(),
+    dimensionConflict: src.dimension_conflict === true || src.dimensionConflict === true
+  };
+}
+
+function itemMasterBulkUpdateDimensions(payload, token) {
+  const user = _requireModuleAccess_(token, 'ITEMMASTER', 'can_edit');
+  const inputRows = Array.isArray(payload) ? payload : (Array.isArray(payload?.rows) ? payload.rows : []);
+  if (!inputRows.length) throw new Error('No dimension changes supplied');
+  if (inputRows.length > 250) throw new Error('A maximum of 250 item dimensions can be saved at once');
+
+  const rows = inputRows.map(function(src) {
+    const itemCode = String(src?.itemCode || src?.item_code || '').trim();
+    const unit = _normalizeItemDimensionUnit_(src?.dimensionUnit || src?.dimension_unit || 'MM') || 'MM';
+    const lengthMm = _convertItemDimensionToMm_(src?.length, unit);
+    const widthMm = _convertItemDimensionToMm_(src?.width, unit);
+    const heightMm = _convertItemDimensionToMm_(src?.height, unit);
+    if (!itemCode) throw new Error('Item code is required for every dimension update');
+    if (!(Number(lengthMm || 0) > 0) || !(Number(widthMm || 0) > 0)) {
+      throw new Error('Positive length and width are required for ' + itemCode);
+    }
+    return {
+      item_code: itemCode,
+      length_mm: lengthMm,
+      width_mm: widthMm,
+      height_mm: Number(heightMm || 0) > 0 ? heightMm : null,
+      dimension_unit: unit
+    };
+  });
+
+  let result;
+  try {
+    result = supabaseRpc_('bulk_update_item_dimensions', {
+      p_rows: rows,
+      p_updated_by: user.userId
+    });
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'bulk_update_item_dimensions')) throw err;
+    rows.forEach(function(row) {
+      supabaseUpdate_('items', { item_code: 'eq.' + row.item_code }, {
+        length_mm: row.length_mm,
+        width_mm: row.width_mm,
+        height_mm: row.height_mm,
+        dimension_unit: row.dimension_unit
+      });
+      const currentRevision = (supabaseSelect_('item_bom_revisions', {
+        select: 'id,item_info_json',
+        filters: { item_code: 'eq.' + row.item_code, is_current: 'eq.true' },
+        limit: 1
+      }) || [])[0];
+      if (currentRevision) {
+        const display = function(value) {
+          if (value == null) return '';
+          if (row.dimension_unit === 'INCH') return Number((Number(value) / 25.4).toFixed(3));
+          if (row.dimension_unit === 'CM') return Number((Number(value) / 10).toFixed(3));
+          return Number(Number(value).toFixed(3));
+        };
+        const info = Object.assign({}, currentRevision.item_info_json || {}, {
+          dimensionUom: row.dimension_unit,
+          length: display(row.length_mm),
+          width: display(row.width_mm),
+          height: display(row.height_mm),
+          dims: [display(row.length_mm), display(row.width_mm), display(row.height_mm)].filter(function(v){ return v !== ''; }).join('x')
+        });
+        supabaseUpdate_('item_bom_revisions', { id: 'eq.' + currentRevision.id }, {
+          item_info_json: info,
+          updated_by: user.userId
+        });
+      }
+    });
+    result = { updated: rows.length, fallback: true };
+  }
+  PropertiesService.getScriptProperties().setProperty('ITEM_MASTER_CACHE_VERSION', String(Date.now()));
+  return Array.isArray(result) ? (result[0] || { updated: rows.length }) : (result || { updated: rows.length });
+}
+
+function _itemMasterPurchaseUomNumber_(value) {
+  if (value === '' || value === null || typeof value === 'undefined') return null;
+  const n = Number(value);
+  if (!isFinite(n) || n < 0) return null;
+  return Number(n.toFixed(3));
+}
+
+function _itemMasterPurchaseUomFactor_(value) {
+  if (value === '' || value === null || typeof value === 'undefined') return null;
+  const n = Number(value);
+  if (!isFinite(n) || n <= 0) return null;
+  return Number(n.toFixed(6));
+}
+
+function _itemMasterNormalizePurchaseConversionType_(value) {
+  const key = String(value || 'SAME_AS_STOCK').trim().toUpperCase();
+  return ['SAME_AS_STOCK', 'FIXED_FACTOR', 'AREA_WIDTH', 'SHEET_AREA', 'WEIGHT_GSM'].indexOf(key) !== -1
+    ? key
+    : 'SAME_AS_STOCK';
+}
+
+function _itemMasterMapPurchaseUomSetupRow_(row) {
+  const src = row || {};
+  return {
+    itemId: src.item_id || src.itemId || '',
+    itemCode: src.item_code || src.itemCode || '',
+    itemName: src.item_name || src.itemName || '',
+    category: src.category || '',
+    department: src.department || '',
+    itemActive: src.item_active !== false && src.active !== false,
+    stockUom: src.stock_uom || src.stockUom || src.uom || '',
+    purchaseUom: src.purchase_uom || src.purchaseUom || src.stock_uom || src.stockUom || '',
+    conversionType: _itemMasterNormalizePurchaseConversionType_(src.conversion_type || src.conversionType),
+    fixedFactor: src.fixed_factor == null ? '' : Number(src.fixed_factor),
+    sizeProfile: src.size_profile || src.sizeProfile || '',
+    rmType: src.rm_type || src.rmType || '',
+    lengthMm: src.length_mm == null ? '' : Number(src.length_mm),
+    widthMm: src.width_mm == null ? '' : Number(src.width_mm),
+    heightMm: src.height_mm == null ? '' : Number(src.height_mm),
+    dimensionUnit: _normalizeItemDimensionUnit_(src.dimension_unit || src.dimensionUnit || 'MM') || 'MM',
+    gsm: src.gsm == null ? '' : Number(src.gsm),
+    ruleWidthMm: src.rule_width_mm == null ? '' : Number(src.rule_width_mm),
+    ruleLengthMm: src.rule_length_mm == null ? '' : Number(src.rule_length_mm),
+    ruleHeightMm: src.rule_height_mm == null ? '' : Number(src.rule_height_mm),
+    ruleGsm: src.rule_gsm == null ? '' : Number(src.rule_gsm),
+    ruleNotes: src.rule_notes || src.ruleNotes || '',
+    ruleActive: src.rule_active !== false,
+    setupStatus: String(src.setup_status || src.setupStatus || 'MISSING').toUpperCase(),
+    updatedAt: src.updated_at || src.updatedAt || '',
+    updatedBy: src.updated_by || src.updatedBy || ''
+  };
+}
+
+function _itemMasterPurchaseUomRulesByCode_(itemCodes) {
+  const codes = [...new Set((itemCodes || []).map(function(code) {
+    return String(code || '').trim();
+  }).filter(Boolean))];
+  if (!codes.length) return {};
+  try {
+    const rows = _supabaseSelectByKeyInBatches_(
+      'inv_item_purchase_uom_rules',
+      'id,item_id,item_code,stock_uom,purchase_uom,conversion_type,fixed_factor,width_mm,length_mm,height_mm,gsm,notes,active,updated_at,updated_by',
+      'item_code',
+      codes,
+      null,
+      40
+    ) || [];
+    const out = {};
+    rows.forEach(function(row) {
+      out[String(row.item_code || '').trim().toUpperCase()] = row;
+    });
+    return out;
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'inv_item_purchase_uom_rules')) return {};
+    throw err;
+  }
+}
+
+function itemMasterListPurchaseUomSetup(params, token) {
+  _requireAdmin_(token);
+  const p = params || {};
+  const q = String(p.q || '').trim();
+  const status = String(p.status || 'active').trim().toLowerCase();
+  const setupStatus = String(p.setupStatus || p.dimensionStatus || 'all').trim().toLowerCase();
+  const pageSize = Math.min(250, Math.max(25, Number(p.pageSize || p.limit || 100) || 100));
+  const page = Math.max(1, Number(p.page || 1) || 1);
+  const offset = (page - 1) * pageSize;
+  const version = PropertiesService.getScriptProperties().getProperty('ITEM_MASTER_PURCHASE_UOM_VERSION') || '0';
+  const cacheKey = _cacheKeyHash_('ITEM_MASTER_PURCHASE_UOM_SETUP', JSON.stringify({
+    v: version,
+    q: q,
+    status: status,
+    setupStatus: setupStatus,
+    page: page,
+    pageSize: pageSize
+  }));
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    try { return JSON.parse(cached); } catch (e) { cache.remove(cacheKey); }
+  }
+
+  let allRows = null;
+  try {
+    const filters = {};
+    if (q) filters.or = '(item_code.ilike.*' + q + '*,item_name.ilike.*' + q + '*,category.ilike.*' + q + '*,department.ilike.*' + q + '*)';
+    if (setupStatus === 'missing') filters.setup_status = 'in.(MISSING,INCOMPLETE)';
+    if (setupStatus === 'complete') filters.setup_status = 'eq.COMPLETE';
+    allRows = _supabaseSelectAll_('v_inv_item_purchase_uom_setup', {
+      filters: filters,
+      order: 'item_name.asc,item_code.asc'
+    }, 1000, 50000) || [];
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_inv_item_purchase_uom_setup')) throw err;
+  }
+
+  if (allRows === null) {
+    const filters = {};
+    if (status === 'active') filters.active = 'eq.true';
+    if (status === 'inactive') filters.active = 'eq.false';
+    allRows = (_supabaseSelectAll_('inv_items', {
+      select: 'id,item_code,item_name,category,department,uom,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,active',
+      filters: filters,
+      order: 'item_name.asc,item_code.asc'
+    }, 1000, 50000) || []).map(function(item) {
+      const unit = _normalizeItemDimensionUnit_(item.length_unit || item.width_unit || item.height_unit || 'MM') || 'MM';
+      return {
+        item_id: item.id,
+        item_code: item.item_code,
+        item_name: item.item_name,
+        category: item.category || '',
+        department: item.department || '',
+        item_active: item.active !== false,
+        stock_uom: item.uom || '',
+        size_profile: item.size_profile || '',
+        rm_type: item.rm_type || '',
+        length_mm: item.length_mm,
+        width_mm: item.width_mm,
+        height_mm: item.height_mm,
+        dimension_unit: unit,
+        gsm: item.gsm
+      };
+    });
+    const ruleByCode = _itemMasterPurchaseUomRulesByCode_(allRows.map(function(row) { return row.item_code; }));
+    allRows = allRows.map(function(row) {
+      const rule = ruleByCode[String(row.item_code || '').trim().toUpperCase()] || {};
+      const merged = Object.assign({}, row, {
+        purchase_uom: rule.purchase_uom || row.stock_uom || '',
+        conversion_type: rule.conversion_type || 'SAME_AS_STOCK',
+        fixed_factor: rule.fixed_factor,
+        rule_width_mm: rule.width_mm == null ? row.width_mm : rule.width_mm,
+        rule_length_mm: rule.length_mm == null ? row.length_mm : rule.length_mm,
+        rule_height_mm: rule.height_mm == null ? row.height_mm : rule.height_mm,
+        rule_gsm: rule.gsm == null ? row.gsm : rule.gsm,
+        rule_notes: rule.notes || '',
+        rule_active: rule.active !== false,
+        updated_at: rule.updated_at || '',
+        updated_by: rule.updated_by || ''
+      });
+      merged.setup_status = _itemMasterPurchaseUomSetupStatus_(merged);
+      return merged;
+    });
+  }
+
+  const qLower = q.toLowerCase();
+  let normalized = allRows.map(_itemMasterMapPurchaseUomSetupRow_);
+  if (status === 'active') normalized = normalized.filter(function(row) { return row.itemActive !== false; });
+  if (status === 'inactive') normalized = normalized.filter(function(row) { return row.itemActive === false; });
+  if (qLower) {
+    normalized = normalized.filter(function(row) {
+      return [row.itemCode, row.itemName, row.category, row.department, row.stockUom, row.purchaseUom].join(' ').toLowerCase().indexOf(qLower) !== -1;
+    });
+  }
+  if (setupStatus === 'missing') normalized = normalized.filter(function(row) { return row.setupStatus !== 'COMPLETE'; });
+  if (setupStatus === 'complete') normalized = normalized.filter(function(row) { return row.setupStatus === 'COMPLETE'; });
+
+  const total = normalized.length;
+  const pageRows = normalized.slice(offset, offset + pageSize);
+  const response = {
+    rows: pageRows,
+    page: page,
+    pageSize: pageSize,
+    total: total,
+    hasMore: offset + pageRows.length < total,
+    summary: {
+      total: total,
+      active: normalized.filter(function(row){ return row.itemActive !== false; }).length,
+      withBom: 0,
+      missingDimensions: normalized.filter(function(row){ return row.setupStatus !== 'COMPLETE'; }).length
+    }
+  };
+  try { cache.put(cacheKey, JSON.stringify(response), q ? 60 : 180); } catch (e) {}
+  return response;
+}
+
+function _itemMasterPurchaseUomSetupStatus_(row) {
+  const conversionType = _itemMasterNormalizePurchaseConversionType_(row.conversion_type || row.conversionType);
+  const purchaseUom = String(row.purchase_uom || row.purchaseUom || '').trim();
+  if (!purchaseUom || !conversionType) return 'MISSING';
+  if (conversionType === 'FIXED_FACTOR' && !(Number(row.fixed_factor || row.fixedFactor || 0) > 0)) return 'INCOMPLETE';
+  if (conversionType === 'AREA_WIDTH' && !(Number(row.rule_width_mm || row.width_mm || row.ruleWidthMm || row.widthMm || 0) > 0)) return 'INCOMPLETE';
+  if (conversionType === 'SHEET_AREA' && (!(Number(row.rule_width_mm || row.width_mm || row.ruleWidthMm || row.widthMm || 0) > 0) || !(Number(row.rule_length_mm || row.length_mm || row.ruleLengthMm || row.lengthMm || 0) > 0))) return 'INCOMPLETE';
+  if (conversionType === 'WEIGHT_GSM' && (!(Number(row.rule_width_mm || row.width_mm || row.ruleWidthMm || row.widthMm || 0) > 0) || !(Number(row.rule_gsm || row.gsm || row.ruleGsm || 0) > 0))) return 'INCOMPLETE';
+  return 'COMPLETE';
+}
+
+function itemMasterSavePurchaseUomSetup(payload, token) {
+  const admin = _requireAdmin_(token);
+  const inputRows = Array.isArray(payload) ? payload : (Array.isArray(payload?.rows) ? payload.rows : []);
+  if (!inputRows.length) throw new Error('No purchase UOM changes supplied');
+  if (inputRows.length > 250) throw new Error('A maximum of 250 item purchase UOM rows can be saved at once');
+  const actor = _authActorName_(admin);
+  const now = new Date().toISOString();
+  const updated = [];
+
+  inputRows.forEach(function(src) {
+    const itemCode = String(src?.itemCode || src?.item_code || '').trim();
+    if (!itemCode) throw new Error('Item code is required for every purchase UOM update');
+    const item = (supabaseSelect_('inv_items', {
+      filters: { item_code: 'eq.' + itemCode },
+      limit: 1
+    }) || [])[0];
+    if (!item) throw new Error('Inventory item not found: ' + itemCode);
+
+    const dimensionUnit = _normalizeItemDimensionUnit_(src?.dimensionUnit || src?.dimension_unit || item.length_unit || item.width_unit || item.height_unit || 'MM') || 'MM';
+    const stockUom = String(src?.stockUom || src?.stock_uom || item.uom || '').trim().toUpperCase();
+    const purchaseUom = String(src?.purchaseUom || src?.purchase_uom || stockUom || '').trim().toUpperCase();
+    const conversionType = _itemMasterNormalizePurchaseConversionType_(src?.conversionType || src?.conversion_type);
+    if (!stockUom) throw new Error('Stock UOM is required for ' + itemCode);
+    if (!purchaseUom) throw new Error('Purchase UOM is required for ' + itemCode);
+
+    const lengthMm = _convertItemDimensionToMm_(src?.length, dimensionUnit);
+    const widthMm = _convertItemDimensionToMm_(src?.width, dimensionUnit);
+    const heightMm = _convertItemDimensionToMm_(src?.height, dimensionUnit);
+    const gsm = _itemMasterPurchaseUomNumber_(src?.gsm);
+    const fixedFactor = _itemMasterPurchaseUomFactor_(src?.fixedFactor || src?.fixed_factor);
+    if (conversionType === 'FIXED_FACTOR' && !(Number(fixedFactor || 0) > 0)) {
+      throw new Error('Positive fixed factor is required for ' + itemCode);
+    }
+    if (conversionType === 'AREA_WIDTH' && !(Number(widthMm || 0) > 0)) {
+      throw new Error('Width is required for area to running-meter conversion on ' + itemCode);
+    }
+    if (conversionType === 'SHEET_AREA' && (!(Number(widthMm || 0) > 0) || !(Number(lengthMm || 0) > 0))) {
+      throw new Error('Length and width are required for sheet area conversion on ' + itemCode);
+    }
+    if (conversionType === 'WEIGHT_GSM' && (!(Number(widthMm || 0) > 0) || !(Number(gsm || 0) > 0))) {
+      throw new Error('Width and GSM are required for weight/GSM conversion on ' + itemCode);
+    }
+
+    let beforeRule = null;
+    try {
+      beforeRule = (supabaseSelect_('inv_item_purchase_uom_rules', {
+        filters: { item_code: 'eq.' + itemCode },
+        limit: 1
+      }) || [])[0] || null;
+    } catch (err) {
+      if (_supabaseRelationMissing_(err, 'inv_item_purchase_uom_rules')) {
+        throw new Error('Run supabase_inventory_purchase_uom_rules.sql in Supabase before saving purchase UOM setup.');
+      }
+      throw err;
+    }
+
+    const invPatch = {
+      uom: stockUom,
+      length_mm: lengthMm,
+      width_mm: widthMm,
+      height_mm: Number(heightMm || 0) > 0 ? heightMm : null,
+      length_unit: lengthMm == null ? null : dimensionUnit,
+      width_unit: widthMm == null ? null : dimensionUnit,
+      height_unit: heightMm == null ? null : dimensionUnit,
+      gsm: gsm,
+      size_profile: String(src?.sizeProfile || src?.size_profile || item.size_profile || '').trim() || null,
+      rm_type: _normalizePaperText_(src?.rmType || src?.rm_type || item.rm_type || '') || null,
+      size_key: _buildPaperSizeKey_({ lengthMm: lengthMm, widthMm: widthMm, heightMm: heightMm }),
+      material_key: _buildPaperMaterialKey_({
+        rmType: src?.rmType || src?.rm_type || item.rm_type || '',
+        gsm: gsm,
+        specsText: item.specs_text || ''
+      }) || null
+    };
+    supabaseUpdateMinimal_('inv_items', { id: 'eq.' + item.id }, invPatch);
+
+    const rule = {
+      item_id: item.id,
+      item_code: itemCode,
+      stock_uom: stockUom,
+      purchase_uom: purchaseUom,
+      conversion_type: conversionType,
+      fixed_factor: conversionType === 'FIXED_FACTOR' ? fixedFactor : null,
+      width_mm: widthMm,
+      length_mm: lengthMm,
+      height_mm: Number(heightMm || 0) > 0 ? heightMm : null,
+      gsm: gsm,
+      notes: String(src?.ruleNotes || src?.notes || '').trim() || null,
+      active: src?.ruleActive === false ? false : true,
+      updated_at: now,
+      updated_by: actor
+    };
+    try {
+      supabaseUpsertMinimal_('inv_item_purchase_uom_rules', rule, { onConflict: 'item_code' });
+    } catch (err) {
+      if (_supabaseRelationMissing_(err, 'inv_item_purchase_uom_rules')) {
+        throw new Error('Run supabase_inventory_purchase_uom_rules.sql in Supabase before saving purchase UOM setup.');
+      }
+      throw err;
+    }
+
+    try {
+      supabaseInsertMinimal_('inv_item_purchase_uom_rule_audit', {
+        rule_id: beforeRule && beforeRule.id || null,
+        item_id: item.id,
+        item_code: itemCode,
+        action: beforeRule ? 'UPDATE' : 'INSERT',
+        before_data: beforeRule,
+        after_data: Object.assign({}, rule, { inv_item_patch: invPatch }),
+        changed_by: actor
+      });
+    } catch (err) {
+      if (!_supabaseRelationMissing_(err, 'inv_item_purchase_uom_rule_audit')) throw err;
+    }
+    updated.push(itemCode);
+  });
+
+  PropertiesService.getScriptProperties().setProperty('ITEM_MASTER_PURCHASE_UOM_VERSION', String(Date.now()));
+  PropertiesService.getScriptProperties().setProperty('ITEM_MASTER_CACHE_VERSION', String(Date.now()));
+  PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
+  return { ok: true, updated: updated.length, itemCodes: updated };
 }
 
 function itemMasterGetReferenceData(token) {
@@ -9164,7 +10278,7 @@ function itemMasterGetReferenceData(token) {
     departments: masters.departments || [],
     machinesByDept: masters.machinesByDept || {},
     routingMaterialTypes: ['RAW_MATERIAL', 'PAPER', 'BOARD', 'CORRUGATION', 'ADHESIVE', 'INK', 'FILM', 'OTHER'],
-    uomOptions: ['NOS', 'PCS', 'SHEET', 'KG', 'GRAM', 'MTR', 'SQM'],
+    uomOptions: ['NOS', 'PCS', 'SHEET', 'RM', 'MTR', 'METER', 'KG', 'GRAM', 'SQM'],
     flexoLabelTypes: flexoMasters.flexoLabelTypes || [],
     flexoWindingDirections: flexoMasters.flexoWindingDirections || [],
     flexoFinishedFormats: flexoMasters.flexoFinishedFormats || [],
@@ -9191,14 +10305,14 @@ function itemMasterGetItem(itemCode, token) {
   const code = String(itemCode || '').trim();
   if (!code) throw new Error('Item code is required');
 
-  const item = (supabaseSelect('items', {
+  const item = (supabaseSelect_('items', {
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0];
 
   if (!item) throw new Error('Item not found');
 
-  const revisions = supabaseSelect('item_bom_revisions', {
+  const revisions = supabaseSelect_('item_bom_revisions', {
     filters: { item_code: 'eq.' + code },
     order: 'revision_no.desc',
     limit: 100
@@ -9283,7 +10397,11 @@ function itemMasterGetItem(itemCode, token) {
       manufacturingEnabled: item.manufacturing_enabled === true,
       currentRevisionNo: item.current_revision_no || null,
       lifecycleStatus: item.item_lifecycle_status || (item.active === false ? 'INACTIVE' : 'ACTIVE'),
-      itemMasterNotes: item.item_master_notes || ''
+      itemMasterNotes: item.item_master_notes || '',
+      lengthMm: item.length_mm == null ? '' : Number(item.length_mm),
+      widthMm: item.width_mm == null ? '' : Number(item.width_mm),
+      heightMm: item.height_mm == null ? '' : Number(item.height_mm),
+      dimensionUnit: _normalizeItemDimensionUnit_(item.dimension_unit || 'MM') || 'MM'
     },
     revisions: revisions.map(function(row) {
       return {
@@ -9326,13 +10444,13 @@ function itemMasterGetActiveBom(itemCode, token) {
   const code = String(itemCode || '').trim();
   if (!code) throw new Error('Item code is required');
 
-  const item = (supabaseSelect('items', {
+  const item = (supabaseSelect_('items', {
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0];
   if (!item) throw new Error('Item not found');
 
-  const revision = (supabaseSelect('item_bom_revisions', {
+  const revision = (supabaseSelect_('item_bom_revisions', {
     filters: {
       item_code: 'eq.' + code,
       is_current: 'eq.true'
@@ -9343,13 +10461,13 @@ function itemMasterGetActiveBom(itemCode, token) {
 
   if (!revision) return null;
 
-  const materials = supabaseSelect('item_bom_materials', {
+  const materials = supabaseSelect_('item_bom_materials', {
     filters: { revision_id: 'eq.' + revision.id },
     order: 'line_no.asc',
     limit: 500
   }) || [];
 
-  const routing = supabaseSelect('item_bom_routing', {
+  const routing = supabaseSelect_('item_bom_routing', {
     filters: { revision_id: 'eq.' + revision.id },
     order: 'sequence_no.asc',
     limit: 200
@@ -9406,7 +10524,7 @@ function itemMasterCreateRevision(payload, token) {
   const itemCode = String(payload?.itemCode || '').trim();
   if (!itemCode) throw new Error('Item code is required');
 
-  const revisionId = supabaseRpc('create_item_bom_revision', {
+  const revisionId = supabaseRpc_('create_item_bom_revision', {
     p_item_code: itemCode,
     p_created_by: user.userId,
     p_revision_reason: String(payload?.revisionReason || '').trim() || null
@@ -9424,7 +10542,7 @@ function itemMasterSaveRevision(payload, token) {
   const revisionId = String(payload?.revisionId || '').trim();
   if (!revisionId) throw new Error('Revision id is required');
 
-  const current = (supabaseSelect('item_bom_revisions', {
+  const current = (supabaseSelect_('item_bom_revisions', {
     filters: { id: 'eq.' + revisionId },
     limit: 1
   }) || [])[0];
@@ -9436,6 +10554,13 @@ function itemMasterSaveRevision(payload, token) {
 
   const itemInfo = _safeJsonObject_(payload.itemInfo);
   const itemHeader = _safeJsonObject_(payload.itemHeader);
+  const dimensionUnit = _normalizeItemDimensionUnit_(itemInfo.dimensionUom || 'MM') || 'MM';
+  const lengthMm = _convertItemDimensionToMm_(itemInfo.length, dimensionUnit);
+  const widthMm = _convertItemDimensionToMm_(itemInfo.width, dimensionUnit);
+  const heightMm = _convertItemDimensionToMm_(itemInfo.height, dimensionUnit);
+  if ((Number(lengthMm || 0) > 0) !== (Number(widthMm || 0) > 0)) {
+    throw new Error('Both length and width are required when maintaining item dimensions');
+  }
   const materials = (Array.isArray(payload.materials) ? payload.materials : [])
     .map(_normalizeBomMaterialRow_)
     .filter(Boolean);
@@ -9443,7 +10568,7 @@ function itemMasterSaveRevision(payload, token) {
     .map(_normalizeBomRoutingRow_)
     .filter(Boolean);
 
-  supabaseUpdate('item_bom_revisions', {
+  supabaseUpdate_('item_bom_revisions', {
     id: 'eq.' + revisionId
   }, {
     revision_reason: String(payload.revisionReason || '').trim() || null,
@@ -9453,11 +10578,11 @@ function itemMasterSaveRevision(payload, token) {
     item_info_json: itemInfo
   });
 
-  supabaseDelete('item_bom_materials', {
+  supabaseDelete_('item_bom_materials', {
     revision_id: 'eq.' + revisionId
   });
   if (materials.length) {
-    supabaseBulkInsert('item_bom_materials', materials.map(function(row) {
+    supabaseBulkInsert_('item_bom_materials', materials.map(function(row) {
       row.revision_id = revisionId;
       row.created_by = user.userId;
       row.updated_by = user.userId;
@@ -9465,11 +10590,11 @@ function itemMasterSaveRevision(payload, token) {
     }));
   }
 
-  supabaseDelete('item_bom_routing', {
+  supabaseDelete_('item_bom_routing', {
     revision_id: 'eq.' + revisionId
   });
   if (routing.length) {
-    supabaseBulkInsert('item_bom_routing', routing.map(function(row) {
+    supabaseBulkInsert_('item_bom_routing', routing.map(function(row) {
       row.revision_id = revisionId;
       row.created_by = user.userId;
       row.updated_by = user.userId;
@@ -9477,7 +10602,7 @@ function itemMasterSaveRevision(payload, token) {
     }));
   }
 
-  supabaseUpdate('items', {
+  supabaseUpdate_('items', {
     item_code: 'eq.' + current.item_code
   }, {
     item_name: String(itemHeader.itemName || '').trim() || undefined,
@@ -9489,7 +10614,11 @@ function itemMasterSaveRevision(payload, token) {
     manufacturing_enabled: true,
     revision_controlled: true,
     bom_basis: 'PER_UNIT',
-    item_master_notes: String(payload.itemMasterNotes || '').trim() || null
+    item_master_notes: String(payload.itemMasterNotes || '').trim() || null,
+    length_mm: Number(lengthMm || 0) > 0 ? lengthMm : undefined,
+    width_mm: Number(widthMm || 0) > 0 ? widthMm : undefined,
+    height_mm: Number(heightMm || 0) > 0 ? heightMm : null,
+    dimension_unit: (Number(lengthMm || 0) > 0 || Number(widthMm || 0) > 0) ? dimensionUnit : undefined
   });
 
   syncItemToInventory_(current.item_code, itemHeader, true);
@@ -9503,7 +10632,7 @@ function itemMasterActivateRevision(revisionId, token) {
   const id = String(revisionId || '').trim();
   if (!id) throw new Error('Revision id is required');
 
-  const res = supabaseRpc('activate_item_bom_revision', {
+  const res = supabaseRpc_('activate_item_bom_revision', {
     p_revision_id: id,
     p_approved_by: user.userId
   });
@@ -9522,7 +10651,7 @@ function itemMasterToggleItem(itemCode, active, token) {
   if (!code) throw new Error('Item code is required');
 
   const isActive = active === true;
-  supabaseUpdate('items', {
+  supabaseUpdate_('items', {
     item_code: 'eq.' + code
   }, {
     active: isActive,
@@ -9546,7 +10675,7 @@ function _itemMasterRequireMergeAccess_(token) {
 function _itemMasterGetExistingItemRow_(itemCode) {
   const code = String(itemCode || '').trim();
   if (!code) return null;
-  return (supabaseSelect('items', {
+  return (supabaseSelect_('items', {
     select: 'item_code,item_name,category,product_category,unit,active,item_lifecycle_status,current_revision_no,item_master_notes',
     filters: { item_code: 'eq.' + code },
     limit: 1
@@ -9554,7 +10683,7 @@ function _itemMasterGetExistingItemRow_(itemCode) {
 }
 
 function _itemMasterListRowsByProductCode_(table, code, select, limit) {
-  return supabaseSelect(table, {
+  return supabaseSelect_(table, {
     select: select || 'id',
     filters: { product_code: 'eq.' + code },
     limit: limit || 5000
@@ -9620,7 +10749,7 @@ function itemMasterPreviewMerge(sourceItemCode, targetItemCode, token) {
   const packingRows = _itemMasterListRowsByProductCode_('packing_records', sourceCode, 'id', 5000);
   const dispatchRows = _itemMasterListRowsByProductCode_('dispatch_records', sourceCode, 'id', 5000);
   const invoiceRows = _itemMasterListRowsByProductCode_('invoice_lines', sourceCode, 'id', 5000);
-  const workOrders = supabaseSelect('work_orders', {
+  const workOrders = supabaseSelect_('work_orders', {
     select: 'id,wo_number,snapshot_json',
     order: 'wo_date.desc',
     limit: 5000
@@ -9674,33 +10803,33 @@ function itemMasterMergeItems(payload, token) {
 
   const salesOrderLines = _itemMasterListRowsByProductCode_('sales_order_lines', sourceCode, 'id', 5000);
   if (salesOrderLines.length) {
-    supabaseUpsertMinimal('sales_order_lines', salesOrderLines.map(function(row) {
+    supabaseUpsertMinimal_('sales_order_lines', salesOrderLines.map(function(row) {
       return { id: row.id, product_code: targetCode };
     }), { onConflict: 'id' });
   }
 
   const packingRows = _itemMasterListRowsByProductCode_('packing_records', sourceCode, 'id', 5000);
   if (packingRows.length) {
-    supabaseUpsertMinimal('packing_records', packingRows.map(function(row) {
+    supabaseUpsertMinimal_('packing_records', packingRows.map(function(row) {
       return { id: row.id, product_code: targetCode };
     }), { onConflict: 'id' });
   }
 
   const dispatchRows = _itemMasterListRowsByProductCode_('dispatch_records', sourceCode, 'id', 5000);
   if (dispatchRows.length) {
-    supabaseUpsertMinimal('dispatch_records', dispatchRows.map(function(row) {
+    supabaseUpsertMinimal_('dispatch_records', dispatchRows.map(function(row) {
       return { id: row.id, product_code: targetCode };
     }), { onConflict: 'id' });
   }
 
   const invoiceRows = _itemMasterListRowsByProductCode_('invoice_lines', sourceCode, 'id', 5000);
   if (invoiceRows.length) {
-    supabaseUpsertMinimal('invoice_lines', invoiceRows.map(function(row) {
+    supabaseUpsertMinimal_('invoice_lines', invoiceRows.map(function(row) {
       return { id: row.id, product_code: targetCode };
     }), { onConflict: 'id' });
   }
 
-  const workOrders = supabaseSelect('work_orders', {
+  const workOrders = supabaseSelect_('work_orders', {
     select: 'id,wo_number,snapshot_json',
     order: 'wo_date.desc',
     limit: 5000
@@ -9716,7 +10845,7 @@ function itemMasterMergeItems(payload, token) {
     }
   });
   if (workOrderUpdates.length) {
-    supabaseUpsertMinimal('work_orders', workOrderUpdates, { onConflict: 'id' });
+    supabaseUpsertMinimal_('work_orders', workOrderUpdates, { onConflict: 'id' });
   }
 
   const sourceItem = _itemMasterGetExistingItemRow_(sourceCode);
@@ -9724,7 +10853,7 @@ function itemMasterMergeItems(payload, token) {
   const mergedAt = new Date().toISOString();
   const mergeNote = 'Merged into ' + targetCode + ' on ' + mergedAt.slice(0, 10) + ' by ' + (user.userId || user.displayName || 'admin') + '. Reason: ' + reason;
 
-  supabaseUpdate('items', {
+  supabaseUpdate_('items', {
     item_code: 'eq.' + sourceCode
   }, {
     active: false,
@@ -9736,7 +10865,7 @@ function itemMasterMergeItems(payload, token) {
   });
 
   try {
-    supabaseInsertMinimal('item_code_merge_log', {
+    supabaseInsertMinimal_('item_code_merge_log', {
       source_item_code: sourceCode,
       source_item_name: sourceItem?.item_name || '',
       target_item_code: targetCode,
@@ -9767,7 +10896,7 @@ function generateItemCode_() {
   const prefix = 'ITM';
 
   // Lock / read sequence
-  const seq = supabaseSelect('item_sequences', {
+  const seq = supabaseSelect_('item_sequences', {
     filters: { prefix: 'eq.' + prefix },
     limit: 1
   })[0];
@@ -9776,13 +10905,13 @@ function generateItemCode_() {
 
   if (seq) {
     next = (seq.last_no || 0) + 1;
-    supabaseUpdate(
+    supabaseUpdate_(
       'item_sequences',
       { prefix: 'eq.' + prefix },
       { last_no: next }
     );
   } else {
-    supabaseInsert('item_sequences', {
+    supabaseInsert_('item_sequences', {
       prefix,
       last_no: 1
     });
@@ -9820,7 +10949,7 @@ function _hashPassword_(password) {
 function _verifyPassword_(plainPassword, storedHash) {
   const input = String(plainPassword || '');
   const stored = String(storedHash || '');
-  return _hashPassword_(input) === stored || input === stored;
+  return _hashPassword_(input) === stored;
 }
 
 function _assertPasswordPolicy_(password) {
@@ -9833,7 +10962,7 @@ function _assertPasswordPolicy_(password) {
 function _invalidateUserSessions_(userId) {
   if (!userId) return;
 
-  const rows = supabaseSelect('erp_sessions', {
+  const rows = supabaseSelect_('erp_sessions', {
     filters: { user_id: 'eq.' + userId },
     select: 'token',
     limit: 500
@@ -9844,13 +10973,13 @@ function _invalidateUserSessions_(userId) {
     if (row && row.token) cache.remove(row.token);
   });
 
-  supabaseDelete('erp_sessions', {
+  supabaseDelete_('erp_sessions', {
     user_id: 'eq.' + userId
   });
 }
 
 function _getUserByUserId_(userId) {
-  const rows = supabaseSelect('users', {
+  const rows = supabaseSelect_('users', {
     select: 'id,user_id,display_name,role_id,active,password_hash',
     filters: { user_id: 'eq.' + userId },
     limit: 1
@@ -9859,7 +10988,7 @@ function _getUserByUserId_(userId) {
 }
 
 function _getRoleById_(roleId) {
-  const rows = supabaseSelect('roles', {
+  const rows = supabaseSelect_('roles', {
     select: 'id,role_code,role_name,active',
     filters: { id: 'eq.' + roleId },
     limit: 1
@@ -9906,7 +11035,7 @@ function _prepareActiveSession_(session, token, forcePersist) {
   if (shouldPersist) {
     session.lastActivityPersistedAt = now;
     try {
-      supabaseUpdateMinimal('erp_sessions', {
+      supabaseUpdateMinimal_('erp_sessions', {
         token: 'eq.' + token
       }, {
         payload: JSON.stringify(session)
@@ -9923,7 +11052,7 @@ function loginAndGetToken(userId, password) {
   if (!userId || !password)
     return { ok:false, msg:'Missing credentials' };
 
-  const rows = supabaseSelect('users', {
+  const rows = supabaseSelect_('users', {
     select: 'id,user_id,display_name,role_id,password_hash,active',
     filters:{
       user_id:'eq.' + userId,
@@ -9941,25 +11070,12 @@ function loginAndGetToken(userId, password) {
   const hash = _hashPassword_(password);
 
 if (hash !== user.password_hash) {
-
-  // fallback: check plain text
-  if (password !== user.password_hash) {
-    return { ok:false, msg:'Invalid credentials' };
-  }
-
-  // auto-upgrade to hash
-  const newHash = _hashPassword_(password);
-
-  supabaseUpdateMinimal(
-    'users',
-    { id: 'eq.' + user.id },
-    { password_hash: newHash }
-  );
+  return { ok:false, msg:'Invalid credentials' };
 }
   let role = null;
 
   if (user.role_id) {
-    const roleRows = supabaseSelect('roles',{
+    const roleRows = supabaseSelect_('roles',{
       select:'id,role_code,active',
       filters:{ id:'eq.' + user.role_id, active:'eq.true' },
       limit:1
@@ -9971,7 +11087,7 @@ if (hash !== user.password_hash) {
   if (!role)
     return { ok:false, msg:'Role not assigned' };
 
-  const permissions = supabaseSelect('role_permissions',{
+  const permissions = supabaseSelect_('role_permissions',{
     filters:{ role_id:'eq.' + role.id }
   }) || [];
 
@@ -9994,7 +11110,7 @@ if (hash !== user.password_hash) {
     maxLifeSeconds: ERP_SESSION_MAX_LIFE_SECONDS
   };
 
-supabaseInsertMinimal('erp_sessions', {
+supabaseInsertMinimal_('erp_sessions', {
   token: token,
   user_id: user.user_id,
   payload: JSON.stringify(sessionPayload)
@@ -10011,7 +11127,7 @@ function logout(token) {
 
   if (token) {
     CacheService.getScriptCache().remove(token);
-    supabaseDelete('erp_sessions', {
+    supabaseDelete_('erp_sessions', {
       token: 'eq.' + token
     });
   }
@@ -10034,7 +11150,7 @@ function getSessionUser(token){
       if (_isSessionExpired_(cachedSession)) {
         cache.remove(token);
         try {
-          supabaseDelete('erp_sessions', {
+          supabaseDelete_('erp_sessions', {
             token: 'eq.' + token
           });
         } catch (e) {}
@@ -10049,7 +11165,7 @@ function getSessionUser(token){
   }
 
   // 2️⃣ Fallback to Supabase
-  const rows = supabaseSelect('erp_sessions', {
+  const rows = supabaseSelect_('erp_sessions', {
     select: 'payload',
     filters: { token: 'eq.' + token },
     limit: 1
@@ -10065,7 +11181,7 @@ function getSessionUser(token){
 
     if (_isSessionExpired_(session)) {
       try {
-        supabaseDelete('erp_sessions', {
+        supabaseDelete_('erp_sessions', {
           token: 'eq.' + token
         });
       } catch (e) {}
@@ -10095,7 +11211,7 @@ function _userHasPermission_(user, moduleCode, action) {
   if (!user) return false;
   if (user.role === 'ADMIN') return true;
   const perm = (user.permissions || []).find(function(p) {
-    return p && p.module_code === moduleCode;
+    return p && String(p.module_code || '').trim().toUpperCase() === String(moduleCode || '').trim().toUpperCase();
   });
   if (!perm) return false;
   return !!perm[action];
@@ -10120,7 +11236,7 @@ function adminCreateRole(payload, token){
   if (!roleCode)
     throw new Error('Role code required');
 
-  const existing = supabaseSelect('roles', {
+  const existing = supabaseSelect_('roles', {
     select: 'id',
     filters: { role_code: 'eq.' + roleCode },
     limit: 1
@@ -10128,7 +11244,7 @@ function adminCreateRole(payload, token){
   if (existing.length)
     throw new Error('Role already exists');
 
-  const inserted = supabaseInsert('roles',{
+  const inserted = supabaseInsert_('roles',{
     role_code: roleCode,
     role_name: payload.roleName || roleCode,
     active:true
@@ -10150,7 +11266,7 @@ function adminListRoles(token){
     } catch (e) {}
   }
 
-  const roles = supabaseSelect('roles',{
+  const roles = supabaseSelect_('roles',{
     select:'id,role_code,role_name,active',
     order:'role_code.asc'
   }) || [];
@@ -10179,7 +11295,7 @@ function adminCreateUser(payload, token){
 
   const hash = _hashPassword_(payload.password);
 
-  supabaseInsertMinimal('users',{
+  supabaseInsertMinimal_('users',{
     user_id:userId,
     password_hash:hash,
     display_name:displayName || userId,
@@ -10193,7 +11309,7 @@ function adminCreateUser(payload, token){
 function adminListUsers(token){
   _requireAdmin_(token);
 
-  return supabaseSelect('users',{
+  return supabaseSelect_('users',{
     select:'id,user_id,display_name,role_id,active',
     order:'user_id.asc'
   }) || [];
@@ -10220,14 +11336,14 @@ function adminUpdateRole(payload, token){
     if (nextCode !== 'ADMIN') throw new Error('ADMIN role code cannot be changed');
   }
 
-  const duplicates = supabaseSelect('roles', {
+  const duplicates = supabaseSelect_('roles', {
     filters: { role_code: 'eq.' + nextCode },
     limit: 5
   }) || [];
   if (duplicates.some(function(item){ return item.id !== roleId; }))
     throw new Error('Role code already exists');
 
-  supabaseUpdateMinimal('roles', {
+  supabaseUpdateMinimal_('roles', {
     id: 'eq.' + roleId
   }, {
     role_code: nextCode,
@@ -10237,7 +11353,7 @@ function adminUpdateRole(payload, token){
 
   _clearAdminRolesCache_();
 
-  const affectedUsers = supabaseSelect('users', {
+  const affectedUsers = supabaseSelect_('users', {
     filters: { role_id: 'eq.' + roleId },
     select: 'user_id',
     limit: 500
@@ -10271,7 +11387,7 @@ function adminUpdateUser(payload, token){
   if (admin.userId === userId && nextActive === false)
     throw new Error('You cannot deactivate your own account');
 
-  supabaseUpdateMinimal('users', {
+  supabaseUpdateMinimal_('users', {
     id: 'eq.' + user.id
   }, {
     display_name: nextDisplayName || user.user_id,
@@ -10296,7 +11412,7 @@ function adminResetUserPassword(payload, token){
 
   _assertPasswordPolicy_(newPassword);
 
-  supabaseUpdateMinimal('users', {
+  supabaseUpdateMinimal_('users', {
     id: 'eq.' + user.id
   }, {
     password_hash: _hashPassword_(newPassword)
@@ -10322,7 +11438,7 @@ function changeOwnPassword(currentPassword, newPassword, token){
   if (String(currentPassword || '') === String(newPassword || ''))
     throw new Error('New password must be different');
 
-  supabaseUpdateMinimal('users', {
+  supabaseUpdateMinimal_('users', {
     id: 'eq.' + user.id
   }, {
     password_hash: _hashPassword_(newPassword)
@@ -10362,7 +11478,7 @@ const MODULES = [
   'MASTERADMIN'
 ];
 
-  const existing = supabaseSelect('role_permissions',{
+  const existing = supabaseSelect_('role_permissions',{
     filters:{ role_id:'eq.' + roleId }
   }) || [];
 
@@ -10389,7 +11505,7 @@ function adminSaveRolePermissions(payload, token){
   const matrix = payload.permissions || [];
 
   function invalidateAffectedRoleUsers() {
-    const affectedUsers = supabaseSelect('users', {
+    const affectedUsers = supabaseSelect_('users', {
       filters: { role_id: 'eq.' + roleId },
       select: 'user_id',
       limit: 500
@@ -10399,7 +11515,7 @@ function adminSaveRolePermissions(payload, token){
     });
   }
 
-  supabaseDeleteMinimal('role_permissions',{
+  supabaseDeleteMinimal_('role_permissions',{
     role_id:'eq.' + roleId
   });
 
@@ -10419,7 +11535,7 @@ function adminSaveRolePermissions(payload, token){
     can_approve_business:m.can_approve_business
   }));
 
-  supabaseBulkInsertMinimal('role_permissions', rows);
+  supabaseBulkInsertMinimal_('role_permissions', rows);
 
   invalidateAffectedRoleUsers();
 
@@ -10436,7 +11552,7 @@ function _adminNormalizeMachineRateKey_(value) {
 function adminListMachineHourRates(token) {
   _requireAdmin_(token);
 
-  return (supabaseSelect('machine_hour_rates', {
+  return (supabaseSelect_('machine_hour_rates', {
     select: 'id,machine_key,machine_name,mhr,effective_from,effective_to,active,notes,updated_at,updated_by',
     order: 'active.desc,machine_name.asc,effective_from.desc',
     limit: 5000
@@ -10486,10 +11602,10 @@ function adminSaveMachineHourRate(payload, token) {
   };
 
   if (id) {
-    supabaseUpdateMinimal('machine_hour_rates', { id: 'eq.' + id }, row);
+    supabaseUpdateMinimal_('machine_hour_rates', { id: 'eq.' + id }, row);
   } else {
     row.created_at = new Date().toISOString();
-    supabaseInsertMinimal('machine_hour_rates', row);
+    supabaseInsertMinimal_('machine_hour_rates', row);
   }
 
   return { ok: true };
@@ -10500,7 +11616,7 @@ function adminDeactivateMachineHourRate(id, token) {
   const rateId = String(id || '').trim();
   if (!rateId) throw new Error('MHR row is required');
 
-  supabaseUpdateMinimal('machine_hour_rates', { id: 'eq.' + rateId }, {
+  supabaseUpdateMinimal_('machine_hour_rates', { id: 'eq.' + rateId }, {
     active: false,
     updated_at: new Date().toISOString(),
     updated_by: String(admin.userId || admin.displayName || 'ADMIN')
@@ -10539,7 +11655,7 @@ function _adminBrandingMissingSchema_(err) {
 }
 
 function _brandingLogoRow_() {
-  const rows = supabaseSelect('erp_brand_assets', {
+  const rows = supabaseSelect_('erp_brand_assets', {
     select: 'asset_key,asset_name,mime_type,data_url,file_name,file_size,active,notes,updated_at,updated_by',
     filters: { asset_key: 'eq.' + ERP_COMPANY_LOGO_KEY },
     limit: 1
@@ -10611,7 +11727,7 @@ function _brandingMapSalesPersonProfile_(row) {
 }
 
 function _brandingListProfiles_() {
-  return (supabaseSelect('sales_person_profiles', {
+  return (supabaseSelect_('sales_person_profiles', {
     select: 'sales_rep,display_name,photo_mime_type,photo_data_url,photo_file_name,photo_file_size,active,sort_order,notes,updated_at,updated_by',
     order: 'active.desc,sort_order.asc,sales_rep.asc',
     limit: 500
@@ -10624,7 +11740,7 @@ function _brandingSalesRepNames_(profiles) {
     if (row.salesRep) map[row.salesRep] = true;
   });
   try {
-    (supabaseSelect('sales_orders', {
+    (supabaseSelect_('sales_orders', {
       select: 'sales_rep',
       order: 'sales_rep.asc',
       limit: 5000
@@ -10634,7 +11750,7 @@ function _brandingSalesRepNames_(profiles) {
     });
   } catch (err) {}
   try {
-    (supabaseSelect('sales_monthly_targets', {
+    (supabaseSelect_('sales_monthly_targets', {
       select: 'sales_rep',
       order: 'sales_rep.asc',
       limit: 5000
@@ -10706,7 +11822,7 @@ function adminBrandingSaveCompanyLogo(payload, token) {
     updated_by: String(admin.userId || admin.displayName || 'ADMIN')
   };
   row.created_at = new Date().toISOString();
-  supabaseUpsertMinimal('erp_brand_assets', row, { onConflict: 'asset_key' });
+  supabaseUpsertMinimal_('erp_brand_assets', row, { onConflict: 'asset_key' });
   _brandingRememberCompanyLogo_(image.dataUrl);
   return { ok: true };
 }
@@ -10737,7 +11853,7 @@ function adminBrandingSaveSalesPersonProfile(payload, token) {
     updated_by: String(admin.userId || admin.displayName || 'ADMIN')
   };
   row.created_at = new Date().toISOString();
-  supabaseUpsertMinimal('sales_person_profiles', row, { onConflict: 'sales_rep' });
+  supabaseUpsertMinimal_('sales_person_profiles', row, { onConflict: 'sales_rep' });
   return { ok: true };
 }
 
@@ -10745,7 +11861,7 @@ function adminBrandingClearSalesPersonPhoto(salesRep, token) {
   const admin = _requireAdmin_(token);
   const rep = String(salesRep || '').trim();
   if (!rep) throw new Error('Sales person is required');
-  supabaseUpdateMinimal('sales_person_profiles', { sales_rep: 'eq.' + rep }, {
+  supabaseUpdateMinimal_('sales_person_profiles', { sales_rep: 'eq.' + rep }, {
     photo_mime_type: null,
     photo_data_url: null,
     photo_file_name: null,
@@ -10824,7 +11940,7 @@ function adminSalesListSetup(token) {
   let targets = [];
   let benchmarks = [];
   try {
-    targets = (supabaseSelect('sales_monthly_targets', {
+    targets = (supabaseSelect_('sales_monthly_targets', {
       select: 'id,period_month,sales_rep,order_target_value,billing_target_value,notes,active,updated_at',
       order: 'period_month.desc,sales_rep.asc',
       limit: 2000
@@ -10840,7 +11956,7 @@ function adminSalesListSetup(token) {
         updatedAt: row.updated_at || ''
       };
     });
-    benchmarks = (supabaseSelect('sales_client_benchmarks', {
+    benchmarks = (supabaseSelect_('sales_client_benchmarks', {
       select: 'client_code,client_name,historical_max_monthly_value,historical_avg_monthly_value,historical_top_rank,baseline_period_label,decline_alert_pct,active,notes,updated_at',
       order: 'historical_top_rank.asc,client_name.asc',
       limit: 5000
@@ -10866,7 +11982,7 @@ function adminSalesListSetup(token) {
   }
 
   const salesRepMap = {};
-  (supabaseSelect('sales_orders', {
+  (supabaseSelect_('sales_orders', {
     select: 'sales_rep',
     order: 'sales_rep.asc',
     limit: 5000
@@ -10876,7 +11992,7 @@ function adminSalesListSetup(token) {
   });
   targets.forEach(function(row) { if (row.salesRep) salesRepMap[row.salesRep] = true; });
 
-  const clients = (supabaseSelect('clients', {
+  const clients = (supabaseSelect_('clients', {
     select: 'client_code,client_name,active',
     order: 'client_name.asc',
     limit: 5000
@@ -10902,10 +12018,10 @@ function adminSalesSaveMonthlyTarget(payload, token) {
   const row = _adminSalesNormalizeTargetRow_(payload || {});
   const id = String((payload && payload.id) || '').trim();
   if (id) {
-    supabaseUpdateMinimal('sales_monthly_targets', { id: 'eq.' + id }, row);
+    supabaseUpdateMinimal_('sales_monthly_targets', { id: 'eq.' + id }, row);
   } else {
     row.created_at = new Date().toISOString();
-    supabaseUpsertMinimal('sales_monthly_targets', row, { onConflict: 'period_month,sales_rep' });
+    supabaseUpsertMinimal_('sales_monthly_targets', row, { onConflict: 'period_month,sales_rep' });
   }
   return { ok: true };
 }
@@ -10917,7 +12033,7 @@ function adminSalesBulkSaveMonthlyTargets(payload, token) {
   rows.forEach(function(item) {
     const row = _adminSalesNormalizeTargetRow_(item);
     row.created_at = new Date().toISOString();
-    supabaseUpsertMinimal('sales_monthly_targets', row, { onConflict: 'period_month,sales_rep' });
+    supabaseUpsertMinimal_('sales_monthly_targets', row, { onConflict: 'period_month,sales_rep' });
   });
   return { ok: true, count: rows.length };
 }
@@ -10926,7 +12042,7 @@ function adminSalesSaveClientBenchmark(payload, token) {
   _requireAdmin_(token);
   const row = _adminSalesNormalizeBenchmarkRow_(payload || {});
   row.created_at = new Date().toISOString();
-  supabaseUpsertMinimal('sales_client_benchmarks', row, { onConflict: 'client_code' });
+  supabaseUpsertMinimal_('sales_client_benchmarks', row, { onConflict: 'client_code' });
   return { ok: true };
 }
 
@@ -10952,7 +12068,7 @@ function adminSalesBulkSaveClientBenchmarks(payload, token) {
   if (!normalizedRows.length) throw new Error('No valid benchmark rows supplied');
   normalizedRows.forEach(function(row) {
     row.created_at = new Date().toISOString();
-    supabaseUpsertMinimal('sales_client_benchmarks', row, { onConflict: 'client_code' });
+    supabaseUpsertMinimal_('sales_client_benchmarks', row, { onConflict: 'client_code' });
   });
   return { ok: true, count: normalizedRows.length };
 }
@@ -11321,7 +12437,7 @@ function checklistGenerateInstances(payload) {
 function _checklistUpdateOverdueForUser_(userId) {
   const nowIso = _checklistNowIso_();
   try {
-    supabaseUpdateMinimal('checklist_task_instances', {
+    supabaseUpdateMinimal_('checklist_task_instances', {
       assigned_user_id: 'eq.' + userId,
       status: 'eq.PENDING',
       due_at: 'lt.' + nowIso
@@ -11337,7 +12453,7 @@ function _checklistUpdateOverdueForUser_(userId) {
 function _checklistUpdateOverdueAll_() {
   const nowIso = _checklistNowIso_();
   try {
-    supabaseUpdateMinimal('checklist_task_instances', {
+    supabaseUpdateMinimal_('checklist_task_instances', {
       status: 'eq.PENDING',
       due_at: 'lt.' + nowIso
     }, {
@@ -11352,7 +12468,7 @@ function _checklistUpdateOverdueAll_() {
 function _checklistBlockingRowsForUser_(userId) {
   if (!userId) return [];
   const lockCutoff = _checklistLockCutoffIso_();
-  return supabaseSelect('checklist_task_instances', {
+  return supabaseSelect_('checklist_task_instances', {
     select: 'id,title,due_at,scheduled_date,priority,status',
     filters: {
       assigned_user_id: 'eq.' + userId,
@@ -11404,7 +12520,7 @@ function _checklistCancelInvalidDailyOpen_(userId, fromDate, toDate) {
     }
   });
   if (cancelIds.length) {
-    supabaseUpdateMinimal('checklist_task_instances', { id: _supabaseInFilter_(cancelIds) }, {
+    supabaseUpdateMinimal_('checklist_task_instances', { id: _supabaseInFilter_(cancelIds) }, {
       status: 'CANCELLED',
       updated_at: _checklistNowIso_()
     });
@@ -11517,7 +12633,7 @@ function checklistMarkDone(token, taskInstanceId, note) {
   const id = String(taskInstanceId || '').trim();
   if (!id) throw new Error('Task instance required');
 
-  const rows = supabaseSelect('checklist_task_instances', {
+  const rows = supabaseSelect_('checklist_task_instances', {
     select: 'id,template_id,assigned_user_id,status',
     filters: { id: 'eq.' + id },
     limit: 1
@@ -11530,14 +12646,14 @@ function checklistMarkDone(token, taskInstanceId, note) {
   if (task.status === 'CANCELLED') throw new Error('Cancelled tasks cannot be completed');
 
   const nowIso = _checklistNowIso_();
-  supabaseUpdateMinimal('checklist_task_instances', { id: 'eq.' + id }, {
+  supabaseUpdateMinimal_('checklist_task_instances', { id: 'eq.' + id }, {
     status: 'DONE',
     completed_at: nowIso,
     completed_by: user.userId,
     completion_note: String(note || '').trim(),
     updated_at: nowIso
   });
-  supabaseInsertMinimal('checklist_task_audit_log', {
+  supabaseInsertMinimal_('checklist_task_audit_log', {
     task_instance_id: id,
     template_id: task.template_id,
     action: 'MARK_DONE',
@@ -11667,7 +12783,7 @@ function adminChecklistCreateTemplate(payload, token) {
   const effectiveFrom = String(payload.effectiveFrom || _checklistToday_()).slice(0, 10);
   const dueTime = String(payload.dueTime || '23:59').slice(0, 5);
 
-  const inserted = supabaseInsert('checklist_task_templates', {
+  const inserted = supabaseInsert_('checklist_task_templates', {
     task_code: taskCode,
     title: title,
     description: String(payload.description || '').trim(),
@@ -11681,7 +12797,7 @@ function adminChecklistCreateTemplate(payload, token) {
   const template = inserted[0];
   if (!template) throw new Error('Task creation failed');
 
-  const version = (supabaseInsert('checklist_task_versions', {
+  const version = (supabaseInsert_('checklist_task_versions', {
     template_id: template.id,
     effective_from: effectiveFrom,
     frequency_type: frequencyType,
@@ -11693,7 +12809,7 @@ function adminChecklistCreateTemplate(payload, token) {
     created_by: admin.userId
   }) || [])[0];
 
-  supabaseInsertMinimal('checklist_task_audit_log', {
+  supabaseInsertMinimal_('checklist_task_audit_log', {
     template_id: template.id,
     action: 'CREATE_TEMPLATE',
     new_value: JSON.stringify({ template: template, version: version }),
@@ -11710,7 +12826,7 @@ function adminChecklistUpdateFromDate(payload, token) {
   const effectiveFrom = String(payload.effectiveFrom || '').slice(0, 10);
   if (!templateId || !effectiveFrom) throw new Error('Task and effective date are required');
 
-  const existing = (supabaseSelect('checklist_task_templates', {
+  const existing = (supabaseSelect_('checklist_task_templates', {
     select: 'id,title,description,category,priority,is_mandatory,active',
     filters: { id: 'eq.' + templateId },
     limit: 1
@@ -11719,7 +12835,7 @@ function adminChecklistUpdateFromDate(payload, token) {
 
   const frequencyType = String(payload.frequencyType || 'DAILY').trim().toUpperCase();
   const previousDay = _checklistAddDays_(effectiveFrom, -1);
-  const oldVersions = supabaseSelect('checklist_task_versions', {
+  const oldVersions = supabaseSelect_('checklist_task_versions', {
     select: 'id,effective_from,effective_to',
     filters: {
       template_id: 'eq.' + templateId,
@@ -11731,14 +12847,14 @@ function adminChecklistUpdateFromDate(payload, token) {
   }) || [];
   if (oldVersions[0]) {
     const oldFrom = String(oldVersions[0].effective_from || '').slice(0, 10);
-    supabaseUpdateMinimal('checklist_task_versions', { id: 'eq.' + oldVersions[0].id }, oldFrom === effectiveFrom ? {
+    supabaseUpdateMinimal_('checklist_task_versions', { id: 'eq.' + oldVersions[0].id }, oldFrom === effectiveFrom ? {
       active: false
     } : {
       effective_to: previousDay
     });
   }
 
-  supabaseUpdateMinimal('checklist_task_templates', { id: 'eq.' + templateId }, {
+  supabaseUpdateMinimal_('checklist_task_templates', { id: 'eq.' + templateId }, {
     title: String(payload.title || existing.title || '').trim(),
     description: String(payload.description || '').trim(),
     category: String(payload.category || '').trim(),
@@ -11749,7 +12865,7 @@ function adminChecklistUpdateFromDate(payload, token) {
     updated_at: _checklistNowIso_()
   });
 
-  const version = (supabaseInsert('checklist_task_versions', {
+  const version = (supabaseInsert_('checklist_task_versions', {
     template_id: templateId,
     effective_from: effectiveFrom,
     frequency_type: frequencyType,
@@ -11761,7 +12877,7 @@ function adminChecklistUpdateFromDate(payload, token) {
     created_by: admin.userId
   }) || [])[0];
 
-  supabaseUpdateMinimal('checklist_task_instances', {
+  supabaseUpdateMinimal_('checklist_task_instances', {
     template_id: 'eq.' + templateId,
     scheduled_date: 'gte.' + effectiveFrom,
     status: 'in.("PENDING","OVERDUE")'
@@ -11772,7 +12888,7 @@ function adminChecklistUpdateFromDate(payload, token) {
 
   _checklistGenerateInstancesInternal_({ fromDate: effectiveFrom, horizonDays: CHECKLIST_DEFAULT_HORIZON_DAYS });
 
-  supabaseInsertMinimal('checklist_task_audit_log', {
+  supabaseInsertMinimal_('checklist_task_audit_log', {
     template_id: templateId,
     action: 'UPDATE_FROM_DATE',
     new_value: JSON.stringify(Object.assign({}, payload, { versionId: version && version.id })),
@@ -11822,10 +12938,10 @@ function adminChecklistAssignTasksToUser(payload, token) {
     };
   });
 
-  if (rows.length) supabaseBulkInsertMinimal('checklist_task_assignments', rows);
+  if (rows.length) supabaseBulkInsertMinimal_('checklist_task_assignments', rows);
   _checklistGenerateInstancesInternal_({ userId: userId, fromDate: startDate, horizonDays: CHECKLIST_DEFAULT_HORIZON_DAYS });
 
-  supabaseInsertMinimal('checklist_task_audit_log', {
+  supabaseInsertMinimal_('checklist_task_audit_log', {
     action: 'ASSIGN_TASKS_TO_USER',
     new_value: JSON.stringify({ userId: userId, taskIds: taskIds, inserted: rows.length, startDate: startDate, endDate: endDate }),
     actor_user_id: admin.userId
@@ -11857,11 +12973,11 @@ function adminChecklistDeactivateAssignment(token, assignmentId) {
   const admin = _checklistRequireAdminOrEdit_(token);
   const id = String(assignmentId || '').trim();
   if (!id) throw new Error('Assignment required');
-  supabaseUpdateMinimal('checklist_task_assignments', { id: 'eq.' + id }, {
+  supabaseUpdateMinimal_('checklist_task_assignments', { id: 'eq.' + id }, {
     active: false,
     end_date: _checklistToday_()
   });
-  supabaseUpdateMinimal('checklist_task_instances', {
+  supabaseUpdateMinimal_('checklist_task_instances', {
     assignment_id: 'eq.' + id,
     scheduled_date: 'gte.' + _checklistToday_(),
     status: 'in.("PENDING","OVERDUE")'
@@ -11869,7 +12985,7 @@ function adminChecklistDeactivateAssignment(token, assignmentId) {
     status: 'CANCELLED',
     updated_at: _checklistNowIso_()
   });
-  supabaseInsertMinimal('checklist_task_audit_log', {
+  supabaseInsertMinimal_('checklist_task_audit_log', {
     action: 'DEACTIVATE_ASSIGNMENT',
     new_value: JSON.stringify({ assignmentId: id }),
     actor_user_id: admin.userId
@@ -11947,7 +13063,7 @@ function adminChecklistDashboard(token) {
 
 function _checklistRegenerateFutureOpen_(fromDate) {
   const start = String(fromDate || _checklistToday_()).slice(0, 10);
-  supabaseUpdateMinimal('checklist_task_instances', {
+  supabaseUpdateMinimal_('checklist_task_instances', {
     scheduled_date: 'gte.' + start,
     status: 'in.("PENDING","OVERDUE")'
   }, {
@@ -12003,9 +13119,9 @@ function adminChecklistSaveWeeklyOffs(payload, token) {
       created_by: admin.userId
     };
   });
-  supabaseUpsertMinimal('checklist_weekly_offs', rows, { onConflict: 'day_of_week' });
+  supabaseUpsertMinimal_('checklist_weekly_offs', rows, { onConflict: 'day_of_week' });
   _checklistRegenerateFutureOpen_(_checklistToday_());
-  supabaseInsertMinimal('checklist_task_audit_log', {
+  supabaseInsertMinimal_('checklist_task_audit_log', {
     action: 'SAVE_WEEKLY_OFFS',
     new_value: JSON.stringify({ days: Object.keys(selected) }),
     actor_user_id: admin.userId
@@ -12019,7 +13135,7 @@ function adminChecklistAddHoliday(payload, token) {
   const date = String(payload.holidayDate || '').slice(0, 10);
   const title = String(payload.title || '').trim();
   if (!date || !title) throw new Error('Holiday date and title are required');
-  supabaseUpsertMinimal('checklist_holidays', {
+  supabaseUpsertMinimal_('checklist_holidays', {
     holiday_date: date,
     title: title,
     active: payload.active === false ? false : true,
@@ -12028,7 +13144,7 @@ function adminChecklistAddHoliday(payload, token) {
     updated_at: _checklistNowIso_()
   }, { onConflict: 'holiday_date' });
   _checklistRegenerateFutureOpen_(date < _checklistToday_() ? _checklistToday_() : date);
-  supabaseInsertMinimal('checklist_task_audit_log', {
+  supabaseInsertMinimal_('checklist_task_audit_log', {
     action: 'ADD_HOLIDAY',
     new_value: JSON.stringify({ holidayDate: date, title: title }),
     actor_user_id: admin.userId
@@ -12040,20 +13156,20 @@ function adminChecklistDeactivateHoliday(token, holidayId) {
   const admin = _checklistRequireAdminOrEdit_(token);
   const id = String(holidayId || '').trim();
   if (!id) throw new Error('Holiday required');
-  const row = (supabaseSelect('checklist_holidays', {
+  const row = (supabaseSelect_('checklist_holidays', {
     select: 'id,holiday_date,title',
     filters: { id: 'eq.' + id },
     limit: 1
   }) || [])[0];
   if (!row) throw new Error('Holiday not found');
-  supabaseUpdateMinimal('checklist_holidays', { id: 'eq.' + id }, {
+  supabaseUpdateMinimal_('checklist_holidays', { id: 'eq.' + id }, {
     active: false,
     updated_by: admin.userId,
     updated_at: _checklistNowIso_()
   });
   const date = String(row.holiday_date || _checklistToday_()).slice(0, 10);
   _checklistRegenerateFutureOpen_(date < _checklistToday_() ? _checklistToday_() : date);
-  supabaseInsertMinimal('checklist_task_audit_log', {
+  supabaseInsertMinimal_('checklist_task_audit_log', {
     action: 'DEACTIVATE_HOLIDAY',
     new_value: JSON.stringify({ holidayId: id, holidayDate: row.holiday_date, title: row.title }),
     actor_user_id: admin.userId
@@ -12145,7 +13261,7 @@ function _salesOrderInsertHeader_(payload) {
   const optionalKeys = ['mode_of_transport', 'transport_preference', 'transport_payment', 'billing_remarks'];
   while (true) {
     try {
-      return supabaseInsert('sales_orders', current);
+      return supabaseInsert_('sales_orders', current);
     } catch (err) {
       const missing = optionalKeys.find(function(key) {
         return Object.prototype.hasOwnProperty.call(current, key) && _salesOrderMatchMissingColumn_(err && err.message, key);
@@ -12161,7 +13277,7 @@ function _salesOrderUpdateHeader_(filters, payload) {
   const optionalKeys = ['mode_of_transport', 'transport_preference', 'transport_payment', 'billing_remarks'];
   while (true) {
     try {
-      return supabaseUpdate('sales_orders', filters, current);
+      return supabaseUpdate_('sales_orders', filters, current);
     } catch (err) {
       const missing = optionalKeys.find(function(key) {
         return Object.prototype.hasOwnProperty.call(current, key) && _salesOrderMatchMissingColumn_(err && err.message, key);
@@ -12279,7 +13395,7 @@ function generateSalesOrderNumber(prefix, orderDate) {
   const dt = orderDate ? new Date(orderDate) : new Date();
   const fy = getFinancialYear(dt);
 
-  const res = supabaseRpc('generate_so_number', {
+  const res = supabaseRpc_('generate_so_number', {
     p_prefix: prefix,
     p_fy: fy
   });
@@ -12303,14 +13419,15 @@ function getFinancialYear(dt) {
     : `${yy(y - 1)}_${yy(y)}`;
 }
 
-function saveOrderWithKey(payload, idemKey, apiKey, username) {
+function saveOrderWithKey(payload, idemKey, apiKey, username, token) {
+const sessionUser = _requireModuleAccess_(_authTokenFromPayload_(payload, token), 'SALES_ORDER_ENTRY', 'can_create');
 
 if (!payload?.header) throw new Error('Invalid payload');
 
 const h = _salesOrderNormalizeHeader_(payload.header);
 h.orderDate = _salesOrderTodayIso_();
 const lines = payload.lines || [];
-const createdBy = String(username || '').trim() || 'ERP User';
+const createdBy = _authActorName_(sessionUser);
 const itemTaxMap = _salesOrderItemTaxMap_(lines);
 
 /* ========================
@@ -12339,14 +13456,14 @@ if(!l.approvedRate || l.approvedRate<=0) throw new Error('Line '+(i+1)+' Rate in
 
 try{
 
-supabaseInsert('idempotency_keys',{
+supabaseInsert_('idempotency_keys',{
 key: idemKey,
 created_at: new Date().toISOString()
 });
 
 }catch(e){
 
-const existing = supabaseSelect('idempotency_keys',{
+const existing = supabaseSelect_('idempotency_keys',{
 filters:{ key:'eq.'+idemKey },
 limit:1
 })[0];
@@ -12522,7 +13639,7 @@ lineRows.forEach(r=>{
 r.so_id = soId;
 });
 
-supabaseBulkInsert('sales_order_lines',lineRows);
+supabaseBulkInsert_('sales_order_lines',lineRows);
 
 
 /* ========================
@@ -12550,7 +13667,7 @@ grandTotal: grand
    SAVE IDEMPOTENT RESPONSE
 ======================== */
 
-supabaseUpdate(
+supabaseUpdate_(
 'idempotency_keys',
 { key:'eq.'+idemKey },
 { response }
@@ -12570,7 +13687,7 @@ function _salesOrderHasLinkedLineActivity_(soNumber, lineIds) {
 
   const lineFilter = { so_line_id: _supabaseInFilter_(ids) };
   const hasRows = function(table, filters) {
-    return (supabaseSelect(table, {
+    return (supabaseSelect_(table, {
       select: 'id',
       filters: filters,
       limit: 1
@@ -12583,7 +13700,7 @@ function _salesOrderHasLinkedLineActivity_(soNumber, lineIds) {
   if (hasRows('fg_stock_adjustments', lineFilter)) return true;
 
   if (soNumber) {
-    if ((supabaseSelect('work_order_jobs', {
+    if ((supabaseSelect_('work_order_jobs', {
       select: 'wo_id',
       filters: { so_number: 'eq.' + soNumber },
       limit: 1
@@ -12606,7 +13723,7 @@ function _salesOrderAuditSnapshot_(soId) {
   const errors = [];
 
   try {
-    header = (supabaseSelect('sales_orders', {
+    header = (supabaseSelect_('sales_orders', {
       filters: { id: 'eq.' + id },
       limit: 1
     }) || [])[0] || null;
@@ -12615,7 +13732,7 @@ function _salesOrderAuditSnapshot_(soId) {
   }
 
   try {
-    lines = supabaseSelect('sales_order_lines', {
+    lines = supabaseSelect_('sales_order_lines', {
       filters: { so_id: 'eq.' + id },
       order: 'line_no.asc'
     }) || [];
@@ -12624,7 +13741,7 @@ function _salesOrderAuditSnapshot_(soId) {
   }
 
   try {
-    artworks = supabaseSelect('artworks', {
+    artworks = supabaseSelect_('artworks', {
       filters: { so_id: 'eq.' + id },
       order: 'line_no.asc'
     }) || [];
@@ -12640,7 +13757,8 @@ function _salesOrderAuditSnapshot_(soId) {
   };
 }
 
-function updateSalesOrder(soId,payload){
+function updateSalesOrder(soId,payload,token){
+const sessionUser = _requireModuleAccess_(_authTokenFromPayload_(payload, token), 'SALES_ORDER_ENTRY', 'can_edit');
 
 if(!soId) throw new Error('SO id missing');
 
@@ -12666,7 +13784,7 @@ lines.forEach(function(l, i) {
    FETCH SO
 ======================== */
 
-const so = supabaseSelect('sales_orders',{
+const so = supabaseSelect_('sales_orders',{
 filters:{ id:'eq.'+soId }
 })[0];
 
@@ -12674,7 +13792,7 @@ if(!so) throw new Error('Sales Order not found');
 const auditBefore = _salesOrderAuditSnapshot_(soId);
 header.orderDate = so.so_date || _salesOrderTodayIso_();
 
-const approvalLines = supabaseSelect('sales_order_lines',{
+const approvalLines = supabaseSelect_('sales_order_lines',{
 select:'accounts_status,business_status',
 filters:{ so_id:'eq.'+soId }
 }) || [];
@@ -12710,7 +13828,7 @@ const intra =
 (header.clientState || '').toLowerCase() ===
 (DEFAULT_MASTERS.companyState || COMPANY_STATE).toLowerCase();
 
-const existingLines = supabaseSelect('sales_order_lines',{
+const existingLines = supabaseSelect_('sales_order_lines',{
 select:'id,line_no',
 filters:{ so_id:'eq.'+soId },
 order:'line_no.asc'
@@ -12874,10 +13992,10 @@ if (allExistingLinesMatched) {
     if (!rowId) throw new Error('Sales order line id missing during update');
     const update = Object.assign({}, row);
     delete update.id;
-    supabaseUpdateMinimal('sales_order_lines', { id:'eq.' + rowId }, update);
+    supabaseUpdateMinimal_('sales_order_lines', { id:'eq.' + rowId }, update);
   });
 } else {
-  supabaseDelete('sales_order_lines',{
+  supabaseDelete_('sales_order_lines',{
   so_id:'eq.'+soId
   });
 
@@ -12886,7 +14004,7 @@ if (allExistingLinesMatched) {
      DELETE OLD ARTWORK
   ======================== */
 
-  supabaseDelete('artworks',{
+  supabaseDelete_('artworks',{
   so_id:'eq.'+soId
   });
 
@@ -12895,7 +14013,7 @@ if (allExistingLinesMatched) {
      INSERT NEW LINES
   ======================== */
 
-  supabaseBulkInsert('sales_order_lines',rows.map(function(row){
+  supabaseBulkInsert_('sales_order_lines',rows.map(function(row){
     const copy = Object.assign({}, row);
     delete copy.id;
     return copy;
@@ -12916,7 +14034,7 @@ _auditTryInsertEvent_({
   entityKey: so.so_number || soId,
   action: 'UPDATE',
   sourceModule: 'SALES_ORDER_ENTRY',
-  actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+  actor: _authActorName_(sessionUser),
   reason: 'Sales order updated',
   beforeJson: auditBefore,
   afterJson: auditAfter,
@@ -12973,7 +14091,7 @@ function _supabaseBulkInsertMinimalInChunks_(table, rows, maxRows, maxPayloadCha
 
   const out = [];
   chunks.forEach(function(chunk) {
-    const result = supabaseBulkInsertMinimal(table, chunk) || [];
+    const result = supabaseBulkInsertMinimal_(table, chunk) || [];
     if (Array.isArray(result) && result.length) out.push.apply(out, result);
   });
   return out;
@@ -13170,13 +14288,13 @@ function _salesOrderSelectLineDetails_(filters) {
   };
 
   try {
-    const rows = supabaseSelect('v_sales_order_line_details', query) || [];
+    const rows = supabaseSelect_('v_sales_order_line_details', query) || [];
     return _salesOrderMergeLineLifecycle_(_salesOrderDecorateLineDetails_(rows, []));
   } catch (err) {
     if (!_salesOrderLineDetailsViewNeedsFallback_(err)) throw err;
   }
 
-  const rows = enrichSalesOrderLines(supabaseSelect('sales_order_lines', {
+  const rows = enrichSalesOrderLines(supabaseSelect_('sales_order_lines', {
     filters: filters || {},
     order: 'so_id.asc,line_no.asc'
   }) || []);
@@ -13207,8 +14325,9 @@ function listSalesOrders(options, token){
 
 options = options || {};
 const tokenText = String(token || '').trim();
-const currentUser = tokenText ? getSessionUser(tokenText) : null;
-if (tokenText && !currentUser) throw new Error('Unauthorized');
+if (!tokenText) throw new Error('Unauthorized');
+const currentUser = getSessionUser(tokenText);
+if (!currentUser) throw new Error('Unauthorized');
 const canSeeAllOrders = _salesOrderListUserCanSeeAll_(currentUser);
 const ownerSalesRep = canSeeAllOrders ? '' : _salesOrderListUserDisplayName_(currentUser);
 const requestedSalesRep = String(options.salesRep || '').trim();
@@ -13312,7 +14431,7 @@ if (options.poNumber) richQuery.filters.po_number = 'ilike.*' + options.poNumber
 let rows;
 let usedFastView = false;
 try {
-  rows = supabaseSelect('v_sales_orders_list_fast', richQuery) || [];
+  rows = supabaseSelect_('v_sales_orders_list_fast', richQuery) || [];
   usedFastView = true;
 } catch (err) {
   if (!_salesOrderListViewNeedsFallback_(err)) throw err;
@@ -13359,7 +14478,7 @@ try {
   if (options.currency) fallbackQuery.filters.currency = 'ilike.*' + options.currency + '*';
   if (options.poNumber) fallbackQuery.filters.po_number = 'ilike.*' + options.poNumber + '*';
 
-  rows = _salesOrderApplyFallbackUiFields_(supabaseSelect('sales_orders_list', fallbackQuery) || []);
+  rows = _salesOrderApplyFallbackUiFields_(supabaseSelect_('sales_orders_list', fallbackQuery) || []);
   if (options.date) {
     rows = rows.filter(function(row) {
       return String(row.so_date_text || row.so_date || '').indexOf(options.date) !== -1;
@@ -13379,18 +14498,14 @@ return rows;
 
 function setSalesOrderLifecycleStatus(soNumber, nextStatus, token) {
   if (!soNumber) throw new Error('SO number required');
+  const user = _requireModuleAccess_(token, 'SALES_ORDER_ENTRY', 'can_edit');
 
   const status = String(nextStatus || '').trim().toUpperCase();
   if (!['HOLD', 'OPEN', 'CLOSED', 'CANCELLED'].includes(status)) {
     throw new Error('Invalid sales order status');
   }
 
-  if (token) {
-    const allowed = checkPermission(token, 'SALES_ORDER_ENTRY', 'can_edit');
-    if (!allowed) throw new Error('You do not have permission to update sales orders');
-  }
-
-  const so = supabaseSelect('sales_orders', {
+  const so = supabaseSelect_('sales_orders', {
     filters: { so_number: 'eq.' + soNumber },
     limit: 1
   })[0];
@@ -13401,7 +14516,7 @@ function setSalesOrderLifecycleStatus(soNumber, nextStatus, token) {
   }
 
   const auditBefore = _salesOrderAuditSnapshot_(so.id);
-  supabaseUpdate('sales_orders', { so_number: 'eq.' + soNumber }, { status: status });
+  supabaseUpdate_('sales_orders', { so_number: 'eq.' + soNumber }, { status: status });
   const auditAfter = _salesOrderAuditSnapshot_(so.id);
   _auditTryInsertEvent_({
     entityType: 'SALES_ORDER',
@@ -13409,7 +14524,7 @@ function setSalesOrderLifecycleStatus(soNumber, nextStatus, token) {
     entityKey: soNumber,
     action: 'STATUS_CHANGE',
     sourceModule: 'SALES_ORDER_ENTRY',
-    actor: token ? getSessionUser(token) : null,
+    actor: user,
     reason: 'Sales order status changed to ' + status,
     beforeJson: auditBefore,
     afterJson: auditAfter,
@@ -13425,28 +14540,23 @@ function setSalesOrderLifecycleStatus(soNumber, nextStatus, token) {
 function setSalesOrderLineLifecycleStatus(soLineId, nextStatus, token) {
   const id = String(soLineId || '').trim();
   if (!id) throw new Error('SO line required');
+  const user = _requireModuleAccess_(token, 'SALES_ORDER_ENTRY', 'can_edit');
 
   const status = String(nextStatus || '').trim().toUpperCase();
   if (status !== 'CANCELLED') {
     throw new Error('Invalid sales order line status');
   }
 
-  let actor = 'ERP User';
-  if (token) {
-    const allowed = checkPermission(token, 'SALES_ORDER_ENTRY', 'can_edit');
-    if (!allowed) throw new Error('You do not have permission to update sales order lines');
-    const user = getSessionUser(token);
-    actor = String((user && (user.displayName || user.fullName || user.userId)) || actor).trim() || actor;
-  }
+  const actor = _authActorName_(user);
 
-  const line = (supabaseSelect('sales_order_lines', {
+  const line = (supabaseSelect_('sales_order_lines', {
     select: 'id,so_id,line_no,product_code,product_name,status,closed_at,closed_by',
     filters: { id: 'eq.' + id },
     limit: 1
   }) || [])[0];
   if (!line) throw new Error('Sales order line not found');
 
-  const so = (supabaseSelect('sales_orders', {
+  const so = (supabaseSelect_('sales_orders', {
     select: 'id,so_number,status',
     filters: { id: 'eq.' + line.so_id },
     limit: 1
@@ -13474,7 +14584,7 @@ function setSalesOrderLineLifecycleStatus(soLineId, nextStatus, token) {
   }
 
   const lineNo = String(line.line_no || '').trim();
-  const hasWorkOrder = (supabaseSelect('work_order_jobs', {
+  const hasWorkOrder = (supabaseSelect_('work_order_jobs', {
     select: 'wo_id',
     filters: {
       so_number: 'eq.' + so.so_number,
@@ -13486,7 +14596,7 @@ function setSalesOrderLineLifecycleStatus(soLineId, nextStatus, token) {
     throw new Error('This line already has a work order. Cancel/close the downstream work first.');
   }
 
-  const hasDispatch = (supabaseSelect('dispatch_records', {
+  const hasDispatch = (supabaseSelect_('dispatch_records', {
     select: 'id',
     filters: { so_line_id: 'eq.' + id },
     limit: 1
@@ -13495,7 +14605,7 @@ function setSalesOrderLineLifecycleStatus(soLineId, nextStatus, token) {
     throw new Error('This line already has dispatch activity. It cannot be cancelled from order booking.');
   }
 
-  const hasBilling = (supabaseSelect('invoice_lines', {
+  const hasBilling = (supabaseSelect_('invoice_lines', {
     select: 'id',
     filters: { so_line_id: 'eq.' + id },
     limit: 1
@@ -13506,7 +14616,7 @@ function setSalesOrderLineLifecycleStatus(soLineId, nextStatus, token) {
 
   const auditBefore = _salesOrderAuditSnapshot_(so.id);
   const stamp = new Date().toISOString();
-  supabaseUpdateMinimal('sales_order_lines', { id: 'eq.' + id }, {
+  supabaseUpdateMinimal_('sales_order_lines', { id: 'eq.' + id }, {
     status: 'CANCELLED',
     closed_at: stamp,
     closed_by: 'Manual Line Cancel - ' + actor,
@@ -13550,7 +14660,7 @@ function setSalesOrderLineLifecycleStatus(soLineId, nextStatus, token) {
 
 function updateSalesOrderStatus(soId){
 
-const lines = supabaseSelect('sales_order_lines',{
+const lines = supabaseSelect_('sales_order_lines',{
 select:'accounts_status,business_status',
 filters:{ so_id:'eq.'+soId }
 });
@@ -13564,21 +14674,21 @@ bus = _salesOrderRollupApprovalStatus_(bus, l.business_status);
 
 });
 
-const so = supabaseSelect('sales_orders',{
+const so = supabaseSelect_('sales_orders',{
 select:'so_number',
 filters:{ id:'eq.'+soId }
 })[0];
 
 if(!so || !so.so_number) return;
 
-const wo = supabaseSelect('work_order_jobs',{
+const wo = supabaseSelect_('work_order_jobs',{
 select:'wo_id',
 filters:{ so_number:'eq.'+so.so_number }
 });
 
 const woStatus = wo.length ? 'CREATED':'PENDING';
 
-supabaseUpdate(
+supabaseUpdate_(
 'sales_orders',
 { id:'eq.'+soId },
 {
@@ -13598,7 +14708,7 @@ function refreshWorkOrderStatuses(soNumbers) {
 
   let updated = 0;
   list.forEach(function(soNumber) {
-    const so = (supabaseSelect('sales_orders', {
+    const so = (supabaseSelect_('sales_orders', {
       select: 'id',
       filters: { so_number: 'eq.' + soNumber },
       limit: 1
@@ -13631,7 +14741,7 @@ function enrichSalesOrderLines(lines){
 
   if (!missingCodes.length) return rows;
 
-  const itemRows = supabaseSelect('items', {
+  const itemRows = supabaseSelect_('items', {
     select: 'item_code, hsn_group',
     filters: {
       item_code: 'in.(' + missingCodes.join(',') + ')'
@@ -13684,7 +14794,7 @@ function loadSalesOrder(soNumber){
 
 if(!soNumber) throw new Error('Missing soNumber');
 
-const headerRows = supabaseSelect('sales_orders',{
+const headerRows = supabaseSelect_('sales_orders',{
   filters:{ so_number:'eq.'+soNumber },
   limit: 1
 }) || [];
@@ -13694,7 +14804,7 @@ if(!headerRows.length) return null;
 const header = _salesOrderEnrichHeaderRow_(Object.assign({}, headerRows[0] || {}));
 
 try {
-  const rows = supabaseSelect('v_sales_order_line_details', {
+  const rows = supabaseSelect_('v_sales_order_line_details', {
     filters: { so_number: 'eq.' + soNumber },
     order: 'line_no.asc'
   }) || [];
@@ -14022,14 +15132,14 @@ function _npdRpcScalar_(value) {
 }
 
 function _npdGenerateSamplingId_() {
-  return _npdText_(_npdRpcScalar_(supabaseRpc('generate_npd_sampling_id', {
+  return _npdText_(_npdRpcScalar_(supabaseRpc_('generate_npd_sampling_id', {
     p_prefix: 'NPD-SMP',
     p_request_date: _npdTodayYmd_()
   })));
 }
 
 function _npdGenerateSampleWoNo_() {
-  return _npdText_(_npdRpcScalar_(supabaseRpc('generate_npd_sample_wo_no', {
+  return _npdText_(_npdRpcScalar_(supabaseRpc_('generate_npd_sample_wo_no', {
     p_prefix: 'SMP-WO',
     p_request_date: _npdTodayYmd_()
   })));
@@ -14042,13 +15152,13 @@ function _npdNormalizeClient_(payload) {
   let client = null;
 
   if (clientId) {
-    client = (supabaseSelect('clients', {
+    client = (supabaseSelect_('clients', {
       select: 'id,client_code,client_name',
       filters: { id: 'eq.' + clientId },
       limit: 1
     }) || [])[0] || null;
   } else if (clientCode) {
-    client = (supabaseSelect('clients', {
+    client = (supabaseSelect_('clients', {
       select: 'id,client_code,client_name',
       filters: { client_code: 'eq.' + clientCode },
       limit: 1
@@ -14166,7 +15276,7 @@ function _npdNormalizeVersionPayload_(payload) {
 }
 
 function _npdInsertStatusHistory_(requestId, versionId, fromStatus, toStatus, action, remarks, snapshot, actor) {
-  supabaseInsertMinimal('npd_status_history', {
+  supabaseInsertMinimal_('npd_status_history', {
     request_id: requestId,
     version_id: versionId || null,
     from_status: fromStatus || null,
@@ -14319,7 +15429,7 @@ function npdCreateRequest(payload, token) {
     const samplingId = _npdGenerateSamplingId_();
     const now = _npdIsoNow_();
     const initialStatus = src.asDraft === true ? 'DRAFT' : 'SUBMITTED_BY_SALES';
-    const requestInsert = supabaseInsert('npd_requests', Object.assign({}, client, {
+    const requestInsert = supabaseInsert_('npd_requests', Object.assign({}, client, {
       sampling_id: samplingId,
       current_version_no: 1,
       status: initialStatus,
@@ -14338,15 +15448,15 @@ function npdCreateRequest(payload, token) {
     version.version_status = initialStatus === 'DRAFT' ? 'DRAFT' : 'SUBMITTED';
     version.created_by = user.userId || '';
     version.updated_by = user.userId || '';
-    const versionInsert = supabaseInsert('npd_request_versions', version) || [];
+    const versionInsert = supabaseInsert_('npd_request_versions', version) || [];
     const versionRow = versionInsert[0];
     if (!versionRow || !versionRow.id) throw new Error('Failed to create NPD version.');
 
-    supabaseBulkInsertMinimal('npd_paper_specs', paperRows.map(function(row) {
+    supabaseBulkInsertMinimal_('npd_paper_specs', paperRows.map(function(row) {
       return Object.assign({}, row, { version_id: versionRow.id });
     }));
 
-    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + requestRow.id }, {
+    supabaseUpdateMinimal_('npd_requests', { id: 'eq.' + requestRow.id }, {
       current_version_id: versionRow.id,
       updated_by: user.userId || ''
     });
@@ -14368,14 +15478,14 @@ function npdGetRequest(requestIdOrSamplingId, token) {
     const key = _npdText_(requestIdOrSamplingId);
     if (!key) throw new Error('NPD request id is required.');
     const filterKey = key.indexOf('NPD-') === 0 ? 'sampling_id' : 'id';
-    const request = (supabaseSelect('npd_requests', {
+    const request = (supabaseSelect_('npd_requests', {
       select: '*',
       filters: Object.assign({}, filterKey === 'sampling_id' ? { sampling_id: 'eq.' + key } : { id: 'eq.' + key }),
       limit: 1
     }) || [])[0];
     if (!request) throw new Error('NPD request not found.');
 
-    const versions = supabaseSelect('npd_request_versions', {
+    const versions = supabaseSelect_('npd_request_versions', {
       select: '*',
       filters: { request_id: 'eq.' + request.id },
       order: 'version_no.desc'
@@ -14386,7 +15496,7 @@ function npdGetRequest(requestIdOrSamplingId, token) {
     const sampleWorkOrders = versionIds.length ? _supabaseSelectByKeyInBatches_('npd_sample_work_orders', '*', 'version_id', versionIds, 'created_at.desc', 40) || [] : [];
     const verifications = versionIds.length ? _supabaseSelectByKeyInBatches_('npd_sample_verifications', '*', 'version_id', versionIds, 'verified_at.desc', 40) || [] : [];
     const customerSubmissions = versionIds.length ? _supabaseSelectByKeyInBatches_('npd_customer_submissions', '*', 'version_id', versionIds, 'submitted_at.desc', 40) || [] : [];
-    const history = supabaseSelect('npd_status_history', {
+    const history = supabaseSelect_('npd_status_history', {
       select: '*',
       filters: { request_id: 'eq.' + request.id },
       order: 'created_at.desc'
@@ -14483,7 +15593,7 @@ function npdSubmitCosting(versionId, payload, token) {
     const unitRate = _npdNum_(src.unitRate || src.unit_rate, 0);
     const totalEstimatedValue = _npdNum_(src.totalEstimatedValue || src.total_estimated_value, rawMaterialValue + processValue + toolingValue + sampleCost);
     const now = _npdIsoNow_();
-    supabaseInsertMinimal('npd_costing_evaluations', {
+    supabaseInsertMinimal_('npd_costing_evaluations', {
       request_id: request.id,
       version_id: version.id,
       status: 'SUBMITTED',
@@ -14502,11 +15612,11 @@ function npdSubmitCosting(versionId, payload, token) {
       updated_by: user.userId || ''
     });
     const nextStatus = version.sample_required ? 'SAMPLE_PLANNING' : 'CLOSED_NO_SAMPLE';
-    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + version.id }, {
+    supabaseUpdateMinimal_('npd_request_versions', { id: 'eq.' + version.id }, {
       version_status: 'COSTED',
       updated_by: user.userId || ''
     });
-    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+    supabaseUpdateMinimal_('npd_requests', { id: 'eq.' + request.id }, {
       status: nextStatus,
       closed_at: nextStatus === 'CLOSED_NO_SAMPLE' ? now : null,
       closed_by: nextStatus === 'CLOSED_NO_SAMPLE' ? (user.userId || '') : null,
@@ -14531,7 +15641,7 @@ function npdCreateSampleWorkOrder(versionId, payload, token) {
     const sampleWoNo = _npdGenerateSampleWoNo_();
     const plan = payload || {};
     const plannedQty = Math.max(0, Math.round(_npdNum_(plan.plannedSampleQty || plan.planned_sample_qty || version.sample_qty, 0)));
-    supabaseInsertMinimal('npd_sample_work_orders', {
+    supabaseInsertMinimal_('npd_sample_work_orders', {
       request_id: request.id,
       version_id: version.id,
       sample_wo_no: sampleWoNo,
@@ -14541,7 +15651,7 @@ function npdCreateSampleWorkOrder(versionId, payload, token) {
       created_by: user.userId || '',
       updated_by: user.userId || ''
     });
-    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+    supabaseUpdateMinimal_('npd_requests', { id: 'eq.' + request.id }, {
       status: 'SAMPLE_PLANNING',
       updated_by: user.userId || ''
     });
@@ -14561,17 +15671,17 @@ function npdReleaseSampleWorkOrder(sampleWoId, token) {
     const wo = _npdGetSampleWorkOrder_(sampleWoId);
     const request = _npdGetRequestById_(wo.request_id);
     const now = _npdIsoNow_();
-    supabaseUpdateMinimal('npd_sample_work_orders', { id: 'eq.' + wo.id }, {
+    supabaseUpdateMinimal_('npd_sample_work_orders', { id: 'eq.' + wo.id }, {
       status: 'RELEASED',
       released_at: now,
       released_by: user.userId || '',
       updated_by: user.userId || ''
     });
-    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + wo.version_id }, {
+    supabaseUpdateMinimal_('npd_request_versions', { id: 'eq.' + wo.version_id }, {
       version_status: 'SAMPLE_RELEASED',
       updated_by: user.userId || ''
     });
-    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+    supabaseUpdateMinimal_('npd_requests', { id: 'eq.' + request.id }, {
       status: 'SAMPLE_WO_RELEASED',
       updated_by: user.userId || ''
     });
@@ -14590,18 +15700,18 @@ function npdSaveSampleProduction(sampleWoId, payload, token) {
     const wo = _npdGetSampleWorkOrder_(sampleWoId);
     const request = _npdGetRequestById_(wo.request_id);
     const src = payload || {};
-    supabaseUpdateMinimal('npd_sample_work_orders', { id: 'eq.' + wo.id }, {
+    supabaseUpdateMinimal_('npd_sample_work_orders', { id: 'eq.' + wo.id }, {
       status: 'PRODUCED',
       produced_qty: Math.max(0, Math.round(_npdNum_(src.producedQty || src.produced_qty, 0))),
       accepted_qty: Math.max(0, Math.round(_npdNum_(src.acceptedQty || src.accepted_qty, 0))),
       rejected_qty: Math.max(0, Math.round(_npdNum_(src.rejectedQty || src.rejected_qty, 0))),
       updated_by: user.userId || ''
     });
-    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + wo.version_id }, {
+    supabaseUpdateMinimal_('npd_request_versions', { id: 'eq.' + wo.version_id }, {
       version_status: 'SAMPLE_PRODUCED',
       updated_by: user.userId || ''
     });
-    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+    supabaseUpdateMinimal_('npd_requests', { id: 'eq.' + request.id }, {
       status: 'SAMPLE_PRODUCED',
       updated_by: user.userId || ''
     });
@@ -14621,7 +15731,7 @@ function npdSaveSampleVerification(sampleWoId, payload, token) {
     const src = payload || {};
     const result = _npdText_(src.result).toUpperCase();
     if (['PASS', 'PASS_WITH_DEVIATION', 'FAIL'].indexOf(result) === -1) throw new Error('Verification result is required.');
-    supabaseInsertMinimal('npd_sample_verifications', {
+    supabaseInsertMinimal_('npd_sample_verifications', {
       request_id: request.id,
       version_id: version.id,
       sample_wo_id: wo.id,
@@ -14636,11 +15746,11 @@ function npdSaveSampleVerification(sampleWoId, payload, token) {
       created_by: user.userId || ''
     });
     if (result !== 'FAIL') {
-      supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + version.id }, {
+      supabaseUpdateMinimal_('npd_request_versions', { id: 'eq.' + version.id }, {
         version_status: 'VERIFIED',
         updated_by: user.userId || ''
       });
-      supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+      supabaseUpdateMinimal_('npd_requests', { id: 'eq.' + request.id }, {
         status: 'SAMPLE_VERIFIED',
         updated_by: user.userId || ''
       });
@@ -14660,7 +15770,7 @@ function npdSubmitSampleToCustomer(versionId, payload, token) {
     const version = _npdGetVersion_(versionId);
     const request = _npdGetRequestById_(version.request_id);
     const src = payload || {};
-    supabaseInsertMinimal('npd_customer_submissions', {
+    supabaseInsertMinimal_('npd_customer_submissions', {
       request_id: request.id,
       version_id: version.id,
       submitted_qty: Math.max(0, Math.round(_npdNum_(src.submittedQty || src.submitted_qty || version.sample_qty, 0))),
@@ -14671,7 +15781,7 @@ function npdSubmitSampleToCustomer(versionId, payload, token) {
       resubmission_required: false,
       created_by: user.userId || ''
     });
-    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+    supabaseUpdateMinimal_('npd_requests', { id: 'eq.' + request.id }, {
       status: 'SUBMITTED_TO_CUSTOMER',
       latest_customer_result: 'PENDING',
       updated_by: user.userId || ''
@@ -14701,7 +15811,7 @@ function npdRecordCustomerDecision(versionId, payload, token) {
     }
     const nextStatus = result === 'APPROVED' ? 'CUSTOMER_APPROVED' : (result === 'REJECTED' ? 'CUSTOMER_REJECTED' : 'RESUBMISSION_REQUIRED');
     const versionStatus = result === 'APPROVED' ? 'CUSTOMER_APPROVED' : 'CUSTOMER_REJECTED';
-    supabaseInsertMinimal('npd_customer_submissions', {
+    supabaseInsertMinimal_('npd_customer_submissions', {
       request_id: request.id,
       version_id: version.id,
       submitted_qty: Math.max(0, Math.round(_npdNum_(src.submittedQty || src.submitted_qty || version.sample_qty, 0))),
@@ -14712,11 +15822,11 @@ function npdRecordCustomerDecision(versionId, payload, token) {
       resubmission_required: result !== 'APPROVED',
       created_by: user.userId || ''
     });
-    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + version.id }, {
+    supabaseUpdateMinimal_('npd_request_versions', { id: 'eq.' + version.id }, {
       version_status: versionStatus,
       updated_by: user.userId || ''
     });
-    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+    supabaseUpdateMinimal_('npd_requests', { id: 'eq.' + request.id }, {
       status: nextStatus,
       latest_customer_result: result,
       closed_at: result === 'APPROVED' ? _npdIsoNow_() : null,
@@ -14744,7 +15854,7 @@ function npdCreateNextVersion(requestId, payload, token) {
     const paperRows = _npdValidatePaperSpecs_(version.ply, src.paperSpecs || src.paper_specs || _npdGetPaperSpecsForVersion_(current.id));
     const nextVersionNo = Number(request.current_version_no || current.version_no || 1) + 1;
 
-    supabaseUpdateMinimal('npd_request_versions', { id: 'eq.' + current.id }, {
+    supabaseUpdateMinimal_('npd_request_versions', { id: 'eq.' + current.id }, {
       version_status: 'SUPERSEDED',
       updated_by: user.userId || ''
     });
@@ -14755,14 +15865,14 @@ function npdCreateNextVersion(requestId, payload, token) {
     version.version_status = 'SUBMITTED';
     version.created_by = user.userId || '';
     version.updated_by = user.userId || '';
-    const inserted = supabaseInsert('npd_request_versions', version) || [];
+    const inserted = supabaseInsert_('npd_request_versions', version) || [];
     const newVersion = inserted[0];
     if (!newVersion || !newVersion.id) throw new Error('Failed to create next NPD version.');
-    supabaseBulkInsertMinimal('npd_paper_specs', paperRows.map(function(row) {
+    supabaseBulkInsertMinimal_('npd_paper_specs', paperRows.map(function(row) {
       return Object.assign({}, row, { version_id: newVersion.id });
     }));
 
-    supabaseUpdateMinimal('npd_requests', { id: 'eq.' + request.id }, {
+    supabaseUpdateMinimal_('npd_requests', { id: 'eq.' + request.id }, {
       current_version_no: nextVersionNo,
       current_version_id: newVersion.id,
       status: 'SUBMITTED_BY_SALES',
@@ -14814,7 +15924,7 @@ function _npdFlatPayloadFromVersionRow_(version) {
 function _npdGetRequestById_(requestId) {
   const id = _npdText_(requestId);
   if (!id) throw new Error('NPD request id is required.');
-  const row = (supabaseSelect('npd_requests', {
+  const row = (supabaseSelect_('npd_requests', {
     select: '*',
     filters: { id: 'eq.' + id },
     limit: 1
@@ -14826,7 +15936,7 @@ function _npdGetRequestById_(requestId) {
 function _npdGetVersion_(versionId) {
   const id = _npdText_(versionId);
   if (!id) throw new Error('NPD version id is required.');
-  const row = (supabaseSelect('npd_request_versions', {
+  const row = (supabaseSelect_('npd_request_versions', {
     select: '*',
     filters: { id: 'eq.' + id },
     limit: 1
@@ -14838,7 +15948,7 @@ function _npdGetVersion_(versionId) {
 function _npdGetSampleWorkOrder_(sampleWoId) {
   const id = _npdText_(sampleWoId);
   if (!id) throw new Error('Sample work order id is required.');
-  const row = (supabaseSelect('npd_sample_work_orders', {
+  const row = (supabaseSelect_('npd_sample_work_orders', {
     select: '*',
     filters: { id: 'eq.' + id },
     limit: 1
@@ -14848,7 +15958,7 @@ function _npdGetSampleWorkOrder_(sampleWoId) {
 }
 
 function _npdGetPaperSpecsForVersion_(versionId) {
-  return (supabaseSelect('npd_paper_specs', {
+  return (supabaseSelect_('npd_paper_specs', {
     select: 'line_no,gsm,quality,flute,remarks',
     filters: { version_id: 'eq.' + versionId },
     order: 'line_no.asc'
@@ -15173,7 +16283,7 @@ function createArtworksFromSoLines(soId) {
   if (!soId) return;
 
   // 1️⃣ Fetch SO lines
-  const lines = supabaseSelect('sales_order_lines', {
+  const lines = supabaseSelect_('sales_order_lines', {
     filters: { so_id: 'eq.' + soId },
     order: 'line_no.asc'
   });
@@ -15181,7 +16291,7 @@ function createArtworksFromSoLines(soId) {
   if (!lines || !lines.length) return;
 
   // 2️⃣ Fetch existing artworks for this SO
-  const existing = supabaseSelect('artworks', {
+  const existing = supabaseSelect_('artworks', {
     filters: { so_id: 'eq.' + soId }
   });
 
@@ -15207,7 +16317,7 @@ const rowsToInsert = _filterSalesServiceOnlyItems_(lines)
   }));
 
   if (rowsToInsert.length) {
-    supabaseInsert('artworks', rowsToInsert);
+    supabaseInsert_('artworks', rowsToInsert);
     PropertiesService.getScriptProperties().setProperty('ARTWORK_WORKBENCH_VERSION', String(Date.now()));
   }
 }
@@ -15321,7 +16431,8 @@ businessApproved: String(r.business_status || '').trim().toUpperCase(),
  * SAVE artwork fields (bulk)
  * payload: [{ id, artworkNo, productType, plateStatus, dieStatus, status }]
  */
-function saveArtworkBulk(payload) {
+function saveArtworkBulk(payload, token) {
+  _requireArtworkMutationAccess_(token, payload);
 
   if (!Array.isArray(payload) || !payload.length) {
     return { ok: false };
@@ -15348,7 +16459,7 @@ if ('status' in p) {
   // 🔥 Set artwork_at ONLY when artwork fields first filled,
   // NOT based on status changes
 
-  const art = supabaseSelect('artworks', {
+  const art = supabaseSelect_('artworks', {
     filters: { id: 'eq.' + p.id },
     limit: 1
   })[0];
@@ -15365,7 +16476,7 @@ if ('status' in p) {
 }
 
     if (Object.keys(update).length) {
-      supabaseUpdate(
+      supabaseUpdate_(
         'artworks',
         { id: 'eq.' + p.id },
         update
@@ -15379,18 +16490,19 @@ if ('status' in p) {
 /**
  * APPROVE single artwork line
  */
-function approveArtwork(id) {
+function approveArtwork(id, token) {
+  _requireArtworkMutationAccess_(token);
 
   if (!id) throw new Error('Missing artwork id');
 
-  const art = supabaseSelect('artworks', {
+  const art = supabaseSelect_('artworks', {
     filters: { id: 'eq.' + id },
     limit: 1
   })[0];
 
   if (!art) throw new Error('Artwork not found');
 
-  supabaseUpdate(
+  supabaseUpdate_(
     'artworks',
     { id: 'eq.' + id },
     {
@@ -15402,18 +16514,19 @@ function approveArtwork(id) {
   return { ok: true };
 }
 
-function unapproveArtwork(id) {
+function unapproveArtwork(id, token) {
+  _requireArtworkMutationAccess_(token);
 
   if (!id) throw new Error('Missing artwork id');
 
-  const art = supabaseSelect('artworks', {
+  const art = supabaseSelect_('artworks', {
     filters: { id: 'eq.' + id },
     limit: 1
   })[0];
 
   if (!art) throw new Error('Artwork not found');
 
-  supabaseUpdate(
+  supabaseUpdate_(
     'artworks',
     { id: 'eq.' + id },
     {
@@ -15466,7 +16579,7 @@ function _getNextArtworkNumberCandidate_(productType) {
   let nextNo = getArtworkSequenceFromExisting_(cfg);
 
   try {
-    const existing = supabaseSelect('artwork_sequences', {
+    const existing = supabaseSelect_('artwork_sequences', {
       filters: { prefix: 'eq.' + cfg.prefix },
       limit: 1
     })[0];
@@ -15488,7 +16601,7 @@ function _getNextArtworkNumberCandidate_(productType) {
 
 function _commitArtworkSequence_(cfg, nextNo) {
   try {
-    const existing = supabaseSelect('artwork_sequences', {
+    const existing = supabaseSelect_('artwork_sequences', {
       filters: { prefix: 'eq.' + cfg.prefix },
       limit: 1
     })[0];
@@ -15496,14 +16609,14 @@ function _commitArtworkSequence_(cfg, nextNo) {
     if (existing) {
       const current = Number(existing.last_no || 0);
       if (nextNo > current) {
-        supabaseUpdate(
+        supabaseUpdate_(
           'artwork_sequences',
           { prefix: 'eq.' + cfg.prefix },
           { last_no: nextNo }
         );
       }
     } else {
-      supabaseInsert('artwork_sequences', {
+      supabaseInsert_('artwork_sequences', {
         prefix: cfg.prefix,
         last_no: nextNo
       });
@@ -15913,7 +17026,7 @@ function _validateArtworkStockAllocation_(jobs) {
 function _ensureArtworkRowForSelectedJob_(job) {
   const id = String(job && job.id || '').trim();
   if (id && id.indexOf('MISSING_ARTWORK_ROW||') !== 0) {
-    const byId = supabaseSelect('artworks', {
+    const byId = supabaseSelect_('artworks', {
       select: 'id,so_id,line_no,artwork_at,stock_qty_to_bill',
       filters: { id: 'eq.' + id },
       limit: 1
@@ -15927,7 +17040,7 @@ function _ensureArtworkRowForSelectedJob_(job) {
     throw new Error('Artwork job not found: ' + id + '. Refresh the artwork workbench and select the job again.');
   }
 
-  const soRows = supabaseSelect('sales_orders', {
+  const soRows = supabaseSelect_('sales_orders', {
     select: 'id,so_number',
     filters: { so_number: 'eq.' + soNo },
     limit: 1
@@ -15937,7 +17050,7 @@ function _ensureArtworkRowForSelectedJob_(job) {
     throw new Error('Artwork job not found for SO ' + soNo + ' / Line ' + lineNo + '.');
   }
 
-  const existingRows = supabaseSelect('artworks', {
+  const existingRows = supabaseSelect_('artworks', {
     select: 'id,so_id,line_no,artwork_at,stock_qty_to_bill',
     filters: {
       so_id: 'eq.' + so.id,
@@ -15947,7 +17060,7 @@ function _ensureArtworkRowForSelectedJob_(job) {
   }) || [];
   if (existingRows[0]) return existingRows[0];
 
-  const lineRows = supabaseSelect('sales_order_lines', {
+  const lineRows = supabaseSelect_('sales_order_lines', {
     select: 'so_id,line_no,category',
     filters: {
       so_id: 'eq.' + so.id,
@@ -15960,7 +17073,7 @@ function _ensureArtworkRowForSelectedJob_(job) {
     throw new Error('Sales order line not found for SO ' + soNo + ' / Line ' + lineNo + '.');
   }
 
-  supabaseInsert('artworks', {
+  supabaseInsert_('artworks', {
     so_id: so.id,
     line_no: line.line_no,
     artwork_no: null,
@@ -15974,7 +17087,7 @@ function _ensureArtworkRowForSelectedJob_(job) {
     printing_colors: null
   });
 
-  const createdRows = supabaseSelect('artworks', {
+  const createdRows = supabaseSelect_('artworks', {
     select: 'id,so_id,line_no,artwork_at,stock_qty_to_bill',
     filters: {
       so_id: 'eq.' + so.id,
@@ -15997,7 +17110,7 @@ function _artworkSourceArtworkNoColumnAvailable_() {
   } catch (e) {}
 
   try {
-    supabaseSelect('artworks', {
+    supabaseSelect_('artworks', {
       select: 'source_artwork_no',
       limit: 1
     });
@@ -16073,8 +17186,11 @@ function saveArtworkStockClosure(payload) {
         status: artworkNo ? (status === 'APPROVED' ? 'PENDING_APPROVAL' : (status || 'PENDING_APPROVAL')) : 'NO_ART',
         approved_at: null
       };
+  if (fullStockClosure && _artworkSourceArtworkNoColumnAvailable_()) {
+    update.source_artwork_no = null;
+  }
 
-  supabaseUpdateMinimal('artworks', { id: 'eq.' + id }, update);
+  supabaseUpdateMinimal_('artworks', { id: 'eq.' + id }, update);
   PropertiesService.getScriptProperties().setProperty('ARTWORK_WORKBENCH_VERSION', String(Date.now()));
   _opsBumpDatasetVersion_();
   return {
@@ -16098,7 +17214,7 @@ function _syncArtworkProductTypeToSalesOrderDivision_(artworkRows, productType) 
     const key = soId + '||' + lineNo;
     if (!soId || !lineNo || seen[key]) return;
     seen[key] = true;
-    supabaseUpdateMinimal('sales_order_lines', {
+    supabaseUpdateMinimal_('sales_order_lines', {
       so_id: 'eq.' + soId,
       line_no: 'eq.' + lineNo
     }, {
@@ -16603,7 +17719,7 @@ function getArtworkReference(artworkNo) {
     }
   }
 
-  const viewRows = supabaseSelect('v_artwork_reference', {
+  const viewRows = supabaseSelect_('v_artwork_reference', {
     filters: { artwork_no: 'eq.' + no },
     limit: 1
   }) || [];
@@ -16679,13 +17795,13 @@ function getArtworkReference(artworkNo) {
     };
     let procRows = [];
     try {
-      procRows = (supabaseSelect('purchase_artwork_procurement', {
+      procRows = (supabaseSelect_('purchase_artwork_procurement', {
         filters: { artwork_no: 'eq.' + no }
       }) || []);
     } catch (e) {}
     if (!procRows.length) {
       try {
-        procRows = (supabaseSelect('purchase_artwork_procurement', {
+        procRows = (supabaseSelect_('purchase_artwork_procurement', {
           filters: { artwork_key: 'eq.' + no }
         }) || []);
       } catch (e) {}
@@ -16720,7 +17836,7 @@ function getArtworkReference(artworkNo) {
       acrossGapMm: '',
       alongGapMm: ''
     };
-    const woJobs = supabaseSelect('work_order_jobs', {
+    const woJobs = supabaseSelect_('work_order_jobs', {
       select: 'wo_id,artwork_no,category',
       filters: { artwork_no: 'eq.' + no },
       limit: 100
@@ -16769,7 +17885,7 @@ function getArtworkReference(artworkNo) {
     return ref;
   };
 
-  const rows = supabaseSelect('artworks', {
+  const rows = supabaseSelect_('artworks', {
     filters: { artwork_no: 'eq.' + no }
   }) || [];
 
@@ -16843,7 +17959,8 @@ function getArtworkReference(artworkNo) {
   return result;
 }
 
-function saveArtworkGroup(payload) {
+function saveArtworkGroup(payload, token) {
+  _requireArtworkMutationAccess_(token, payload);
   _validateArtworkGroupPayload_(payload);
   const lock = LockService.getScriptLock();
   const assignmentMode = String(payload && payload.assignmentMode || '').trim().toLowerCase();
@@ -16910,7 +18027,7 @@ function saveArtworkGroup(payload) {
     productionSelectedJobs.forEach(function(job) { selectedIdSet[job.id] = true; });
 
     const currentRows = artworkNo && !isReferenceReuse
-      ? (supabaseSelect('artworks', {
+      ? (supabaseSelect_('artworks', {
           filters: { artwork_no: 'eq.' + artworkNo }
         }) || [])
       : [];
@@ -16928,7 +18045,7 @@ function saveArtworkGroup(payload) {
           .filter(function(id) { return id && !selectedIdSet[id]; });
 
     if (deselectedIds.length) {
-      supabaseUpdateMinimal('artworks', { id: 'in.(' + deselectedIds.join(',') + ')' }, {
+      supabaseUpdateMinimal_('artworks', { id: 'in.(' + deselectedIds.join(',') + ')' }, {
         artwork_no: null,
         product_type: null,
         plate_status: null,
@@ -16980,7 +18097,7 @@ function saveArtworkGroup(payload) {
       });
       const updateIds = updateJobs.map(function(job) { return job.id; });
       const selectedRows = updateIds.length
-        ? (supabaseSelect('artworks', {
+        ? (supabaseSelect_('artworks', {
             select: 'id,so_id,line_no,artwork_at',
             filters: { id: 'in.(' + updateIds.join(',') + ')' }
           }) || [])
@@ -17030,14 +18147,15 @@ function saveArtworkGroup(payload) {
       });
 
     if (updates.length) {
-      supabaseUpsertMinimal('artworks', updates, { onConflict: 'id' });
+      supabaseUpsertMinimal_('artworks', updates, { onConflict: 'id' });
       _syncArtworkProductTypeToSalesOrderDivision_(selectedRows, payload.productType);
     }
+    const canClearSourceArtworkNo = _artworkSourceArtworkNoColumnAvailable_();
     const stockClosureUpdates = selectedRowsForSave
       .filter(function(row) { return stockClosedIdSet[String(row.id || '')]; })
       .map(function(row) {
         const id = String(row.id || '');
-        return {
+        const stockUpdate = {
           id: id,
           artwork_no: null,
           product_type: null,
@@ -17065,9 +18183,11 @@ function saveArtworkGroup(payload) {
           artwork_at: row.artwork_at || now,
           approved_at: now
         };
+        if (canClearSourceArtworkNo) stockUpdate.source_artwork_no = null;
+        return stockUpdate;
       });
     if (stockClosureUpdates.length) {
-      supabaseUpsertMinimal('artworks', stockClosureUpdates, { onConflict: 'id' });
+      supabaseUpsertMinimal_('artworks', stockClosureUpdates, { onConflict: 'id' });
     }
 
     if (sequenceCandidate) {
@@ -17084,11 +18204,12 @@ function saveArtworkGroup(payload) {
   }
 }
 
-function approveArtworkGroup(artworkNo) {
+function approveArtworkGroup(artworkNo, token) {
+  _requireArtworkMutationAccess_(token);
   const no = String(artworkNo || '').trim();
   if (!no) throw new Error('Missing artwork number');
 
-  const rows = supabaseSelect('artworks', {
+  const rows = supabaseSelect_('artworks', {
     filters: { artwork_no: 'eq.' + no }
   }) || [];
 
@@ -17129,7 +18250,7 @@ function approveArtworkGroup(artworkNo) {
   });
 
   const now = new Date().toISOString();
-  supabaseUpdateMinimal('artworks', { artwork_no: 'eq.' + no }, {
+  supabaseUpdateMinimal_('artworks', { artwork_no: 'eq.' + no }, {
     status: 'APPROVED',
     approved_at: now
   });
@@ -17139,17 +18260,18 @@ function approveArtworkGroup(artworkNo) {
   return { ok: true, artworkNo: no };
 }
 
-function unapproveArtworkGroup(artworkNo) {
+function unapproveArtworkGroup(artworkNo, token) {
+  _requireArtworkMutationAccess_(token);
   const no = String(artworkNo || '').trim();
   if (!no) throw new Error('Missing artwork number');
 
-  const rows = supabaseSelect('artworks', {
+  const rows = supabaseSelect_('artworks', {
     filters: { artwork_no: 'eq.' + no }
   }) || [];
 
   if (!rows.length) throw new Error('Artwork group not found');
 
-  supabaseUpdateMinimal('artworks', { artwork_no: 'eq.' + no }, {
+  supabaseUpdateMinimal_('artworks', { artwork_no: 'eq.' + no }, {
     status: 'PENDING_APPROVAL',
     approved_at: null
   });
@@ -17222,7 +18344,7 @@ function _getApprovalLineExposureMap_(soNumbers) {
 
 function _getLatestApprovalCreditSyncAt_() {
   try {
-    const rows = supabaseSelect('client_credit_snapshot', {
+    const rows = supabaseSelect_('client_credit_snapshot', {
       select: 'synced_at',
       order: 'synced_at.desc',
       limit: 1
@@ -17520,12 +18642,43 @@ function _approvalRequireSession_(token, approvalType) {
   const role = String(approvalType || '').trim().toUpperCase();
   const action = role === 'BUSINESS' ? 'can_approve_business' : 'can_approve_accounts';
   const roleCode = String(user.role || '').trim().toUpperCase();
+  const normalizedRoleCode = roleCode.replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   const roleAllowed = role === 'BUSINESS'
-    ? ['BUSINESS', 'BUSINESS_HEAD', 'BUSINESS HEAD'].indexOf(roleCode) !== -1
-    : ['ACCOUNT', 'ACCOUNTS', 'ACCOUNT_HEAD', 'ACCOUNTS_HEAD'].indexOf(roleCode) !== -1;
+    ? (
+      ['BUSINESS', 'BUSINESS_HEAD'].indexOf(normalizedRoleCode) !== -1 ||
+      normalizedRoleCode.indexOf('BUSINESS') !== -1
+    )
+    : (
+      ['ACCOUNT', 'ACCOUNTS', 'ACCOUNT_HEAD', 'ACCOUNTS_HEAD'].indexOf(normalizedRoleCode) !== -1 ||
+      normalizedRoleCode.indexOf('ACCOUNT') !== -1
+    );
 
   if (roleAllowed || _userHasPermission_(user, 'SALES_ORDER_APPROVAL', action)) return user;
-  throw new Error('You do not have permission for this approval action');
+  throw new Error(
+    'You do not have permission for this ' +
+    (role === 'BUSINESS' ? 'Business' : 'Accounts') +
+    ' approval action. User role: ' + (roleCode || 'UNKNOWN')
+  );
+}
+
+function _approvalPaymentRequireSession_(token) {
+  const user = getSessionUser(token);
+  if (!user) throw new Error('Unauthorized');
+  if (String(user.role || '').toUpperCase() === 'ADMIN') return user;
+
+  const roleCode = String(user.role || '').trim().toUpperCase();
+  const roleAllowed = [
+    'PAYMENT',
+    'PAYMENTS',
+    'PAYMENT_HEAD',
+    'ACCOUNT',
+    'ACCOUNTS',
+    'ACCOUNT_HEAD',
+    'ACCOUNTS_HEAD'
+  ].indexOf(roleCode) !== -1;
+
+  if (roleAllowed || _userHasPermission_(user, 'SALES_ORDER_APPROVAL', 'can_approve_accounts')) return user;
+  throw new Error('You do not have permission for this payment action');
 }
 
 function _normalizeCreditSheetHeader_(value) {
@@ -17710,7 +18863,7 @@ function syncClientCreditFromGoogleSheet(token) {
   if (!rows.length) throw new Error('No client credit rows found below the headers');
 
   const actor = String(user.userId || user.displayName || user.fullName || 'ERP User');
-  const response = supabaseRpc('replace_client_credit_snapshot', {
+  const response = supabaseRpc_('replace_client_credit_snapshot', {
     p_rows: rows,
     p_source_spreadsheet_id: CLIENT_CREDIT_SPREADSHEET_ID,
     p_source_sheet_name: CLIENT_CREDIT_SHEET_NAME,
@@ -17825,7 +18978,7 @@ function _approvalCreditWarnings_(normalizedPayload) {
 function _recordApprovalCreditOverrides_(warnings, user, mode) {
   if (!warnings || !warnings.length) return;
   const actor = String(user.userId || user.displayName || user.fullName || 'ERP User');
-  supabaseBulkInsertMinimal('sales_order_credit_override_audit', warnings.map(function(warning) {
+  supabaseBulkInsertMinimal_('sales_order_credit_override_audit', warnings.map(function(warning) {
     return {
       approval_type: warning.approvalType,
       approval_mode: mode,
@@ -17934,7 +19087,7 @@ function _getSalesOrderLineIds_(entries) {
     const lineNos = Object.keys(missingBySoId[soId]);
     if (!lineNos.length) return;
 
-    const rows = supabaseSelect('sales_order_lines', {
+    const rows = supabaseSelect_('sales_order_lines', {
       select: 'id,so_id,line_no',
       filters: {
         so_id: 'eq.' + soId,
@@ -18134,7 +19287,7 @@ function _updateSalesOrderAdvancePaymentRequiredBySoNo_(soNo, required) {
   const key = String(soNo || '').trim();
   if (!key) return;
 
-  supabaseUpdateMinimal('sales_orders', {
+  supabaseUpdateMinimal_('sales_orders', {
     so_number: 'eq.' + key
   }, required ? {
     advance_payment_required: true
@@ -18203,7 +19356,7 @@ function updateSalesOrderLineApproval(payload) {
       update.business_at = now;
     }
 
-    supabaseUpdateMinimal(
+    supabaseUpdateMinimal_(
       'sales_order_lines',
       { id: 'eq.' + lineId },
       update
@@ -18320,7 +19473,7 @@ function bulkUpdateSalesOrderApproval(payload) {
     const beforeRows = updateIds.length
       ? _auditSelectByKeyInBatchesSafe_('sales_order_lines', '*', 'id', updateIds, 'line_no.asc', 40)
       : [];
-    supabaseUpsertMinimal('sales_order_lines', updates, { onConflict: 'id' });
+    supabaseUpsertMinimal_('sales_order_lines', updates, { onConflict: 'id' });
 
     const advanceMap = {};
     normalizedPayload.forEach(function(p) {
@@ -18371,6 +19524,7 @@ function bulkUpdateSalesOrderApproval(payload) {
 function updateSalesOrderAdvancePaymentRequired(payload) {
   const soNo = String(payload && payload.soNo || '').trim();
   if (!soNo) throw new Error('Missing soNo');
+  const user = _approvalRequireSession_(payload && payload.token, 'ACCOUNTS');
 
   const soIdByNumber = _getSalesOrderIdsByNumber_([soNo]);
   if (!soIdByNumber[soNo]) {
@@ -18388,7 +19542,7 @@ function updateSalesOrderAdvancePaymentRequired(payload) {
     entityKey: soNo,
     action: 'ADVANCE_PAYMENT_REQUIRED_UPDATE',
     sourceModule: 'SALES_ORDER_APPROVAL',
-    actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+    actor: user,
     reason: 'Advance payment requirement updated',
     beforeJson: auditBefore,
     afterJson: auditAfter,
@@ -18409,6 +19563,7 @@ function updateSalesOrderAdvancePaymentRequired(payload) {
 function updateSalesOrderAdvancePaymentReceived(payload) {
   const soNo = String(payload && payload.soNo || '').trim();
   if (!soNo) throw new Error('Missing soNo');
+  const user = _approvalPaymentRequireSession_(payload && payload.token);
 
   const soIdByNumber = _getSalesOrderIdsByNumber_([soNo]);
   if (!soIdByNumber[soNo]) {
@@ -18418,7 +19573,7 @@ function updateSalesOrderAdvancePaymentReceived(payload) {
   const received = payload && payload.advancePaymentReceived === true;
 
   const auditBefore = _salesOrderAuditSnapshot_(soIdByNumber[soNo]);
-  supabaseUpdateMinimal('sales_orders', {
+  supabaseUpdateMinimal_('sales_orders', {
     so_number: 'eq.' + soNo
   }, received ? {
     advance_payment_required: true,
@@ -18438,7 +19593,7 @@ function updateSalesOrderAdvancePaymentReceived(payload) {
     entityKey: soNo,
     action: 'ADVANCE_PAYMENT_RECEIVED_UPDATE',
     sourceModule: 'SALES_ORDER_APPROVAL',
-    actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+    actor: user,
     reason: 'Advance payment received status updated',
     beforeJson: auditBefore,
     afterJson: auditAfter,
@@ -18457,6 +19612,7 @@ function updateSalesOrderAdvancePaymentReceived(payload) {
 }
 
 function bulkUpdateSalesOrderAdvancePaymentRequired(payload) {
+  const user = _approvalRequireSession_(payload && payload.token, 'ACCOUNTS');
   const list = Array.isArray(payload && payload.soNos) ? payload.soNos : [];
   const soNos = [...new Set(list.map(function(soNo) {
     return String(soNo || '').trim();
@@ -18480,7 +19636,7 @@ function bulkUpdateSalesOrderAdvancePaymentRequired(payload) {
 
   for (let i = 0; i < soNos.length; i += 40) {
     const chunk = soNos.slice(i, i + 40);
-    supabaseUpdateMinimal('sales_orders', {
+    supabaseUpdateMinimal_('sales_orders', {
       so_number: _supabaseInFilter_(chunk)
     }, required ? {
       advance_payment_required: true
@@ -18511,7 +19667,7 @@ function bulkUpdateSalesOrderAdvancePaymentRequired(payload) {
     entityKey: soNos.slice(0, 20).join(','),
     action: 'ADVANCE_PAYMENT_REQUIRED_BULK_UPDATE',
     sourceModule: 'SALES_ORDER_APPROVAL',
-    actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+    actor: user,
     reason: 'Bulk advance payment requirement updated',
     beforeJson: beforeRows,
     afterJson: afterRows,
@@ -18532,6 +19688,7 @@ function bulkUpdateSalesOrderAdvancePaymentRequired(payload) {
 }
 
 function bulkUpdateSalesOrderAdvancePaymentReceived(payload) {
+  const user = _approvalPaymentRequireSession_(payload && payload.token);
   const list = Array.isArray(payload && payload.soNos) ? payload.soNos : [];
   const soNos = [...new Set(list.map(function(soNo) {
     return String(soNo || '').trim();
@@ -18555,7 +19712,7 @@ function bulkUpdateSalesOrderAdvancePaymentReceived(payload) {
 
   for (let i = 0; i < soNos.length; i += 40) {
     const chunk = soNos.slice(i, i + 40);
-    supabaseUpdateMinimal('sales_orders', {
+    supabaseUpdateMinimal_('sales_orders', {
       so_number: _supabaseInFilter_(chunk)
     }, received ? {
       advance_payment_required: true,
@@ -18586,7 +19743,7 @@ function bulkUpdateSalesOrderAdvancePaymentReceived(payload) {
     entityKey: soNos.slice(0, 20).join(','),
     action: 'ADVANCE_PAYMENT_RECEIVED_BULK_UPDATE',
     sourceModule: 'SALES_ORDER_APPROVAL',
-    actor: Session.getActiveUser?.().getEmail?.() || 'ERP User',
+    actor: user,
     reason: 'Bulk advance payment received status updated',
     beforeJson: beforeRows,
     afterJson: afterRows,
@@ -18707,13 +19864,13 @@ function _opsLoadLifecycleRows_(params) {
   const quickFilter = String(p.quickFilter || 'ALL').toUpperCase();
   const q = String(p.q || '').trim().toLowerCase();
 
-  const workOrderJobs = supabaseSelect('work_order_jobs', {
+  const workOrderJobs = supabaseSelect_('work_order_jobs', {
     select: 'wo_id,so_number,line_no,product_name,qty,category,artwork_no,client_name,job_priority,expected_delivery,product_remarks,so_remarks,job_reference'
   }) || [];
-  const packingRows = supabaseSelect('packing_records', {
+  const packingRows = supabaseSelect_('packing_records', {
     select: 'id,so_id,so_line_id,so_number,line_no,product_code,product_name,order_qty,produced_qty,packed_qty,ready_to_dispatch,packed_at,packed_by'
   }) || [];
-  const dispatchRows = supabaseSelect('v_dispatch_board', {
+  const dispatchRows = supabaseSelect_('v_dispatch_board', {
     select: 'pack_id,so_line_id,dispatched_qty',
     order: 'so_number.asc'
   }) || [];
@@ -18927,13 +20084,13 @@ function _opsLoadLifecycleRows_(params) {
 function _opsEnsurePackingRecord_(payload) {
   const soLineId = String(payload.soLineId || '').trim();
   if (!soLineId) throw new Error('Sales order line missing for packing');
-  const existing = supabaseSelect('packing_records', {
+  const existing = supabaseSelect_('packing_records', {
     select: 'id,so_line_id,produced_qty,packed_qty,packed_weight_kg',
     filters: { so_line_id: 'eq.' + soLineId },
     limit: 1
   }) || [];
   if (existing[0]?.id) return existing[0];
-  const inserted = supabaseInsert('packing_records', {
+  const inserted = supabaseInsert_('packing_records', {
     so_id: payload.soId,
     so_line_id: payload.soLineId,
     so_number: payload.soNumber || '',
@@ -18959,7 +20116,7 @@ function _packCorrectionSchemaError_() {
 function _packGetRecordById_(packId) {
   const id = String(packId || '').trim();
   if (!id) return null;
-  const rows = supabaseSelect('packing_records', {
+  const rows = supabaseSelect_('packing_records', {
     select: 'id,so_id,so_line_id,so_number,line_no,product_code,product_name,order_qty,produced_qty,packed_qty,packed_weight_kg,ready_to_dispatch,packed_at,packed_by',
     filters: { id: 'eq.' + id },
     limit: 1
@@ -18971,7 +20128,7 @@ function _packSelectEntryLogRowsByPackIds_(packIds, strict) {
   const ids = (packIds || []).map(function(id) { return String(id || '').trim(); }).filter(Boolean);
   if (!ids.length) return [];
   try {
-    return supabaseSelect('packing_entry_log', {
+    return supabaseSelect_('packing_entry_log', {
       select: 'id,pack_id,so_id,so_line_id,so_number,line_no,product_code,product_name,category,department_category,packed_qty,packed_weight_kg,ready_to_dispatch,source_stage,remarks,posted_at,posted_by,updated_at,updated_by,change_reason',
       filters: { pack_id: 'in.(' + ids.join(',') + ')' },
       order: 'posted_at.desc,id.desc',
@@ -19021,7 +20178,7 @@ function _packBuildEntryAuditPayload_(row) {
 
 function _packAuditEntryChange_(action, beforeRow, afterRow, changedBy, reason) {
   try {
-    supabaseInsertMinimal('packing_entry_audit_log', {
+    supabaseInsertMinimal_('packing_entry_audit_log', {
       packing_entry_id: beforeRow?.id || afterRow?.id || null,
       pack_id: beforeRow?.pack_id || afterRow?.pack_id || null,
       so_line_id: beforeRow?.so_line_id || afterRow?.so_line_id || null,
@@ -19046,7 +20203,7 @@ function _packBackfillSummaryIfNeeded_(packRow) {
   const existing = _packSelectEntryLogRowsByPackIds_([packId], false);
   if (existing === null || existing.length) return;
   try {
-    supabaseInsertMinimal('packing_entry_log', {
+    supabaseInsertMinimal_('packing_entry_log', {
       pack_id: pack.id,
       so_id: pack.so_id || null,
       so_line_id: pack.so_line_id || null,
@@ -19074,7 +20231,7 @@ function _packInsertEntryLogsSafe_(rows) {
   const inserts = Array.isArray(rows) ? rows.filter(Boolean) : [];
   if (!inserts.length) return false;
   try {
-    supabaseBulkInsertMinimal('packing_entry_log', inserts);
+    supabaseBulkInsertMinimal_('packing_entry_log', inserts);
     return true;
   } catch (err) {
     if (_supabaseRelationMissing_(err, 'packing_entry_log')) return false;
@@ -19108,7 +20265,7 @@ function _packRebuildSummaryFromLogs_(packId, fallbackPackRow) {
     packed_at: nextPackedQty > 0 ? (totals.latestStamp || pack.packed_at || new Date().toISOString()) : null,
     packed_by: nextPackedQty > 0 ? (totals.latestUser || pack.packed_by || '') : ''
   };
-  supabaseUpsertMinimal('packing_records', [payload], { onConflict: 'id' });
+  supabaseUpsertMinimal_('packing_records', [payload], { onConflict: 'id' });
   return {
     packId: pack.id,
     soLineId: pack.so_line_id || '',
@@ -19124,7 +20281,7 @@ function _packGetMutationBlockReason_(entryRow) {
   const soLineId = String(row.so_line_id || '').trim();
   const packId = String(row.pack_id || '').trim();
   if (soLineId) {
-    const dispatchRef = supabaseSelect('dispatch_records', {
+    const dispatchRef = supabaseSelect_('dispatch_records', {
       select: 'id,dispatch_no',
       filters: { so_line_id: 'eq.' + soLineId },
       limit: 1
@@ -19135,7 +20292,7 @@ function _packGetMutationBlockReason_(entryRow) {
     if (Number(billed.billedQty || 0) > 0 || Number(billed.postedQty || 0) > 0 || Number(billed.draftQty || 0) > 0) {
       return 'Packing corrections are locked because invoice usage already exists for this sales order line.';
     }
-    const fgLineRef = supabaseSelect('fg_stock_adjustments', {
+    const fgLineRef = supabaseSelect_('fg_stock_adjustments', {
       select: 'id,reason',
       filters: { so_line_id: 'eq.' + soLineId },
       limit: 1
@@ -19143,7 +20300,7 @@ function _packGetMutationBlockReason_(entryRow) {
     if (fgLineRef[0]?.id) return 'Packing corrections are locked because FG stock adjustments already exist for this sales order line.';
   }
   if (packId) {
-    const fgPackRef = supabaseSelect('fg_stock_adjustments', {
+    const fgPackRef = supabaseSelect_('fg_stock_adjustments', {
       select: 'id,reason',
       filters: { pack_id: 'eq.' + packId },
       limit: 1
@@ -19262,11 +20419,11 @@ function _opsPersistPackingEntries_(entries) {
   });
 
   if (updates.length) {
-    supabaseUpsertMinimal('packing_records', updates, { onConflict: 'id' });
+    supabaseUpsertMinimal_('packing_records', updates, { onConflict: 'id' });
     _packInsertEntryLogsSafe_(logRows);
     if (rejectionRows.length) {
       try {
-        supabaseBulkInsertMinimal('packing_rejection_log', rejectionRows);
+        supabaseBulkInsertMinimal_('packing_rejection_log', rejectionRows);
       } catch (err) {
         if (_supabaseRelationMissing_(err, 'packing_rejection_log')) {
           throw new Error('Packing rejection schema is not applied. Run supabase_packing_queue_dataset_rpc.sql first.');
@@ -19614,7 +20771,7 @@ function packGetDataset(params, token) {
   const cached = cache.get(cacheKey);
   if (cached) return JSON.parse(cached);
   try {
-    const rpcRows = supabaseRpc('packing_queue_dataset', {
+    const rpcRows = supabaseRpc_('packing_queue_dataset', {
       p_show_pending_all: p.showPendingAll === true,
       p_include_completed: p.includeCompleted === true,
       p_date_from: _prodToDateKey_(p.dateFrom) || null,
@@ -19641,7 +20798,7 @@ function dispatchGetDataset(params, token) {
   const cacheKey = _opsFastDatasetCacheKey_('DISPATCH', p);
   const cached = cache.get(cacheKey);
   if (cached) return JSON.parse(cached);
-  const rows = _opsFilterStageRows_(_opsMapDispatchFastRows_(_excludeCancelledSalesOrdersByNumber_(supabaseSelect('v_dispatch_queue_fast', {
+  const rows = _opsFilterStageRows_(_opsMapDispatchFastRows_(_excludeCancelledSalesOrdersByNumber_(supabaseSelect_('v_dispatch_queue_fast', {
     select: 'pack_id,so_id,so_line_id,so_number,line_no,product_code,product_name,client_name,category,department_category,order_qty,produced_qty,packed_qty,dispatched_qty,ready_to_dispatch,expected_delivery,final_delivery,division,quote_no,pm_code,product_remarks,prepress_remarks,so_remarks,artwork_no,wo_number,wo_date,transport_mode',
     order: 'wo_date.desc,so_number.asc,line_no.asc'
   }) || [], 'so_number')), 'DISPATCH', p);
@@ -19682,19 +20839,19 @@ function opsLifecycleGetDetails(payload, token) {
   const soNumber = String(p.soNumber || '').trim();
   const lineNo = String(p.lineNo || '').trim();
   if (!soNumber || !lineNo) throw new Error('Job reference missing');
-  const salesOrder = supabaseSelect('sales_orders', {
+  const salesOrder = supabaseSelect_('sales_orders', {
     select: 'id,so_number,remarks',
     filters: { so_number: 'eq.' + soNumber },
     limit: 1
   }) || [];
   const soHeader = salesOrder[0] || {};
-  const salesLine = (soHeader.id ? supabaseSelect('sales_order_lines', {
+  const salesLine = (soHeader.id ? supabaseSelect_('sales_order_lines', {
     select: 'id,product_name,category,qty,product_remarks,prepress_remarks,expected_delivery,final_delivery,division,quote_no,pm_code',
     filters: { so_id: 'eq.' + soHeader.id, line_no: 'eq.' + lineNo },
     limit: 1
   }) : []) || [];
   const soLine = salesLine[0] || {};
-  const workOrderJobs = supabaseSelect('work_order_jobs', {
+  const workOrderJobs = supabaseSelect_('work_order_jobs', {
     select: 'wo_id,so_number,line_no,artwork_no,client_name,job_priority,expected_delivery,product_remarks,so_remarks,prepress_remark',
     filters: { so_number: 'eq.' + soNumber, line_no: 'eq.' + lineNo }
   }) || [];
@@ -19711,7 +20868,7 @@ function opsLifecycleGetDetails(payload, token) {
     if (!productionByRouting[key]) productionByRouting[key] = [];
     productionByRouting[key].push(row);
   });
-  const artworks = soId ? (supabaseSelect('artworks', {
+  const artworks = soId ? (supabaseSelect_('artworks', {
     select: 'artwork_no,status,plate_status,die_status,product_type',
     filters: { so_id: 'eq.' + soId, line_no: 'eq.' + lineNo },
     order: 'id.desc',
@@ -19721,7 +20878,7 @@ function opsLifecycleGetDetails(payload, token) {
   let packingEntryRows = [];
   if (soLineId) {
     try {
-      packingEntryRows = supabaseSelect('packing_entry_log', {
+      packingEntryRows = supabaseSelect_('packing_entry_log', {
         select: 'id,so_line_id,packed_qty,packed_weight_kg,ready_to_dispatch,posted_at,posted_by,updated_at,updated_by',
         filters: { so_line_id: 'eq.' + soLineId },
         order: 'posted_at.desc,id.desc',
@@ -19732,8 +20889,8 @@ function opsLifecycleGetDetails(payload, token) {
       packingEntryRows = [];
     }
   }
-  const packingRows = soLineId ? (supabaseSelect('packing_records', { filters: { so_line_id: 'eq.' + soLineId }, order: 'packed_at.desc', limit: 5 }) || []) : [];
-  const dispatchRows = soLineId ? (supabaseSelect('dispatch_records', { filters: { so_line_id: 'eq.' + soLineId }, order: 'created_at.desc', limit: 10 }) || []) : [];
+  const packingRows = soLineId ? (supabaseSelect_('packing_records', { filters: { so_line_id: 'eq.' + soLineId }, order: 'packed_at.desc', limit: 5 }) || []) : [];
+  const dispatchRows = soLineId ? (supabaseSelect_('dispatch_records', { filters: { so_line_id: 'eq.' + soLineId }, order: 'created_at.desc', limit: 10 }) || []) : [];
   const routing = routingRows.map(function(row) {
     const entries = productionByRouting[String(row.id)] || [];
     const produced = entries.reduce(function(sum, entry) { return sum + _getProductionEntryGoodQty_(entry); }, 0);
@@ -19825,7 +20982,7 @@ function opsLifecycleSaveInline(payload, token) {
   }
   if (stage === 'DISPATCH') {
     const pack = p.packId ? { id: p.packId } : _opsEnsurePackingRecord_(p);
-    return saveDispatchBulk([{ packId: pack.id, dispatchQty: qty, transporter: p.transporter || '', lrNo: p.lrNo || '', vehicleNo: p.vehicleNo || '', dispatchDate: p.dispatchDate || '' }]);
+    return saveDispatchBulk([{ packId: pack.id, dispatchQty: qty, transporter: p.transporter || '', lrNo: p.lrNo || '', vehicleNo: p.vehicleNo || '', dispatchDate: p.dispatchDate || '' }], token);
   }
   throw new Error('Unsupported stage');
 }
@@ -19856,7 +21013,7 @@ function opsLifecycleSaveBulk(payload, token) {
       };
     }).filter(function(entry) { return Number(entry.dispatchQty || 0) > 0; });
     if (!dispatchEntries.length) throw new Error('No dispatch entries to save');
-    return saveDispatchBulk(dispatchEntries);
+    return saveDispatchBulk(dispatchEntries, token);
   }
 
   throw new Error('Unsupported stage');
@@ -19869,7 +21026,7 @@ function packAdminListEntries(payload, token) {
   if (p.packId) {
     pack = _packGetRecordById_(p.packId);
   } else if (p.soLineId) {
-    const rows = supabaseSelect('packing_records', {
+    const rows = supabaseSelect_('packing_records', {
       select: 'id,so_id,so_line_id,so_number,line_no,product_code,product_name,order_qty,produced_qty,packed_qty,packed_weight_kg,ready_to_dispatch,packed_at,packed_by',
       filters: { so_line_id: 'eq.' + String(p.soLineId || '').trim() },
       limit: 1
@@ -19921,7 +21078,7 @@ function packAdminUpdateEntry(payload, token) {
   if (!entryId) throw new Error('Packing entry id missing');
   let rows = [];
   try {
-    rows = supabaseSelect('packing_entry_log', {
+    rows = supabaseSelect_('packing_entry_log', {
       select: 'id,pack_id,so_id,so_line_id,so_number,line_no,product_code,product_name,category,department_category,packed_qty,packed_weight_kg,ready_to_dispatch,source_stage,remarks,posted_at,posted_by,updated_at,updated_by,change_reason',
       filters: { id: 'eq.' + entryId },
       limit: 1
@@ -19952,7 +21109,7 @@ function packAdminUpdateEntry(payload, token) {
     throw new Error('Corrected packed quantity exceeds produced balance for this job.');
   }
   const changedBy = String(admin.userId || admin.displayName || Session.getActiveUser()?.getEmail?.() || 'admin');
-  supabaseUpdateMinimal('packing_entry_log', { id: 'eq.' + entryId }, {
+  supabaseUpdateMinimal_('packing_entry_log', { id: 'eq.' + entryId }, {
     packed_qty: nextQty,
     packed_weight_kg: Math.max(nextWeightKg, 0),
     ready_to_dispatch: nextQty > 0,
@@ -19962,7 +21119,7 @@ function packAdminUpdateEntry(payload, token) {
   });
   let afterRow = null;
   try {
-    afterRow = (supabaseSelect('packing_entry_log', {
+    afterRow = (supabaseSelect_('packing_entry_log', {
       select: 'id,pack_id,so_id,so_line_id,so_number,line_no,product_code,product_name,category,department_category,packed_qty,packed_weight_kg,ready_to_dispatch,source_stage,remarks,posted_at,posted_by,updated_at,updated_by,change_reason',
       filters: { id: 'eq.' + entryId },
       limit: 1
@@ -19984,7 +21141,7 @@ function packAdminDeleteEntry(entryId, reason, token) {
   if (!id) throw new Error('Packing entry id missing');
   let rows = [];
   try {
-    rows = supabaseSelect('packing_entry_log', {
+    rows = supabaseSelect_('packing_entry_log', {
       select: 'id,pack_id,so_id,so_line_id,so_number,line_no,product_code,product_name,category,department_category,packed_qty,packed_weight_kg,ready_to_dispatch,source_stage,remarks,posted_at,posted_by,updated_at,updated_by,change_reason',
       filters: { id: 'eq.' + id },
       limit: 1
@@ -20003,7 +21160,7 @@ function packAdminDeleteEntry(entryId, reason, token) {
   if (!pack?.id) throw new Error('Packing record not found');
   const changedBy = String(admin.userId || admin.displayName || Session.getActiveUser()?.getEmail?.() || 'admin');
   _packAuditEntryChange_('DELETE', beforeRow, null, changedBy, deleteReason);
-  supabaseDelete('packing_entry_log', { id: 'eq.' + id });
+  supabaseDelete_('packing_entry_log', { id: 'eq.' + id });
   const summary = _packRebuildSummaryFromLogs_(pack.id, pack);
   _opsBumpDatasetVersion_();
   _invBumpStockSnapshotVersion_();
@@ -20025,12 +21182,16 @@ function refreshStockMV_(force){
 
   cache.put('mv_refresh_lock','1',10);
 
-  supabaseRpc('refresh_stock_mv',{});
+  supabaseRpc_('refresh_stock_mv',{});
   PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
 
 }
 
-function invRefreshStockViewsJSON() {
+function invRefreshStockViewsJSON(token) {
+  _requireAnyModuleAccess_(token, [
+    { module: 'INVENTORY', action: 'can_edit' },
+    { module: 'PURCHASE', action: 'can_edit' }
+  ]);
   refreshStockMV_(true);
   return { ok: true, refreshedAt: new Date().toISOString() };
 }
@@ -20040,12 +21201,12 @@ function syncItemToInventory_(itemCode, itemHeader, active) {
   if (!code) return;
 
   const header = itemHeader || {};
-  const existing = (supabaseSelect('inv_items', {
+  const existing = (supabaseSelect_('inv_items', {
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0];
 
-  supabaseUpsert('inv_items', {
+  supabaseUpsert_('inv_items', {
     item_code: code,
     item_name: String(header.itemName || existing?.item_name || '').trim() || code,
     category: String(header.category || existing?.category || '').trim() || '',
@@ -20315,7 +21476,11 @@ function applyWOMaterialFallbacks_(materials, snapshotJson) {
   });
 }
 
-function invSaveItem(payload) {
+function invSaveItem(payload, token) {
+  _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+    { module: 'INVENTORY', action: 'can_create' },
+    { module: 'INVENTORY', action: 'can_edit' }
+  ]);
 
   if (!payload?.itemName)
     throw new Error('Item Name required');
@@ -20384,7 +21549,7 @@ function invSaveItem(payload) {
     size_key: sizeKey || null
   };
 
-  supabaseUpsert(
+  supabaseUpsert_(
     'inv_items',
     rec,
     { onConflict: 'item_code' }
@@ -20647,7 +21812,7 @@ function ensureInventoryItemExists_(itemCode, opts) {
   const requireActive = options.requireActive === true;
   const allowAutoCreate = options.allowAutoCreate === true;
 
-  let item = (supabaseSelect('inv_items', {
+  let item = (supabaseSelect_('inv_items', {
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0];
@@ -20663,14 +21828,14 @@ function ensureInventoryItemExists_(itemCode, opts) {
     throw new Error('Inventory item not found in active inventory master');
   }
 
-  const master = (supabaseSelect('items', {
+  const master = (supabaseSelect_('items', {
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0];
 
   if (!master) throw new Error('Inventory item not found');
 
-  supabaseUpsert('inv_items', {
+  supabaseUpsert_('inv_items', {
     item_code: code,
     item_name: String(master.item_name || code).trim(),
     category: String(master.category || '').trim(),
@@ -20682,7 +21847,7 @@ function ensureInventoryItemExists_(itemCode, opts) {
 
   PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
 
-  item = (supabaseSelect('inv_items', {
+  item = (supabaseSelect_('inv_items', {
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0];
@@ -20708,7 +21873,7 @@ function resolveInventoryItemForEntry_(itemCode, itemName) {
   if (!name) throw new Error('Item required');
 
   const normalizedName = name.toLowerCase();
-  const rows = supabaseSelect('inv_items', {
+  const rows = supabaseSelect_('inv_items', {
     select: 'id,item_code,item_name,category,department,uom,is_consumable,active',
     filters: {
       active: 'eq.true',
@@ -20731,7 +21896,7 @@ function generateInvItemCode_() {
 
   const prefix = 'RITM';
 
-  const seq = supabaseSelect('inv_item_sequences', {
+  const seq = supabaseSelect_('inv_item_sequences', {
     filters: { prefix: 'eq.' + prefix },
     limit: 1
   })[0];
@@ -20741,13 +21906,13 @@ function generateInvItemCode_() {
   if (seq) {
     next = Number(seq.last_no || 0) + 1;
 
-    supabaseUpdate(
+    supabaseUpdate_(
       'inv_item_sequences',
       { prefix: 'eq.' + prefix },
       { last_no: next }
     );
   } else {
-    supabaseInsert('inv_item_sequences', {
+    supabaseInsert_('inv_item_sequences', {
       prefix: prefix,
       last_no: 1
     });
@@ -21007,15 +22172,15 @@ function _materialIndentNextNo_() {
   }
   try {
     const prefix = 'MI';
-    const seq = (supabaseSelect('material_indent_sequences', {
+    const seq = (supabaseSelect_('material_indent_sequences', {
       filters: { prefix: 'eq.' + prefix },
       limit: 1
     }) || [])[0];
     const next = Number(seq && seq.last_no || 0) + 1;
     if (seq) {
-      supabaseUpdate('material_indent_sequences', { prefix: 'eq.' + prefix }, { last_no: next });
+      supabaseUpdate_('material_indent_sequences', { prefix: 'eq.' + prefix }, { last_no: next });
     } else {
-      supabaseInsert('material_indent_sequences', { prefix: prefix, last_no: next });
+      supabaseInsert_('material_indent_sequences', { prefix: prefix, last_no: next });
     }
     return prefix + String(next).padStart(5, '0');
   } catch (err) {
@@ -21027,7 +22192,7 @@ function _materialIndentNextNo_() {
 
 function _materialIndentEvent_(entry) {
   try {
-    supabaseInsertMinimal('material_indent_events', {
+    supabaseInsertMinimal_('material_indent_events', {
       indent_id: entry.indentId || null,
       indent_no: String(entry.indentNo || ''),
       indent_line_id: entry.indentLineId || null,
@@ -21116,7 +22281,7 @@ function materialIndentCreate(payload, token) {
   const actor = _materialIndentActor_(user);
 
   try {
-    supabaseInsert('material_indents', {
+    supabaseInsert_('material_indents', {
       id: indentId,
       indent_no: indentNo,
       requester_user_id: String(user.userId || ''),
@@ -21132,7 +22297,7 @@ function materialIndentCreate(payload, token) {
       updated_at: now
     });
 
-    supabaseBulkInsert('material_indent_lines', prepared.map(function(row) {
+    supabaseBulkInsert_('material_indent_lines', prepared.map(function(row) {
       return {
         id: Utilities.getUuid(),
         indent_id: indentId,
@@ -21258,7 +22423,7 @@ function materialIndentReviewStock(payload, token) {
     const lineId = String(line.lineId || '').trim();
     if (!lineId) return;
     const qty = Math.max(0, Number(line.stockAvailableQty || 0));
-    const existing = (supabaseSelect('material_indent_lines', {
+    const existing = (supabaseSelect_('material_indent_lines', {
       select: 'id,indent_id,indent_no,requested_qty,stock_available_qty,stock_status,status,stores_remarks',
       filters: { id: 'eq.' + lineId },
       limit: 1
@@ -21268,14 +22433,14 @@ function materialIndentReviewStock(payload, token) {
     const stockStatus = qty >= requestedQty && requestedQty > 0
       ? 'STOCK_AVAILABLE'
       : (qty > 0 ? 'PARTIAL_STOCK_AVAILABLE' : 'NOT_AVAILABLE');
-    supabaseUpdate('material_indent_lines', { id: 'eq.' + lineId }, {
+    supabaseUpdate_('material_indent_lines', { id: 'eq.' + lineId }, {
       stock_available_qty: qty,
       stock_status: stockStatus,
       status: stockStatus,
       stores_remarks: String(line.storesRemarks || line.remarks || '').trim(),
       updated_at: now
     });
-    supabaseUpdate('material_indents', { id: 'eq.' + existing.indent_id }, {
+    supabaseUpdate_('material_indents', { id: 'eq.' + existing.indent_id }, {
       updated_at: now
     });
     _materialIndentEvent_({
@@ -21295,13 +22460,13 @@ function materialIndentReviewStock(payload, token) {
 }
 
 function _materialIndentRefreshLinePRStatus_(lineId) {
-  const line = (supabaseSelect('material_indent_lines', {
+  const line = (supabaseSelect_('material_indent_lines', {
     select: 'id,requested_qty,stock_available_qty,status',
     filters: { id: 'eq.' + lineId },
     limit: 1
   }) || [])[0];
   if (!line) return;
-  const links = supabaseSelect('material_indent_pr_links', {
+  const links = supabaseSelect_('material_indent_pr_links', {
     select: 'pr_qty',
     filters: { indent_line_id: 'eq.' + lineId },
     limit: 1000
@@ -21311,7 +22476,7 @@ function _materialIndentRefreshLinePRStatus_(lineId) {
   const prStatus = linkedQty >= shortageQty && shortageQty > 0
     ? 'RELEASED'
     : (linkedQty > 0 ? 'PARTIAL_RELEASED' : 'NOT_RELEASED');
-  supabaseUpdate('material_indent_lines', { id: 'eq.' + lineId }, {
+  supabaseUpdate_('material_indent_lines', { id: 'eq.' + lineId }, {
     pr_status: prStatus,
     status: prStatus === 'RELEASED' ? 'PR_RELEASED' : (prStatus === 'PARTIAL_RELEASED' ? 'PARTIAL_PR_RELEASED' : line.status),
     updated_at: new Date().toISOString()
@@ -21363,9 +22528,84 @@ function materialIndentCreateLinkedPR(payload, token) {
   const departments = [...new Set(linkRows.map(function(x) { return x.row.department; }).filter(Boolean))];
   const jobRefs = [...new Set(linkRows.map(function(x) { return x.row.jobRef; }).filter(Boolean))];
   const sourceSummary = 'Indents: ' + indentNos.join(', ');
+  const releaseMode = String(payload && payload.releaseMode || 'CONSOLIDATED').trim().toUpperCase();
+
+  if (releaseMode === 'SEPARATE_BY_INDENT') {
+    const created = [];
+    try {
+      linkRows.forEach(function(x) {
+        const row = x.row;
+        const prNo = generatePRNo_();
+        const rowSourceSummary = 'Indent: ' + row.indentNo;
+        supabaseInsert_('inv_purchase_requests', {
+          pr_no: prNo,
+          item_id: item.id,
+          item_code: item.item_code,
+          item_name: item.item_name,
+          requested_qty: x.qty,
+          received_qty: 0,
+          department: row.department || '',
+          job_ref: row.jobRef || '',
+          remarks: [String(payload && payload.remarks || '').trim(), rowSourceSummary, row.lineRemarks || ''].filter(Boolean).join(' | '),
+          status: 'OPEN',
+          source_type: 'MATERIAL_INDENT',
+          source_ref: row.indentNo,
+          source_line_id: row.lineId,
+          source_summary: rowSourceSummary,
+          requested_by: actor,
+          requested_for_department: row.department || ''
+        });
+        created.push({
+          row: row,
+          qty: x.qty,
+          prNo: prNo
+        });
+      });
+    } catch (err) {
+      if (String((err && err.message) || err).indexOf('source_type') !== -1 ||
+          String((err && err.message) || err).indexOf('source_ref') !== -1) {
+        throw new Error('Material Indent PR link columns are not installed. Apply supabase_material_indent_module.sql in Supabase first.');
+      }
+      throw err;
+    }
+
+    supabaseBulkInsert_('material_indent_pr_links', created.map(function(x) {
+      return {
+        indent_id: x.row.indentId,
+        indent_no: x.row.indentNo,
+        indent_line_id: x.row.lineId,
+        pr_no: x.prNo,
+        pr_qty: x.qty,
+        created_by: actor
+      };
+    }));
+
+    lineIds.forEach(_materialIndentRefreshLinePRStatus_);
+    created.forEach(function(x) {
+      _materialIndentEvent_({
+        indentId: x.row.indentId,
+        indentNo: x.row.indentNo,
+        indentLineId: x.row.lineId,
+        eventType: 'PR_RELEASED',
+        actor: actor,
+        afterJson: { prNo: x.prNo, prQty: x.qty, releaseMode: releaseMode }
+      });
+    });
+
+    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+    PropertiesService.getScriptProperties().setProperty('MATERIAL_INDENT_CACHE_VERSION', String(Date.now()));
+    return {
+      ok: true,
+      prNo: created[0] && created[0].prNo || '',
+      prNos: created.map(function(x) { return x.prNo; }),
+      linkedLines: created.length,
+      prQty: created.reduce(function(sum, x) { return sum + Number(x.qty || 0); }, 0),
+      releaseMode: releaseMode
+    };
+  }
 
   try {
-    supabaseInsert('inv_purchase_requests', {
+    supabaseInsert_('inv_purchase_requests', {
       pr_no: prNo,
       item_id: item.id,
       item_code: item.item_code,
@@ -21391,7 +22631,7 @@ function materialIndentCreateLinkedPR(payload, token) {
     throw err;
   }
 
-  supabaseBulkInsert('material_indent_pr_links', linkRows.map(function(x) {
+  supabaseBulkInsert_('material_indent_pr_links', linkRows.map(function(x) {
     return {
       indent_id: x.row.indentId,
       indent_no: x.row.indentNo,
@@ -21416,7 +22656,7 @@ function materialIndentCreateLinkedPR(payload, token) {
 
   PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
   PropertiesService.getScriptProperties().setProperty('MATERIAL_INDENT_CACHE_VERSION', String(Date.now()));
-  return { ok: true, prNo: prNo, linkedLines: linkRows.length, prQty: totalQty };
+  return { ok: true, prNo: prNo, prNos: [prNo], linkedLines: linkRows.length, prQty: totalQty, releaseMode: releaseMode };
 }
 
 function _invBuildTxnDateFilters_(opts, refType) {
@@ -21613,7 +22853,7 @@ function invAppendLedger_(p) {
   const rate  = Number(p.rate || 0);
   const value = Number((qtyIn * rate - qtyOut * rate).toFixed(6));
 
-  const inserted = supabaseInsert('inv_ledger', {
+  const inserted = supabaseInsert_('inv_ledger', {
     item_id: item.id,
     location: p.location || DEFAULT_LOCATION,
     ref_type: p.refType,
@@ -21643,7 +22883,7 @@ function invCreateLot_(payload) {
   if (qty <= 0) throw new Error('Lot qty must be positive');
   const receiptDate = payload.receiptDate || new Date().toISOString();
   const batchNo = String(payload.batchNo || '').trim() || invGenerateBatchNo_(payload.itemCode, receiptDate);
-  supabaseInsert('inv_lots', {
+  supabaseInsert_('inv_lots', {
     id: Utilities.getUuid(),
     item_id: item.id,
     item_code: item.item_code || payload.itemCode,
@@ -21678,7 +22918,7 @@ function invEnsureLegacyLotCoverage_(itemCode, location, existingItem) {
     return { item: item, addedQty: 0 };
   }
 
-  const openLots = supabaseSelect('inv_lots', {
+  const openLots = supabaseSelect_('inv_lots', {
     select: 'id,batch_no,qty_received,qty_available',
     filters: {
       item_id: 'eq.' + item.id,
@@ -21697,7 +22937,7 @@ function invEnsureLegacyLotCoverage_(itemCode, location, existingItem) {
   }
 
   const legacyBatchNo = invGetLegacyBatchNo_(item.item_code || itemCode, normalizedLocation);
-  const existingLegacy = (supabaseSelect('inv_lots', {
+  const existingLegacy = (supabaseSelect_('inv_lots', {
     select: 'id,qty_received,qty_available',
     filters: {
       item_id: 'eq.' + item.id,
@@ -21707,7 +22947,7 @@ function invEnsureLegacyLotCoverage_(itemCode, location, existingItem) {
     limit: 1
   }) || [])[0];
 
-  const firstLedger = (supabaseSelect('inv_ledger', {
+  const firstLedger = (supabaseSelect_('inv_ledger', {
     select: 'created_at',
     filters: {
       item_id: 'eq.' + item.id,
@@ -21721,13 +22961,13 @@ function invEnsureLegacyLotCoverage_(itemCode, location, existingItem) {
   const rate = Number(invGetCurrentAvgRate(item.item_code || itemCode, normalizedLocation) || 0);
 
   if (existingLegacy) {
-    supabaseUpdate('inv_lots', { id: 'eq.' + existingLegacy.id }, {
+    supabaseUpdate_('inv_lots', { id: 'eq.' + existingLegacy.id }, {
       qty_received: Number((Number(existingLegacy.qty_received || 0) + gap).toFixed(6)),
       qty_available: Number((Number(existingLegacy.qty_available || 0) + gap).toFixed(6)),
       rate: rate
     });
   } else {
-    supabaseInsert('inv_lots', {
+    supabaseInsert_('inv_lots', {
       id: Utilities.getUuid(),
       item_id: item.id,
       item_code: item.item_code || itemCode,
@@ -21758,11 +22998,11 @@ function invEnsureLegacyLotCoverage_(itemCode, location, existingItem) {
 function invListAvailableLotsJSON(itemCode, location) {
   const code = String(itemCode || '').trim();
   if (!code) throw new Error('Item code required');
-  const item = (supabaseSelect('inv_items', {
+  const item = (supabaseSelect_('inv_items', {
     select: 'id,item_code,item_name,department',
     filters: { item_code: 'eq.' + code },
     limit: 1
-  }) || [])[0] || (supabaseSelect('items', {
+  }) || [])[0] || (supabaseSelect_('items', {
     select: 'item_code,item_name,category',
     filters: { item_code: 'eq.' + code },
     limit: 1
@@ -21773,7 +23013,7 @@ function invListAvailableLotsJSON(itemCode, location) {
   const itemId = item.id || '';
   const itemCodeNorm = String(item.item_code || code).trim();
   const itemDepartment = String(item.department || '').trim();
-  const rows = supabaseSelect('inv_lots', {
+  const rows = supabaseSelect_('inv_lots', {
     select: 'id,batch_no,receipt_date,qty_received,qty_available,rate,location,department',
     filters: {
       ...(itemId ? { item_id: 'eq.' + itemId } : { item_code: 'eq.' + itemCodeNorm }),
@@ -21840,7 +23080,7 @@ function invSelectOpenLotsForAllocation_(item, payload) {
     filters.batch_no = 'eq.' + String(payload.batchNo).trim();
   }
 
-  return supabaseSelect('inv_lots', {
+  return supabaseSelect_('inv_lots', {
     select: 'id,batch_no,qty_available,rate,receipt_date',
     filters: filters,
     order: 'receipt_date.asc,created_at.asc',
@@ -21901,7 +23141,7 @@ function invApplyLotIssue_(ledgerId, payload) {
 function invApplyPreparedLotIssue_(ledgerId, item, allocations, txnType) {
   const rows = [];
   (allocations || []).forEach(function(part) {
-    supabaseUpdateMinimal('inv_lots', { id: 'eq.' + part.lotId }, {
+    supabaseUpdateMinimal_('inv_lots', { id: 'eq.' + part.lotId }, {
       qty_available: Number((Number(part.availableQty || 0) - Number(part.qty || 0)).toFixed(6))
     });
 
@@ -21918,7 +23158,7 @@ function invApplyPreparedLotIssue_(ledgerId, item, allocations, txnType) {
     });
   });
   if (rows.length) {
-    supabaseBulkInsertMinimal('inv_lot_allocations', rows);
+    supabaseBulkInsertMinimal_('inv_lot_allocations', rows);
   }
   return allocations || [];
 }
@@ -21930,7 +23170,7 @@ function invGetAllocationSummaryMap_(ledgerIds) {
   const chunkSize = 10;
   for (let i = 0; i < ids.length; i += chunkSize) {
     const chunk = ids.slice(i, i + chunkSize);
-    const rows = supabaseSelect('inv_lot_allocations', {
+    const rows = supabaseSelect_('inv_lot_allocations', {
       select: 'ledger_id,batch_no,qty',
       filters: {
         ledger_id: _supabaseInFilter_(chunk)
@@ -21964,7 +23204,7 @@ function invGetReversalSummaryMap_(ledgerIds) {
   const chunkSize = 10;
   for (let i = 0; i < ids.length; i += chunkSize) {
     const chunk = ids.slice(i, i + chunkSize);
-    const rows = supabaseSelect('inv_ledger', {
+    const rows = supabaseSelect_('inv_ledger', {
       select: 'id,ref_no,ref_type,created_at,remarks',
       filters: {
         ref_no: _supabaseInFilter_(chunk)
@@ -22044,7 +23284,7 @@ function invFindExistingGRNByKey_(idempotencyKey) {
   const key = String(idempotencyKey || '').trim();
   if (!key) return null;
 
-  const rows = supabaseSelect('inv_ledger', {
+  const rows = supabaseSelect_('inv_ledger', {
     select: 'id,ref_type,ref_no,remarks,created_at',
     filters: {
       ref_type: _supabaseInFilter_(['PR-RECEIPT', 'PO-RECEIPT', 'DIRECT-RECEIPT']),
@@ -22074,7 +23314,7 @@ function invAdjustPurchaseRequestReceipt_(prNo, deltaQty) {
   const delta = Number(deltaQty || 0);
   if (!key || !delta) return null;
 
-  const pr = (supabaseSelect('inv_purchase_requests', {
+  const pr = (supabaseSelect_('inv_purchase_requests', {
     select: 'pr_no,requested_qty,received_qty,status',
     filters: { pr_no: 'eq.' + key },
     limit: 1
@@ -22084,7 +23324,7 @@ function invAdjustPurchaseRequestReceipt_(prNo, deltaQty) {
   const requestedQty = Number(pr.requested_qty || 0);
   const nextReceived = Math.max(0, Number(pr.received_qty || 0) + delta);
   const nextStatus = nextReceived >= requestedQty ? 'CLOSED' : 'OPEN';
-  supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + key }, {
+  supabaseUpdate_('inv_purchase_requests', { pr_no: 'eq.' + key }, {
     received_qty: nextReceived,
     status: nextStatus
   });
@@ -22244,7 +23484,7 @@ function invRestoreLotAllocations_(ledgerRow) {
   const ledgerId = String(ledgerRow?.id || '').trim();
   if (!ledgerId) throw new Error('Ledger id missing');
 
-  const allocations = supabaseSelect('inv_lot_allocations', {
+  const allocations = supabaseSelect_('inv_lot_allocations', {
     select: 'id,lot_id,batch_no,qty',
     filters: {
       ledger_id: 'eq.' + ledgerId
@@ -22254,13 +23494,13 @@ function invRestoreLotAllocations_(ledgerRow) {
 
   if (allocations.length) {
     allocations.forEach(function(part) {
-      const lot = (supabaseSelect('inv_lots', {
+      const lot = (supabaseSelect_('inv_lots', {
         select: 'id,qty_available',
         filters: { id: 'eq.' + part.lot_id },
         limit: 1
       }) || [])[0];
       if (!lot) return;
-      supabaseUpdate('inv_lots', { id: 'eq.' + part.lot_id }, {
+      supabaseUpdate_('inv_lots', { id: 'eq.' + part.lot_id }, {
         qty_available: Number((Number(lot.qty_available || 0) + Number(part.qty || 0)).toFixed(6))
       });
     });
@@ -22274,7 +23514,7 @@ function invRestoreLotAllocations_(ledgerRow) {
     throw new Error('Unable to restore FIFO allocations for this transaction');
   }
 
-  const lot = (supabaseSelect('inv_lots', {
+  const lot = (supabaseSelect_('inv_lots', {
     select: 'id,qty_available',
     filters: {
       item_id: 'eq.' + ledgerRow.item_id,
@@ -22287,7 +23527,7 @@ function invRestoreLotAllocations_(ledgerRow) {
 
   if (!lot) throw new Error('Original batch not found for reversal');
 
-  supabaseUpdate('inv_lots', { id: 'eq.' + lot.id }, {
+  supabaseUpdate_('inv_lots', { id: 'eq.' + lot.id }, {
     qty_available: Number((Number(lot.qty_available || 0) + Number(ledgerRow.qty_out || 0)).toFixed(6))
   });
   return [fallbackBatch];
@@ -22299,7 +23539,7 @@ function invReverseInboundLot_(ledgerRow) {
   if (qty <= 0) throw new Error('Inbound quantity missing');
   if (!batchNo) throw new Error('Batch not found for reversal');
 
-  const lot = (supabaseSelect('inv_lots', {
+  const lot = (supabaseSelect_('inv_lots', {
     select: 'id,qty_received,qty_available',
     filters: {
       item_id: 'eq.' + ledgerRow.item_id,
@@ -22321,7 +23561,7 @@ function invReverseInboundLot_(ledgerRow) {
     throw new Error('Lot quantity is inconsistent for reversal');
   }
 
-  supabaseUpdate('inv_lots', { id: 'eq.' + lot.id }, {
+  supabaseUpdate_('inv_lots', { id: 'eq.' + lot.id }, {
     qty_received: Number((qtyReceived - qty).toFixed(6)),
     qty_available: Number((qtyAvailable - qty).toFixed(6))
   });
@@ -22335,7 +23575,7 @@ function invReverseLedgerTransaction(ledgerId, reason) {
   if (!id) throw new Error('Transaction id required');
   if (!reversalReason) throw new Error('Reversal reason required');
 
-  const ledger = (supabaseSelect('inv_ledger', {
+  const ledger = (supabaseSelect_('inv_ledger', {
     select: `
       id,
       item_id,
@@ -22371,7 +23611,7 @@ function invReverseLedgerTransaction(ledgerId, reason) {
     throw new Error('This transaction is already reversed');
   }
 
-  const itemMeta = ledger.inv_items || (ledger.item_id ? (supabaseSelect('inv_items', {
+  const itemMeta = ledger.inv_items || (ledger.item_id ? (supabaseSelect_('inv_items', {
     select: 'item_code,item_name',
     filters: { id: 'eq.' + ledger.item_id },
     limit: 1
@@ -22440,7 +23680,7 @@ function invReverseLedgerTransaction(ledgerId, reason) {
     } else if (originalType === 'PO-RECEIPT') {
       const receiptMatch = invFindMatchingPOReceiptRecord_(ledger, itemCode);
       if (receiptMatch?.row?.id) {
-        supabaseDelete('purchase_po_receipts', { id: 'eq.' + String(receiptMatch.row.id || '').trim() });
+        supabaseDelete_('purchase_po_receipts', { id: 'eq.' + String(receiptMatch.row.id || '').trim() });
         const sourceType = String(receiptMatch.line?.sourceType || receiptMatch.row?.sourceType || '').trim().toUpperCase();
         const linkedPrNo = String(receiptMatch.line?.sourceRef || '').trim();
         if (sourceType === 'INVENTORY_PR' && linkedPrNo) {
@@ -22496,7 +23736,7 @@ function invGetPurchaseAvgRateMap_(itemIds, location) {
 
   for (let i = 0; i < ids.length; i += chunkSize) {
     const chunk = ids.slice(i, i + chunkSize);
-    const rows = supabaseSelect('inv_ledger', {
+    const rows = supabaseSelect_('inv_ledger', {
       select: 'item_id, qty_in, rate, created_at',
       filters: {
         item_id: _supabaseInFilter_(chunk),
@@ -22536,7 +23776,7 @@ function invGetCurrentQty_(itemCode, location) {
 
   if (!code) return 0;
 
-  const snapshotRows = supabaseRpc('inv_stock_snapshot_ui', {
+  const snapshotRows = supabaseRpc_('inv_stock_snapshot_ui', {
     p_location: loc,
     p_search: code,
     p_limit: 20
@@ -22549,14 +23789,14 @@ function invGetCurrentQty_(itemCode, location) {
     return Number(snapshotRow.qty || 0);
   }
 
-  const item = (supabaseSelect('inv_items', {
+  const item = (supabaseSelect_('inv_items', {
     select: 'id,item_code',
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0];
 
   if (item?.id) {
-    const lotRows = supabaseSelect('inv_lots', {
+    const lotRows = supabaseSelect_('inv_lots', {
       select: 'qty_available',
       filters: {
         item_id: 'eq.' + item.id,
@@ -22572,7 +23812,7 @@ function invGetCurrentQty_(itemCode, location) {
     }
   }
 
-  const rows = supabaseRpc('inv_stock_snapshot', {
+  const rows = supabaseRpc_('inv_stock_snapshot', {
     p_location: loc,
     p_search: code
   }) || [];
@@ -22593,7 +23833,7 @@ function invGetCurrentAvgRate(itemCode, location) {
   const loc = location || DEFAULT_LOCATION;
   if (!code) return 0;
 
-  const snapshotRows = supabaseRpc('inv_stock_snapshot_ui', {
+  const snapshotRows = supabaseRpc_('inv_stock_snapshot_ui', {
     p_location: loc,
     p_search: code,
     p_limit: 20
@@ -22606,7 +23846,7 @@ function invGetCurrentAvgRate(itemCode, location) {
     return Number(snapshotRow.avg_rate || snapshotRow.avgrate || 0);
   }
 
-  const item = supabaseSelect('inv_items', {
+  const item = supabaseSelect_('inv_items', {
     select: 'id',
     filters: { item_code: 'eq.' + code },
     limit: 1
@@ -22620,7 +23860,7 @@ function invGetCurrentAvgRate(itemCode, location) {
     }
   }
 
-  const rows = supabaseRpc('inv_stock_snapshot', {
+  const rows = supabaseRpc_('inv_stock_snapshot', {
     p_location: loc,
     p_search: code
   }) || [];
@@ -22630,7 +23870,11 @@ function invGetCurrentAvgRate(itemCode, location) {
   return Number(row?.avgrate || row?.avg_rate || 0);
 }
 
-function invCreatePurchaseRequest(payload) {
+function invCreatePurchaseRequest(payload, token) {
+  _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+    { module: 'INVENTORY', action: 'can_create' },
+    { module: 'PURCHASE', action: 'can_create' }
+  ]);
 
   if (!payload.itemCode && !payload.itemName)
     throw new Error('Item required');
@@ -22646,7 +23890,7 @@ function invCreatePurchaseRequest(payload) {
 
   const prNo = generatePRNo_();
 
-  supabaseInsert('inv_purchase_requests', {
+  supabaseInsert_('inv_purchase_requests', {
     pr_no: prNo,
 
     item_id: item.id,              // ✅ FIXED
@@ -22665,7 +23909,11 @@ function invCreatePurchaseRequest(payload) {
   return { ok: true, prNo };
 }
 
-function invCreatePurchaseRequestsBulk(payload) {
+function invCreatePurchaseRequestsBulk(payload, token) {
+  _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+    { module: 'INVENTORY', action: 'can_create' },
+    { module: 'PURCHASE', action: 'can_create' }
+  ]);
   const rows = Array.isArray(payload)
     ? payload
     : (Array.isArray(payload?.rows) ? payload.rows : []);
@@ -22686,12 +23934,12 @@ function invCreatePurchaseRequestsBulk(payload) {
   try {
     if (idempotencyKey) {
       try {
-        supabaseInsert('idempotency_keys', {
+        supabaseInsert_('idempotency_keys', {
           key: idempotencyKey,
           created_at: new Date().toISOString()
         });
       } catch (err) {
-        const existing = supabaseSelect('idempotency_keys', {
+        const existing = supabaseSelect_('idempotency_keys', {
           filters: { key: 'eq.' + idempotencyKey },
           limit: 1
         })[0];
@@ -22716,7 +23964,7 @@ function invCreatePurchaseRequestsBulk(payload) {
 
     const created = prepared.map(function(row) {
       const prNo = generatePRNo_();
-      supabaseInsert('inv_purchase_requests', {
+      supabaseInsert_('inv_purchase_requests', {
         pr_no: prNo,
         item_id: row.item.id,
         item_code: row.item.item_code,
@@ -22740,7 +23988,7 @@ function invCreatePurchaseRequestsBulk(payload) {
 
     if (idempotencyKey) {
       try {
-        supabaseUpdate('idempotency_keys', {
+        supabaseUpdate_('idempotency_keys', {
           key: 'eq.' + idempotencyKey
         }, {
           response: response
@@ -22970,11 +24218,15 @@ function invListPurchaseRequestsJSON(opts = {}) {
   return result;
 }
 
-function invUpdatePurchaseRequest(payload) {
+function invUpdatePurchaseRequest(payload, token) {
+  _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+    { module: 'INVENTORY', action: 'can_edit' },
+    { module: 'PURCHASE', action: 'can_edit' }
+  ]);
   const prNo = String(payload?.prNo || '').trim();
   if (!prNo) throw new Error('PR No required');
 
-  const pr = (supabaseSelect('inv_purchase_requests', {
+  const pr = (supabaseSelect_('inv_purchase_requests', {
     select: 'pr_no,status,received_qty',
     filters: { pr_no: 'eq.' + prNo },
     limit: 1
@@ -23000,7 +24252,7 @@ function invUpdatePurchaseRequest(payload) {
   if (!String(payload.prDept || '').trim()) throw new Error('Department required');
 
   const item = resolveInventoryItemForEntry_(payload.itemCode, payload.itemName);
-  supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + prNo }, {
+  supabaseUpdate_('inv_purchase_requests', { pr_no: 'eq.' + prNo }, {
     item_id: item.id,
     item_code: item.item_code,
     item_name: item.item_name,
@@ -23066,7 +24318,7 @@ function invListPurchaseReceiptsJSON(opts = {}) {
 function _invSelectReceiptLedgerForRegularization_(receiptId) {
   const id = String(receiptId || '').trim();
   if (!id) throw new Error('Receipt ledger id is required');
-  const row = (supabaseSelect('inv_ledger', {
+  const row = (supabaseSelect_('inv_ledger', {
     select: `
       id,
       item_id,
@@ -23192,7 +24444,7 @@ function invRegularizePRReceiptToPO(payload, token) {
     updatedAt: stamp
   });
 
-  supabaseUpdateMinimal('inv_ledger', { id: 'eq.' + ledger.id }, {
+  supabaseUpdateMinimal_('inv_ledger', { id: 'eq.' + ledger.id }, {
     ref_type: 'PO-RECEIPT',
     ref_no: po.poNo,
     remarks: regularizedRemark
@@ -23200,7 +24452,7 @@ function invRegularizePRReceiptToPO(payload, token) {
 
   const batchNo = String(ledger.batch_no || '').trim();
   if (batchNo) {
-    supabaseUpdateMinimal('inv_lots', {
+    supabaseUpdateMinimal_('inv_lots', {
       item_id: 'eq.' + ledger.item_id,
       batch_no: 'eq.' + batchNo
     }, {
@@ -23357,7 +24609,7 @@ function invPostPOReceiptLine_(payload) {
   const linkedPrNo = String(line.sourceRef || '').trim();
   if (linkedPrNo) {
     try {
-      const pr = supabaseSelect('inv_purchase_requests', {
+      const pr = supabaseSelect_('inv_purchase_requests', {
         select: 'pr_no,requested_qty,received_qty,status',
         filters: { pr_no: 'eq.' + linkedPrNo },
         limit: 1
@@ -23365,7 +24617,7 @@ function invPostPOReceiptLine_(payload) {
       if (pr) {
         const nextReceived = Number(pr.received_qty || 0) + qty;
         const requestedQty = Number(pr.requested_qty || 0);
-        supabaseUpdate(
+        supabaseUpdate_(
           'inv_purchase_requests',
           { pr_no: 'eq.' + linkedPrNo },
           {
@@ -23397,7 +24649,7 @@ function invPostPurchaseReceipt(payload) {
 
   _invAssertReceiptHeaderMetadata_(payload);
 
-  const pr = supabaseSelect('inv_purchase_requests', {
+  const pr = supabaseSelect_('inv_purchase_requests', {
     filters: { pr_no: 'eq.' + payload.prNo },
     limit: 1
   })[0];
@@ -23486,7 +24738,7 @@ function invPostPurchaseReceipt(payload) {
       ? 'CLOSED'
       : 'OPEN';
 
-  supabaseUpdate(
+  supabaseUpdate_(
     'inv_purchase_requests',
     { pr_no: 'eq.' + payload.prNo },
     {
@@ -23769,7 +25021,7 @@ function _invLifecycleActor_() {
 function _invGetPurchaseRequestLifecycleContext_(prNo) {
   const key = String(prNo || '').trim();
   if (!key) throw new Error('PR No required');
-  const pr = (supabaseSelect('inv_purchase_requests', {
+  const pr = (supabaseSelect_('inv_purchase_requests', {
     select: 'pr_no,requested_qty,received_qty,status,remarks',
     filters: { pr_no: 'eq.' + key },
     limit: 1
@@ -23791,7 +25043,11 @@ function _invGetPurchaseRequestLifecycleContext_(prNo) {
   };
 }
 
-function invSetPurchaseRequestLifecycle(prNo, action, reason) {
+function invSetPurchaseRequestLifecycle(prNo, action, reason, token) {
+  const sessionUser = _requireAnyModuleAccess_(token, [
+    { module: 'INVENTORY', action: 'can_edit' },
+    { module: 'PURCHASE', action: 'can_edit' }
+  ]);
   const ctx = _invGetPurchaseRequestLifecycleContext_(prNo);
   const target = String(action || '').trim().toUpperCase();
   const why = String(reason || '').trim();
@@ -23802,7 +25058,7 @@ function invSetPurchaseRequestLifecycle(prNo, action, reason) {
   }
 
   const now = new Date().toISOString();
-  const actor = _invLifecycleActor_();
+  const actor = _authActorName_(sessionUser);
   const auditNote = (target === 'CANCELLED' ? 'Cancelled' : (target === 'SHORT_CLOSED' ? 'Short closed' : 'Closed')) +
     ' on ' + now + ' by ' + actor + ' | ' + why;
   const nextRemarks = [ctx.remarks, auditNote].filter(Boolean).join('\n');
@@ -23810,7 +25066,7 @@ function invSetPurchaseRequestLifecycle(prNo, action, reason) {
   if (target === 'CANCELLED') {
     if (ctx.receivedQty > 0.0001) throw new Error('PR with GRN/receipt activity cannot be cancelled');
     if (ctx.orderedQty > 0.0001 || ctx.poRefs.length) throw new Error('PR with linked PO cannot be cancelled');
-    supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + ctx.prNo }, {
+    supabaseUpdate_('inv_purchase_requests', { pr_no: 'eq.' + ctx.prNo }, {
       status: 'CANCELLED',
       closed_at: now,
       remarks: nextRemarks
@@ -23821,7 +25077,7 @@ function invSetPurchaseRequestLifecycle(prNo, action, reason) {
 
   if (target === 'SHORT_CLOSED') {
     if (ctx.openPOQty > 0.0001) throw new Error('Short close blocked. Open PO exists for this PR');
-    supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + ctx.prNo }, {
+    supabaseUpdate_('inv_purchase_requests', { pr_no: 'eq.' + ctx.prNo }, {
       status: 'SHORT_CLOSED',
       closed_at: now,
       remarks: nextRemarks
@@ -23836,7 +25092,7 @@ function invSetPurchaseRequestLifecycle(prNo, action, reason) {
     if (ctx.availableToOrderQty > 0.0001 || (ctx.requestedQty - ctx.receivedQty) > 0.0001) {
       throw new Error('Close blocked. Pending procurement still remains for this PR');
     }
-    supabaseUpdate('inv_purchase_requests', { pr_no: 'eq.' + ctx.prNo }, {
+    supabaseUpdate_('inv_purchase_requests', { pr_no: 'eq.' + ctx.prNo }, {
       status: 'CLOSED',
       closed_at: now,
       remarks: nextRemarks
@@ -23850,14 +25106,14 @@ function invSetPurchaseRequestLifecycle(prNo, action, reason) {
 
 function generatePRNo_() {
 
-  const seq = supabaseSelect('inv_pr_sequences', {
+  const seq = supabaseSelect_('inv_pr_sequences', {
     filters: { prefix: 'eq.PR' },
     limit: 1
   })[0];
 
   const next = Number(seq.last_no || 0) + 1;
 
-  supabaseUpdate(
+  supabaseUpdate_(
     'inv_pr_sequences',
     { prefix: 'eq.PR' },
     { last_no: next }
@@ -23874,7 +25130,7 @@ function invGetReceiptPrintData(receiptNo) {
   const id = String(receiptNo || '').trim();
   if (!id) throw new Error('Receipt number is required');
 
-  const ledger = (supabaseSelect('inv_ledger', {
+  const ledger = (supabaseSelect_('inv_ledger', {
     select: `
       id,
       item_id,
@@ -23904,7 +25160,7 @@ function invGetReceiptPrintData(receiptNo) {
     throw new Error('Print supported only for material receipts');
   }
 
-  const item = ledger.inv_items || (ledger.item_id ? (supabaseSelect('inv_items', {
+  const item = ledger.inv_items || (ledger.item_id ? (supabaseSelect_('inv_items', {
     select: 'item_code,item_name,uom,category',
     filters: { id: 'eq.' + ledger.item_id },
     limit: 1
@@ -24184,7 +25440,7 @@ function _invNormalizePreparedWOIssueRows_(preparedRows) {
   const returnRows = [];
   const issueChunks = _supabaseChunkValuesByFilterLength_(woNumbers, 1200, 40);
   issueChunks.forEach(function(chunk) {
-    const batch = supabaseSelect('inv_ledger', {
+    const batch = supabaseSelect_('inv_ledger', {
       select: 'id,ref_no,remarks,qty_out',
       filters: {
         ref_type: 'eq.ISSUE',
@@ -24193,7 +25449,7 @@ function _invNormalizePreparedWOIssueRows_(preparedRows) {
       order: 'id.asc'
     }) || [];
     issueRows.push.apply(issueRows, batch);
-    const returnBatch = supabaseSelect('inv_ledger', {
+    const returnBatch = supabaseSelect_('inv_ledger', {
       select: 'id,ref_no,remarks,qty_in',
       filters: {
         ref_type: 'eq.WO-RETURN',
@@ -24255,7 +25511,7 @@ function _invNormalizePreparedWOIssueRows_(preparedRows) {
 
 function invListWorkOrdersForIssueFromView_() {
   try {
-    const rows = supabaseRpc('inv_work_orders_for_issue_ui', {}) || [];
+    const rows = supabaseRpc_('inv_work_orders_for_issue_ui', {}) || [];
     const preparedRows = _invNormalizePreparedWOIssueRows_(
       Array.isArray(rows) ? rows : (rows.rows || [])
     );
@@ -24306,7 +25562,7 @@ function _invFilterWorkOrderIssueRows_(rows, opts) {
 function invListWorkOrdersForIssueSummaryFast_(opts) {
   const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
   try {
-    const rows = supabaseRpc('inv_work_orders_for_issue_summary_ui', {
+    const rows = supabaseRpc_('inv_work_orders_for_issue_summary_ui', {
       p_status: request.status || null,
       p_search: request.search || null,
       p_limit: request.limit,
@@ -24346,7 +25602,7 @@ function invGetWorkOrderForIssueFast_(woNo) {
   const key = String(woNo || '').trim();
   if (!key) return null;
   try {
-    const rows = supabaseRpc('inv_work_order_issue_detail_ui', {
+    const rows = supabaseRpc_('inv_work_order_issue_detail_ui', {
       p_wo_no: key
     }) || [];
     const list = Array.isArray(rows) ? rows : (rows.rows || []);
@@ -24642,16 +25898,10 @@ function invListWorkOrdersForIssue(opts) {
   };
 }
 
-function invListWOIssueVarianceJSON(opts) {
-  const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
-  const rows = supabaseRpc('inv_wo_issue_variance_export_ui', {
-    p_search: request.search || null,
-    p_date_from: request.fromDate || null,
-    p_date_to: request.toDate || null,
-    p_limit: request.limit,
-    p_offset: request.offset
-  }) || [];
-  const out = (Array.isArray(rows) ? rows : (rows.rows || [])).map(function(row) {
+function _invMapWOExcessIssueRows_(rows) {
+  return (Array.isArray(rows) ? rows : (rows && rows.rows || [])).map(function(row) {
+    const requiredQty = Number(row.required_qty || row.requiredQty || 0);
+    const excessQty = Number(row.excess_qty || row.excessQty || 0);
     return {
       woDate: row.wo_date || row.woDate || '',
       woNo: String(row.wo_no || row.woNo || '').trim(),
@@ -24667,19 +25917,55 @@ function invListWOIssueVarianceJSON(opts) {
       deckleMm: Number(row.deckle_mm || row.deckleMm || 0),
       cutMm: Number(row.cut_mm || row.cutMm || 0),
       uom: row.uom || '',
-      requiredQty: Number(row.required_qty || row.requiredQty || 0),
+      requiredQty: requiredQty,
       issuedQty: Number(row.issued_qty || row.issuedQty || 0),
       returnedQty: Number(row.returned_qty || row.returnedQty || 0),
       netIssuedQty: Number(row.net_issued_qty || row.netIssuedQty || 0),
       pendingQty: Number(row.pending_qty || row.pendingQty || 0),
-      excessQty: Number(row.excess_qty || row.excessQty || 0),
+      excessQty: excessQty,
+      excessPct: Number(row.excess_pct || row.excessPct || (requiredQty > 0 ? (excessQty / requiredQty * 100) : 0)),
+      withinWriteoffLimit: row.within_writeoff_limit === true || row.withinWriteoffLimit === true,
       status: row.status || '',
       issueBatches: row.issue_batches || row.issueBatches || '',
       returnBatches: row.return_batches || row.returnBatches || '',
       lastIssueDate: row.last_issue_date || row.lastIssueDate || '',
-      lastReturnDate: row.last_return_date || row.lastReturnDate || ''
+      lastReturnDate: row.last_return_date || row.lastReturnDate || '',
+      productionRejectedQty: Number(row.production_rejected_qty || row.productionRejectedQty || 0),
+      productionRejectionHint: row.production_rejection_hint || row.productionRejectionHint || '',
+      reviewAction: row.review_action || row.reviewAction || '',
+      reviewStatus: row.review_status || row.reviewStatus || '',
+      reviewRemarks: row.review_remarks || row.reviewRemarks || '',
+      reviewedBy: row.reviewed_by || row.reviewedBy || '',
+      reviewedAt: row.reviewed_at || row.reviewedAt || ''
     };
   });
+}
+
+function invListWOIssueVarianceJSON(opts) {
+  const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
+  let rows = [];
+  try {
+    rows = supabaseRpc_('inv_wo_excess_issue_review_ui', {
+      p_search: request.search || null,
+      p_date_from: request.fromDate || null,
+      p_date_to: request.toDate || null,
+      p_review_filter: 'ALL',
+      p_limit: request.limit,
+      p_offset: request.offset
+    }) || [];
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'inv_wo_excess_issue_reviews') && String(err && err.message || err || '').indexOf('inv_wo_excess_issue_review_ui') === -1) {
+      throw err;
+    }
+    rows = supabaseRpc_('inv_wo_issue_variance_export_ui', {
+      p_search: request.search || null,
+      p_date_from: request.fromDate || null,
+      p_date_to: request.toDate || null,
+      p_limit: request.limit,
+      p_offset: request.offset
+    }) || [];
+  }
+  const out = _invMapWOExcessIssueRows_(rows);
   return {
     ok: true,
     rows: out,
@@ -24692,6 +25978,48 @@ function invListWOIssueVarianceJSON(opts) {
   };
 }
 
+function invListWOExcessIssueReviewJSON(opts) {
+  const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
+  const reviewFilter = String(opts && opts.reviewFilter || 'PENDING').trim().toUpperCase() || 'PENDING';
+  const rows = supabaseRpc_('inv_wo_excess_issue_review_ui', {
+    p_search: request.search || null,
+    p_date_from: request.fromDate || null,
+    p_date_to: request.toDate || null,
+    p_review_filter: reviewFilter,
+    p_limit: request.limit,
+    p_offset: request.offset
+  }) || [];
+  return {
+    ok: true,
+    rows: _invMapWOExcessIssueRows_(rows),
+    meta: {
+      fromDate: request.fromDate,
+      toDate: request.toDate,
+      reviewFilter: reviewFilter,
+      limit: request.limit,
+      offset: request.offset
+    }
+  };
+}
+
+function invSaveWOExcessIssueReview(payload, token) {
+  const sessionUser = getSessionUser(token);
+  const p = payload || {};
+  const actor = _authActorName_(sessionUser);
+  const result = supabaseRpc_('inv_record_wo_excess_issue_review', {
+    p_wo_no: String(p.woNo || '').trim(),
+    p_material_key: String(p.materialKey || '').trim(),
+    p_action_type: String(p.actionType || '').trim().toUpperCase(),
+    p_excess_qty: Number(p.excessQty || 0),
+    p_excess_pct: Number(p.excessPct || 0),
+    p_required_qty: Number(p.requiredQty || 0),
+    p_net_issued_qty: Number(p.netIssuedQty || 0),
+    p_remarks: String(p.remarks || '').trim(),
+    p_reviewed_by: actor
+  }) || {};
+  return Array.isArray(result) ? (result[0] || { ok: true }) : result;
+}
+
 function invGetWorkOrderForIssue(woNo) {
   const key = String(woNo || '').trim();
   if (!key) throw new Error('Work order no required');
@@ -24701,7 +26029,7 @@ function invGetWorkOrderForIssue(woNo) {
     return { ok: true, row: fastRow };
   }
 
-  const rows = supabaseSelect('inv_wo_issue_requirement_v', {
+  const rows = supabaseSelect_('inv_wo_issue_requirement_v', {
     select: 'wo_number,issue_department,line_status,material_key,item_label,gsm,deckle_mm,cut_mm,uom,required_qty,issued_qty,returned_qty,net_issued_qty,remaining_qty,excess_qty,item_code',
     filters: { wo_number: 'eq.' + key },
     order: 'item_label.asc,material_key.asc',
@@ -24799,7 +26127,7 @@ function _invGetWOReturnRate_(payload, item) {
   const woNo = String(payload.workOrderNo || '').trim();
   const materialKey = String(payload.materialKey || '').trim();
   const location = String(payload.location || DEFAULT_LOCATION).trim() || DEFAULT_LOCATION;
-  const rows = supabaseSelect('inv_ledger', {
+  const rows = supabaseSelect_('inv_ledger', {
     select: 'id,qty_out,rate',
     filters: {
       ref_type: 'eq.ISSUE',
@@ -24828,7 +26156,7 @@ function _invGetWOMaterialItemNetIssued_(payload, item) {
   const woNo = String(payload.workOrderNo || '').trim();
   const materialKey = String(payload.materialKey || '').trim();
   const location = String(payload.location || DEFAULT_LOCATION).trim() || DEFAULT_LOCATION;
-  const rows = supabaseSelect('inv_ledger', {
+  const rows = supabaseSelect_('inv_ledger', {
     select: 'id,ref_type,qty_in,qty_out',
     filters: {
       ref_type: _supabaseInFilter_(['ISSUE', 'WO-RETURN']),
@@ -25001,7 +26329,7 @@ function invBuildRTSRemark_(payload) {
 function invTryInsertRTSMetadata_(ledger, payload, allocations) {
   if (!ledger || !ledger.id) return;
   try {
-    supabaseInsertMinimal('inv_rts_returns', {
+    supabaseInsertMinimal_('inv_rts_returns', {
       id: Utilities.getUuid(),
       ledger_id: ledger.id,
       rts_no: ledger.id,
@@ -25352,16 +26680,16 @@ function _sheetConvItemAreaPerSheet_(item) {
 
 function _sheetConvGenerateNo_() {
   const prefix = 'SCN';
-  const seq = (supabaseSelect('inv_sheet_conversion_sequences', {
+  const seq = (supabaseSelect_('inv_sheet_conversion_sequences', {
     filters: { prefix: 'eq.' + prefix },
     limit: 1
   }) || [])[0];
   let next = 1;
   if (seq) {
     next = Number(seq.last_no || 0) + 1;
-    supabaseUpdate('inv_sheet_conversion_sequences', { prefix: 'eq.' + prefix }, { last_no: next });
+    supabaseUpdate_('inv_sheet_conversion_sequences', { prefix: 'eq.' + prefix }, { last_no: next });
   } else {
-    supabaseInsert('inv_sheet_conversion_sequences', { prefix: prefix, last_no: 1 });
+    supabaseInsert_('inv_sheet_conversion_sequences', { prefix: prefix, last_no: 1 });
   }
   return prefix + String(next).padStart(5, '0');
 }
@@ -25517,7 +26845,7 @@ function invPostSheetConversion(payload) {
   const wasteValue = _sheetConvRound6_(Math.max(0, sourceTotalValue - stockableValue));
 
   const headerId = Utilities.getUuid();
-  supabaseInsert('inv_sheet_conversions', {
+  supabaseInsert_('inv_sheet_conversions', {
     id: headerId,
     conversion_no: conversionNo,
     conversion_date: conversionDate,
@@ -25576,7 +26904,7 @@ function invPostSheetConversion(payload) {
 
   resolvedLines.forEach(function(line, index) {
     const lineNo = index + 1;
-    const lineInsert = supabaseInsert('inv_sheet_conversion_lines', {
+    const lineInsert = supabaseInsert_('inv_sheet_conversion_lines', {
       id: Utilities.getUuid(),
       conversion_id: headerId,
       line_no: lineNo,
@@ -25610,7 +26938,7 @@ function invPostSheetConversion(payload) {
       const partShare = sourceAreaPerSheet > 0 ? (line.lineAreaPerSheet / sourceAreaPerSheet) : 0;
       const qty = _sheetConvRound6_(Number(part.qty || 0) * partShare);
       if (qty <= 0) return;
-      supabaseInsert('inv_sheet_conversion_allocations', {
+      supabaseInsert_('inv_sheet_conversion_allocations', {
         id: Utilities.getUuid(),
         conversion_id: headerId,
         conversion_line_id: lineId,
@@ -25647,7 +26975,7 @@ function invPostSheetConversion(payload) {
         line.itemName || line.itemCode
       ].filter(Boolean).join(' | ')
     });
-    const targetLotRow = (supabaseSelect('inv_lots', {
+    const targetLotRow = (supabaseSelect_('inv_lots', {
       select: 'id,batch_no',
       filters: { batch_no: 'eq.' + targetLot.batchNo },
       limit: 1
@@ -25669,7 +26997,7 @@ function invPostSheetConversion(payload) {
       ].filter(Boolean).join(' | ')
     });
 
-    supabaseUpdate('inv_sheet_conversion_lines', { id: 'eq.' + lineId }, {
+    supabaseUpdate_('inv_sheet_conversion_lines', { id: 'eq.' + lineId }, {
       batch_no: targetLot.batchNo,
       target_lot_id: targetLotRow?.id || null
     });
@@ -25684,7 +27012,7 @@ function invPostSheetConversion(payload) {
     sourceAllocations.forEach(function(part) {
       const qty = _sheetConvRound6_(Number(part.qty || 0) * residualShare);
       if (qty <= 0) return;
-      supabaseInsert('inv_sheet_conversion_allocations', {
+      supabaseInsert_('inv_sheet_conversion_allocations', {
         id: Utilities.getUuid(),
         conversion_id: headerId,
         conversion_line_id: null,
@@ -25700,7 +27028,7 @@ function invPostSheetConversion(payload) {
     });
   }
 
-  supabaseUpdate('inv_sheet_conversions', { id: 'eq.' + headerId }, {
+  supabaseUpdate_('inv_sheet_conversions', { id: 'eq.' + headerId }, {
     source_batch_no: sourceBatchNo || sourceBatchDisplay || '',
     source_rate: sourceRate,
     source_value: sourceTotalValue,
@@ -25778,7 +27106,7 @@ function _invLedgerValueForRate_(ledger, rate) {
 function _invSelectLedgerForRateCorrection_(ledgerId) {
   const id = String(ledgerId || '').trim();
   if (!id) throw new Error('Source ledger id is required');
-  const row = (supabaseSelect('inv_ledger', {
+  const row = (supabaseSelect_('inv_ledger', {
     select: 'id,item_id,ref_type,ref_no,qty_in,qty_out,rate,value,batch_no,location,department,remarks,created_at',
     filters: { id: 'eq.' + id },
     limit: 1
@@ -25790,7 +27118,7 @@ function _invSelectLedgerForRateCorrection_(ledgerId) {
 function _invSelectItemForRateCorrection_(itemId) {
   const id = String(itemId || '').trim();
   if (!id) return null;
-  return (supabaseSelect('inv_items', {
+  return (supabaseSelect_('inv_items', {
     select: 'id,item_code,item_name,category,department,uom',
     filters: { id: 'eq.' + id },
     limit: 1
@@ -25804,7 +27132,7 @@ function _invFindLotForRateCorrection_(ledger) {
     item_id: 'eq.' + ledger.item_id,
     batch_no: 'eq.' + batchNo
   };
-  const rows = supabaseSelect('inv_lots', {
+  const rows = supabaseSelect_('inv_lots', {
     select: 'id,item_id,item_code,batch_no,source_type,source_ref,location,receipt_date,qty_received,qty_available,rate,department,remarks,created_at',
     filters: filters,
     order: 'created_at.asc',
@@ -25821,7 +27149,7 @@ function _invFindLotForRateCorrection_(ledger) {
 
 function _invAssertRateCorrectionAuditTable_() {
   try {
-    supabaseSelect('inv_rate_corrections', {
+    supabaseSelect_('inv_rate_corrections', {
       select: 'id',
       limit: 1
     });
@@ -25857,14 +27185,14 @@ function _invRecalculateAllocatedLedgerValues_(ledgerIds) {
   if (!ids.length) return out;
 
   ids.forEach(function(ledgerId) {
-    const ledger = (supabaseSelect('inv_ledger', {
+    const ledger = (supabaseSelect_('inv_ledger', {
       select: 'id,item_id,ref_type,ref_no,qty_in,qty_out,rate,value,batch_no,location,department',
       filters: { id: 'eq.' + ledgerId },
       limit: 1
     }) || [])[0];
     if (!ledger) return;
 
-    const allocations = supabaseSelect('inv_lot_allocations', {
+    const allocations = supabaseSelect_('inv_lot_allocations', {
       select: 'qty,rate',
       filters: { ledger_id: 'eq.' + ledgerId },
       limit: 5000
@@ -25882,7 +27210,7 @@ function _invRecalculateAllocatedLedgerValues_(ledgerIds) {
     const oldValue = Number(ledger.value || 0);
     const newValue = _invLedgerValueForRate_(ledger, newRate);
 
-    supabaseUpdateMinimal('inv_ledger', { id: 'eq.' + ledgerId }, {
+    supabaseUpdateMinimal_('inv_ledger', { id: 'eq.' + ledgerId }, {
       rate: newRate,
       value: newValue
     });
@@ -25908,7 +27236,7 @@ function _invTryUpdateLinkedPOReceiptRate_(sourceLedger, item, newRate) {
   if (String(sourceLedger?.ref_type || '').trim().toUpperCase() !== 'PO-RECEIPT') return null;
   const match = invFindMatchingPOReceiptRecord_(sourceLedger, item?.item_code || '', null);
   if (!match || !match.row || !match.row.id) return null;
-  supabaseUpdateMinimal('purchase_po_receipts', { id: 'eq.' + String(match.row.id || '').trim() }, {
+  supabaseUpdateMinimal_('purchase_po_receipts', { id: 'eq.' + String(match.row.id || '').trim() }, {
     rate: Number(newRate || 0),
     updated_at: _purchaseNowIso_()
   });
@@ -25989,18 +27317,18 @@ function invApplyRateCorrection(payload, token) {
   const sourceValueNew = _invLedgerValueForRate_(sourceLedger, newRate);
   const stamp = new Date().toISOString();
 
-  supabaseUpdateMinimal('inv_ledger', { id: 'eq.' + sourceLedger.id }, {
+  supabaseUpdateMinimal_('inv_ledger', { id: 'eq.' + sourceLedger.id }, {
     rate: newRate,
     value: sourceValueNew
   });
 
-  supabaseUpdateMinimal('inv_lots', { id: 'eq.' + preview.lotId }, {
+  supabaseUpdateMinimal_('inv_lots', { id: 'eq.' + preview.lotId }, {
     rate: newRate
   });
 
   const allocations = _invLotAllocationsForRateCorrection_(preview.lotId);
   if (allocations.length) {
-    supabaseUpdateMinimal('inv_lot_allocations', { lot_id: 'eq.' + preview.lotId }, {
+    supabaseUpdateMinimal_('inv_lot_allocations', { lot_id: 'eq.' + preview.lotId }, {
       rate: newRate
     });
   }
@@ -26008,7 +27336,7 @@ function invApplyRateCorrection(payload, token) {
   const affectedLedgers = _invRecalculateAllocatedLedgerValues_(preview.affectedLedgerIds || []);
   const linkedPOReceipt = _invTryUpdateLinkedPOReceiptRate_(sourceLedger, item, newRate);
 
-  supabaseInsertMinimal('inv_rate_corrections', {
+  supabaseInsertMinimal_('inv_rate_corrections', {
     id: Utilities.getUuid(),
     source_ledger_id: sourceLedger.id,
     lot_id: preview.lotId,
@@ -26331,7 +27659,7 @@ function invGetStockSnapshotJSON(opts = {}) {
   }
 
   try {
-    const uiRows = supabaseRpc('inv_stock_snapshot_ui', {
+    const uiRows = supabaseRpc_('inv_stock_snapshot_ui', {
       p_location: opts.location || null,
       p_search: opts.q || null,
       p_limit: snapshotLimit
@@ -26384,7 +27712,7 @@ function invGetStockSnapshotJSON(opts = {}) {
   const now = new Date();
   const consumptionCutoff = new Date(now.getTime() - (CONSUMPTION_WINDOW_DAYS * 24 * 60 * 60 * 1000));
 
-  const snapshotRows = (supabaseRpc('inv_stock_snapshot_mv', {
+  const snapshotRows = (supabaseRpc_('inv_stock_snapshot_mv', {
     p_location: opts.location || null,
     p_search: opts.q || null
   }) || [])
@@ -26498,7 +27826,7 @@ function invGetStockSnapshotJSON(opts = {}) {
     for (let i = 0; i < itemIds.length; i += chunkSize) {
       const chunk = itemIds.slice(i, i + chunkSize);
 
-      const lotRows = supabaseSelect('inv_lots', {
+      const lotRows = supabaseSelect_('inv_lots', {
         select: 'item_id,batch_no,receipt_date,qty_available',
         filters: {
           item_id: _supabaseInFilter_(chunk),
@@ -26527,7 +27855,7 @@ function invGetStockSnapshotJSON(opts = {}) {
         }
       });
 
-      const issueRows = supabaseSelect('inv_ledger', {
+      const issueRows = supabaseSelect_('inv_ledger', {
         select: 'item_id, qty_out',
         filters: {
           item_id: _supabaseInFilter_(chunk),
@@ -26542,7 +27870,7 @@ function invGetStockSnapshotJSON(opts = {}) {
           (consumptionMap[entry.item_id] || 0) + Number(entry.qty_out || 0);
       });
 
-      const receiptRows = supabaseSelect('inv_ledger', {
+      const receiptRows = supabaseSelect_('inv_ledger', {
         select: 'item_id, created_at, ref_no',
         filters: {
           item_id: _supabaseInFilter_(chunk),
@@ -26571,7 +27899,7 @@ function invGetStockSnapshotJSON(opts = {}) {
       const prChunkSize = 200;
       for (let j = 0; j < receiptPrNosAll.length; j += prChunkSize) {
         const prChunk = receiptPrNosAll.slice(j, j + prChunkSize);
-        const purchaseRequests = supabaseSelect('inv_purchase_requests', {
+        const purchaseRequests = supabaseSelect_('inv_purchase_requests', {
           select: 'item_id, pr_no, created_at',
           filters: {
             pr_no: _supabaseInFilter_(prChunk)
@@ -26724,7 +28052,7 @@ function _invMapReplenishmentSqlRow_(row) {
 }
 
 function _invReadReplenishmentRowsFromSupabase_(request) {
-  const rows = supabaseRpc('inv_replenishment_snapshot_ui', {
+  const rows = supabaseRpc_('inv_replenishment_snapshot_ui', {
     p_search: request && request.q ? String(request.q || '').trim() : null,
     p_alert: request && request.alert ? String(request.alert || '').trim() : null,
     p_limit: Math.max(1, Number(request && request.limit || 50000) || 50000)
@@ -26979,13 +28307,17 @@ function invGetReplenishmentSnapshotJSON(opts = {}) {
   };
 }
 
-function invCreateReplenishmentPRs(payload) {
+function invCreateReplenishmentPRs(payload, token) {
+  const sessionUser = _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+    { module: 'INVENTORY', action: 'can_create' },
+    { module: 'PURCHASE', action: 'can_create' }
+  ]);
   const selectedCodes = [...new Set((Array.isArray(payload && payload.itemCodes) ? payload.itemCodes : [])
     .map(function(code) { return _invNormalizeStockItemCode_(code); })
     .filter(Boolean))];
   if (!selectedCodes.length) throw new Error('Select at least one replenishment item.');
 
-  const reviewedBy = String((payload && payload.reviewedBy) || 'Stores').trim() || 'Stores';
+  const reviewedBy = _authActorName_(sessionUser);
   const request = {
     q: '',
     location: payload && payload.location || '',
@@ -27035,7 +28367,7 @@ function invCreateReplenishmentPRs(payload) {
   const result = invCreatePurchaseRequestsBulk({
     requestKey: requestKey,
     rows: rows
-  });
+  }, token);
   PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
   PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
   return Object.assign({}, result, {
@@ -27064,7 +28396,7 @@ function _fgMissingTable_(err, tableName) {
 
 function _fgSafeSelect_(tableName, opts) {
   try {
-    return supabaseSelect(tableName, opts || {}) || [];
+    return supabaseSelect_(tableName, opts || {}) || [];
   } catch (err) {
     if (_fgMissingTable_(err, tableName)) return [];
     throw err;
@@ -27082,7 +28414,7 @@ function _fgSafeSelectByKeyInBatches_(tableName, select, key, values, order, chu
 
 function _fgRequireTable_(tableName) {
   try {
-    supabaseSelect(tableName, { select: 'id', limit: 1 });
+    supabaseSelect_(tableName, { select: 'id', limit: 1 });
   } catch (err) {
     if (_fgMissingTable_(err, tableName)) {
       throw new Error('Missing Supabase table "' + tableName + '". Apply supabase_fg_stock_module.sql first.');
@@ -27134,7 +28466,7 @@ function fgGetBootstrap(token) {
 }
 
 function _fgGetDetailRowsFromView_() {
-  const rows = supabaseSelect('v_fg_stock_available', {
+  const rows = supabaseSelect_('v_fg_stock_available', {
     select: 'row_id,source_type,pack_id,opening_id,so_id,so_line_id,so_number,line_no,client_code,client_name,product_code,product_name,uom,opening_qty,packed_qty,billed_qty,adjusted_qty,available_qty,billable_qty,stock_date,latest_adjustment_reason,latest_adjustment_remarks,latest_adjustment_at,remarks',
     order: 'stock_date.desc',
     limit: 5000
@@ -27307,7 +28639,7 @@ function fgSaveOpeningStock(payload, token) {
   const stockDate = p.openingDate ? new Date(p.openingDate) : new Date();
   if (isNaN(stockDate.getTime())) throw new Error('Opening date is invalid.');
 
-  supabaseInsert('fg_opening_stock', {
+  supabaseInsert_('fg_opening_stock', {
     client_code: String(p.clientCode || '').trim(),
     client_name: String(p.clientName || p.clientCode || '').trim(),
     product_code: String(p.productCode || '').trim(),
@@ -27351,7 +28683,7 @@ function fgSaveOpeningDispatch(payload, token) {
   const dispatchDate = p.dispatchDate ? new Date(p.dispatchDate) : new Date();
   if (isNaN(dispatchDate.getTime())) throw new Error('Dispatch date is invalid.');
 
-  supabaseInsert('fg_opening_dispatch_entries', {
+  supabaseInsert_('fg_opening_dispatch_entries', {
     opening_id: opening.id,
     client_code: opening.client_code || '',
     client_name: opening.client_name || '',
@@ -27419,7 +28751,7 @@ function fgSaveStockAdjustment(payload, token) {
     const billedQty = _fgQty_((usage[String(pack.so_line_id || '')] || {}).billedQty);
     const available = Math.max(_fgQty_(pack.packed_qty) - billedQty - priorAdjustments, 0);
     if (qty > available) throw new Error('Adjustment qty cannot exceed available FG balance.');
-    supabaseInsert('fg_stock_adjustments', {
+    supabaseInsert_('fg_stock_adjustments', {
       source_type: 'PACKED',
       pack_id: pack.id,
       opening_id: null,
@@ -27452,7 +28784,7 @@ function fgSaveStockAdjustment(payload, token) {
     }).reduce(function(sum, row) { return sum + _fgQty_(row.adjustment_qty); }, 0);
     const available = Math.max(_fgQty_(opening.opening_qty) - priorAdjustments, 0);
     if (qty > available) throw new Error('Adjustment qty cannot exceed available FG opening balance.');
-    supabaseInsert('fg_stock_adjustments', {
+    supabaseInsert_('fg_stock_adjustments', {
       source_type: 'OPENING',
       pack_id: null,
       opening_id: opening.id,
@@ -27490,7 +28822,7 @@ function fgPostPackedDispatch(payload, token) {
     lrNo: String(p.lrNo || '').trim(),
     vehicleNo: String(p.vehicleNo || '').trim(),
     dispatchDate: String(p.dispatchDate || '').trim()
-  }]);
+  }], token);
 }
 
 /****************************************************
@@ -27658,7 +28990,7 @@ function _billingSearchClientRows_(query, limit) {
   const q = String(query || '').trim().replace(/[(),]/g, ' ');
   const cappedLimit = Math.min(Math.max(Number(limit || 80), 1), 200);
   try {
-    return supabaseRpc('billing_client_search', {
+    return supabaseRpc_('billing_client_search', {
       p_q: q || null,
       p_limit: cappedLimit
     }) || [];
@@ -28136,7 +29468,7 @@ function _billingListInvoicesFast_(params, token) {
     };
   };
   try {
-    const rows = supabaseRpc('billing_document_register_v4', {
+    const rows = supabaseRpc_('billing_document_register_v4', {
       p_date_from: p.dateFrom || null,
       p_date_to: p.dateTo || null,
       p_status: p.status || 'ALL',
@@ -28151,7 +29483,7 @@ function _billingListInvoicesFast_(params, token) {
     console.warn('billing_document_register_v4 unavailable; trying v3/legacy register fast paths', rpcV4Err && rpcV4Err.message ? rpcV4Err.message : rpcV4Err);
   }
   try {
-    const rows = supabaseRpc('billing_document_register_v3', {
+    const rows = supabaseRpc_('billing_document_register_v3', {
       p_date_from: p.dateFrom || null,
       p_date_to: p.dateTo || null,
       p_status: p.status || 'ALL',
@@ -28184,7 +29516,7 @@ function _billingListInvoicesFast_(params, token) {
         'remarks.ilike.' + term
       ].join(',') + ')';
     }
-    const rows = supabaseSelect('v_billing_document_register', {
+    const rows = supabaseSelect_('v_billing_document_register', {
       select: 'id,invoice_no,invoice_date,document_type,client_code,client_name,status,billing_mode,total_qty,line_count,product_preview,remarks,subtotal,tax_total,grand_total,created_at,posted_at,sort_ts',
       filters: filters,
       order: 'invoice_date.desc,sort_ts.desc,invoice_no.desc',
@@ -28198,7 +29530,7 @@ function _billingListInvoicesFast_(params, token) {
   } catch (viewErr) {
   }
   try {
-    const rows = supabaseRpc('billing_document_register_v2', {
+    const rows = supabaseRpc_('billing_document_register_v2', {
       p_date_from: p.dateFrom || null,
       p_date_to: p.dateTo || null,
       p_status: p.status || 'ALL',
@@ -28231,7 +29563,7 @@ function _billingListInvoicesFast_(params, token) {
     };
   } catch (err) {
     try {
-      const rows = supabaseRpc('billing_invoice_register', {
+      const rows = supabaseRpc_('billing_invoice_register', {
         p_date_from: p.dateFrom || null,
         p_date_to: p.dateTo || null,
         p_status: p.status || 'ALL',
@@ -28279,7 +29611,7 @@ function _billingSelectInvoiceRegisterRows_(filters, order, limit) {
   let lastErr = null;
   for (let i = 0; i < tries.length; i++) {
     try {
-      return supabaseSelect('invoices', {
+      return supabaseSelect_('invoices', {
         select: tries[i],
         filters: filters,
         order: order,
@@ -28429,7 +29761,7 @@ function _billingGetAdvancePaymentMapBySoNumbers_(soNumbers) {
   for (let i = 0; i < soList.length; i += 40) {
     const chunk = soList.slice(i, i + 40);
     try {
-      const rows = supabaseSelect('sales_orders', {
+      const rows = supabaseSelect_('sales_orders', {
         select: 'so_number,advance_payment_required,advance_payment_received',
         filters: { so_number: _supabaseInFilter_(chunk) }
       }) || [];
@@ -28519,7 +29851,7 @@ function _billingEnrichFastDatasetRows_(rows) {
   }).filter(Boolean))];
   const itemHsnMap = {};
   if (missingCodes.length) {
-    (supabaseSelect('items', {
+    (supabaseSelect_('items', {
       select: 'item_code,hsn_group',
       filters: { item_code: 'in.(' + missingCodes.join(',') + ')' }
     }) || []).forEach(function(row) {
@@ -28604,7 +29936,7 @@ function _billingTryFastDatasetRows_(params) {
   const p = params || {};
   if (!p.clientCode) return null;
   try {
-    const rows = supabaseRpc('billing_job_dataset', {
+    const rows = supabaseRpc_('billing_job_dataset', {
       p_client_code: p.clientCode,
       p_so_number: p.soNumber || null,
       p_mode: _billingNormalizeMode_(p.mode),
@@ -28622,7 +29954,7 @@ function _billingTryDatasetV4_(params, includeRows) {
   const p = params || {};
   if (!p.clientCode) return null;
   try {
-    const res = supabaseRpc('billing_job_dataset_v4', {
+    const res = supabaseRpc_('billing_job_dataset_v4', {
       p_client_code: p.clientCode,
       p_so_number: p.soNumber || null,
       p_mode: _billingNormalizeMode_(p.mode),
@@ -28936,7 +30268,7 @@ function billingHealthCheck(token) {
     }
   };
   try {
-    out.supabase = supabaseRpc('billing_health_check_v4', {}) || null;
+    out.supabase = supabaseRpc_('billing_health_check_v4', {}) || null;
   } catch (err) {
     out.supabase = {
       ok: false,
@@ -29023,7 +30355,7 @@ function _billingInsertWithFallback_(table, payload, optionalKeys) {
   let current = Object.assign({}, payload);
   while (true) {
     try {
-      return supabaseInsert(table, current);
+      return supabaseInsert_(table, current);
     } catch (err) {
       const missing = _billingMatchMissingColumn_(err && err.message, table, safeKeys);
       if (!missing) throw err;
@@ -29039,7 +30371,7 @@ function _billingUpsertWithFallback_(table, payload, optionalKeys, options) {
   let current = Object.assign({}, payload);
   while (true) {
     try {
-      return supabaseUpsert(table, current, options || {});
+      return supabaseUpsert_(table, current, options || {});
     } catch (err) {
       const missing = _billingMatchMissingColumn_(err && err.message, table, safeKeys);
       if (!missing) throw err;
@@ -29074,7 +30406,7 @@ function _billingReplaceInvoiceLines_(invoiceId, rows, optionalLineFields) {
     if (soLineId) desiredSoLineIds[soLineId] = true;
   });
   try {
-    supabaseRpc('billing_replace_invoice_lines', {
+    supabaseRpc_('billing_replace_invoice_lines', {
       p_invoice_id: id,
       p_lines: inserts.map(function(row) {
         return {
@@ -29117,13 +30449,13 @@ function _billingReplaceInvoiceLines_(invoiceId, rows, optionalLineFields) {
     );
     if (!missingRpc) throw rpcErr;
   }
-  supabaseDelete('invoice_lines', { invoice_id: 'eq.' + id });
+  supabaseDelete_('invoice_lines', { invoice_id: 'eq.' + id });
   inserts.forEach(function(row) {
     const soLineId = String(row && row.so_line_id || '').trim();
     if (soLineId) {
       // Defensive cleanup for edited posted invoices: old line may survive a broad delete
       // if the document was partially corrected outside the app.
-      supabaseDeleteMinimal('invoice_lines', {
+      supabaseDeleteMinimal_('invoice_lines', {
         invoice_id: 'eq.' + id,
         so_line_id: 'eq.' + soLineId
       });
@@ -29132,7 +30464,7 @@ function _billingReplaceInvoiceLines_(invoiceId, rows, optionalLineFields) {
     }
     _billingInsertWithFallback_('invoice_lines', row, optionalLineFields);
   });
-  const afterRows = supabaseSelect('invoice_lines', {
+  const afterRows = supabaseSelect_('invoice_lines', {
     select: 'id,so_line_id',
     filters: { invoice_id: 'eq.' + id },
     limit: 1000
@@ -29142,17 +30474,17 @@ function _billingReplaceInvoiceLines_(invoiceId, rows, optionalLineFields) {
     return soLineId && !desiredSoLineIds[soLineId];
   });
   staleRows.forEach(function(row) {
-    supabaseDeleteMinimal('invoice_lines', { id: 'eq.' + row.id });
+    supabaseDeleteMinimal_('invoice_lines', { id: 'eq.' + row.id });
     const soLineId = String(row && row.so_line_id || '').trim();
     if (soLineId) {
-      supabaseDeleteMinimal('invoice_lines', {
+      supabaseDeleteMinimal_('invoice_lines', {
         invoice_id: 'eq.' + id,
         so_line_id: 'eq.' + soLineId
       });
     }
   });
   const finalRows = staleRows.length
-    ? (supabaseSelect('invoice_lines', {
+    ? (supabaseSelect_('invoice_lines', {
         select: 'id,so_line_id',
         filters: { invoice_id: 'eq.' + id },
         limit: 1000
@@ -29175,7 +30507,7 @@ function _billingUpdateWithFallback_(table, filters, payload, optionalKeys) {
   let current = Object.assign({}, payload);
   while (true) {
     try {
-      return supabaseUpdate(table, filters, current);
+      return supabaseUpdate_(table, filters, current);
     } catch (err) {
       const missing = _billingMatchMissingColumn_(err && err.message, table, safeKeys);
       if (!missing) throw err;
@@ -29233,7 +30565,7 @@ function _billingNormalizeGeneratedDocumentNo_(documentType, value) {
 function _billingDocumentNoExists_(invoiceNo) {
   const key = String(invoiceNo || '').trim();
   if (!key) return false;
-  const rows = supabaseSelect('invoices', {
+  const rows = supabaseSelect_('invoices', {
     select: 'id',
     filters: { invoice_no: 'eq.' + key },
     limit: 1
@@ -29305,7 +30637,7 @@ function _billingGenerateDocumentNo_(documentType, invoiceDate, skipNumbers) {
   const parts = _billingDocumentNoParts_(documentType, invoiceDate);
   const skipMap = _billingDocumentNoSkipMap_(skipNumbers);
   try {
-    const rpcRes = supabaseRpc('get_next_invoice_no', {
+    const rpcRes = supabaseRpc_('get_next_invoice_no', {
       p_prefix: parts.prefix,
       p_invoice_date: parts.dateText
     });
@@ -29362,7 +30694,7 @@ function _billingGenerateManualSoNumber_(invoiceDate) {
   } catch (err) {}
 
   const fy = getFinancialYear(new Date(dateText));
-  const rows = supabaseSelect('sales_orders', {
+  const rows = supabaseSelect_('sales_orders', {
     select: 'so_number',
     order: 'so_number.desc',
     limit: 500
@@ -29423,7 +30755,7 @@ function invGetGRNPrintData(grnNo) {
   const key = String(grnNo || '').trim();
   if (!key) throw new Error('GRN number is required');
 
-  const rows = supabaseSelect('inv_ledger', {
+  const rows = supabaseSelect_('inv_ledger', {
     select: `
       id,
       item_id,
@@ -29483,7 +30815,7 @@ function invGetGRNPrintData(grnNo) {
   if (missingItemIds.length) {
     for (let i = 0; i < missingItemIds.length; i += 20) {
       const chunk = missingItemIds.slice(i, i + 20);
-      const itemRows = supabaseSelect('inv_items', {
+      const itemRows = supabaseSelect_('inv_items', {
         select: 'id,item_code,item_name,uom,category',
         filters: { id: _supabaseInFilter_(chunk) }
       }) || [];
@@ -29642,7 +30974,7 @@ function _billingCloseManualSalesOrderLines_(lineIds, user) {
 
   _supabaseChunkValuesByFilterLength_(ids, 1200, 40).forEach(function(chunk) {
     try {
-      supabaseUpdateMinimal('sales_order_lines', { id: _supabaseInFilter_(chunk) }, payload);
+      supabaseUpdateMinimal_('sales_order_lines', { id: _supabaseInFilter_(chunk) }, payload);
     } catch (err) {
       const msg = String((err && err.message) || err || '');
       const missingLifecycleColumn = ['status', 'closed_at', 'closed_by', 'status_updated_at'].some(function(key) {
@@ -29672,9 +31004,9 @@ function _billingCreateOrUpdateManualSalesOrder_(options) {
   const lineRows = _billingManualSalesOrderLineRows_(opts.manualLines, opts.selectedBillTo?.state || '').map(function(row) {
     return Object.assign({ so_id: soId }, row);
   });
-  let inserted = supabaseBulkInsert('sales_order_lines', lineRows) || [];
+  let inserted = supabaseBulkInsert_('sales_order_lines', lineRows) || [];
   if (!inserted.length || inserted.some(function(row) { return !row || !row.id; })) {
-    inserted = supabaseSelect('sales_order_lines', {
+    inserted = supabaseSelect_('sales_order_lines', {
       select: 'id,so_id,line_no,product_code,product_name,qty,unit,rate,gst_pct,amount,cgst,sgst,igst,line_total,prepress_remarks,division',
       filters: { so_id: 'eq.' + soId },
       order: 'line_no.asc'
@@ -29884,7 +31216,7 @@ function _billingTrySelectedDatasetRowMapV4_(lines, headerMode) {
   const rowMap = {};
   try {
     Object.keys(byMode).forEach(function(mode) {
-      const rows = supabaseRpc('billing_selected_job_rows_v4', {
+      const rows = supabaseRpc_('billing_selected_job_rows_v4', {
         p_so_line_ids: byMode[mode],
         p_mode: mode
       }) || [];
@@ -30676,7 +32008,7 @@ function _billingDeleteSyntheticManualSalesOrders_(manualSoMap) {
     const row = manualSoMap[soId] || {};
     if (!_billingIsSyntheticManualSalesOrder_(row)) return;
     try {
-      const linked = supabaseSelect('invoice_lines', {
+      const linked = supabaseSelect_('invoice_lines', {
         select: 'id',
         filters: { so_id: 'eq.' + soId },
         limit: 1
@@ -30686,10 +32018,10 @@ function _billingDeleteSyntheticManualSalesOrders_(manualSoMap) {
       return;
     }
     try {
-      supabaseDelete('sales_order_lines', { so_id: 'eq.' + soId });
+      supabaseDelete_('sales_order_lines', { so_id: 'eq.' + soId });
     } catch (err) {}
     try {
-      supabaseDelete('sales_orders', { id: 'eq.' + soId });
+      supabaseDelete_('sales_orders', { id: 'eq.' + soId });
     } catch (err) {}
   });
 }
@@ -30698,12 +32030,12 @@ function deleteInvoiceDraft(invoiceId, token) {
   const user = _requireModuleAccess_(token, 'BILLING', 'can_edit');
   if (!invoiceId) throw new Error('InvoiceId required');
 
-  const inv = (supabaseSelect('invoices', {
+  const inv = (supabaseSelect_('invoices', {
     filters: { id: 'eq.' + invoiceId },
     limit: 1
   }) || [])[0];
   if (!inv) throw new Error('Invoice not found');
-  const lines = supabaseSelect('invoice_lines', {
+  const lines = supabaseSelect_('invoice_lines', {
     filters: { invoice_id: 'eq.' + invoiceId }
   }) || [];
   if (String(inv.status || '').toUpperCase() === 'POSTED') {
@@ -30730,9 +32062,9 @@ function deleteInvoiceDraft(invoiceId, token) {
     }
   });
 
-  try { supabaseDelete('invoice_audit_log', { invoice_id: 'eq.' + invoiceId }); } catch (err) {}
-  supabaseDelete('invoice_lines', { invoice_id: 'eq.' + invoiceId });
-  supabaseDelete('invoices', { id: 'eq.' + invoiceId });
+  try { supabaseDelete_('invoice_audit_log', { invoice_id: 'eq.' + invoiceId }); } catch (err) {}
+  supabaseDelete_('invoice_lines', { invoice_id: 'eq.' + invoiceId });
+  supabaseDelete_('invoices', { id: 'eq.' + invoiceId });
   _billingDeleteSyntheticManualSalesOrders_(manualSoMap);
 
   return { ok: true, invoiceId: invoiceId };
@@ -30742,7 +32074,7 @@ function deletePostedInvoiceAdmin(invoiceId, token) {
   const admin = _requireAdmin_(token);
   if (!invoiceId) throw new Error('InvoiceId required');
 
-  const inv = (supabaseSelect('invoices', {
+  const inv = (supabaseSelect_('invoices', {
     filters: { id: 'eq.' + invoiceId },
     limit: 1
   }) || [])[0];
@@ -30751,7 +32083,7 @@ function deletePostedInvoiceAdmin(invoiceId, token) {
     throw new Error('Only posted documents can be deleted from this action.');
   }
 
-  const lines = supabaseSelect('invoice_lines', {
+  const lines = supabaseSelect_('invoice_lines', {
     filters: { invoice_id: 'eq.' + invoiceId }
   }) || [];
   const manualSoMap = _billingCollectSyntheticManualSalesOrders_(lines);
@@ -30773,10 +32105,10 @@ function deletePostedInvoiceAdmin(invoiceId, token) {
     }
   });
 
-  supabaseUpdate('invoices', { id: 'eq.' + invoiceId }, { status: 'CANCELLED' });
-  try { supabaseDelete('invoice_audit_log', { invoice_id: 'eq.' + invoiceId }); } catch (err) {}
-  supabaseDelete('invoice_lines', { invoice_id: 'eq.' + invoiceId });
-  supabaseDelete('invoices', { id: 'eq.' + invoiceId });
+  supabaseUpdate_('invoices', { id: 'eq.' + invoiceId }, { status: 'CANCELLED' });
+  try { supabaseDelete_('invoice_audit_log', { invoice_id: 'eq.' + invoiceId }); } catch (err) {}
+  supabaseDelete_('invoice_lines', { invoice_id: 'eq.' + invoiceId });
+  supabaseDelete_('invoices', { id: 'eq.' + invoiceId });
   _billingDeleteSyntheticManualSalesOrders_(manualSoMap);
 
   return {
@@ -30791,7 +32123,7 @@ function reopenPostedInvoiceAdmin(invoiceId, token) {
   const admin = _requireAdmin_(token);
   if (!invoiceId) throw new Error('InvoiceId required');
 
-  const inv = (supabaseSelect('invoices', {
+  const inv = (supabaseSelect_('invoices', {
     filters: { id: 'eq.' + invoiceId },
     limit: 1
   }) || [])[0];
@@ -30808,7 +32140,7 @@ function reopenPostedInvoiceAdmin(invoiceId, token) {
   const auditAfter = _billingAuditInvoiceSnapshot_(invoiceId);
 
   try {
-    supabaseInsert('invoice_audit_log', {
+    supabaseInsert_('invoice_audit_log', {
       invoice_id: invoiceId,
       action: 'REOPENED_FOR_ADMIN_EDIT',
       actor: String(admin.userId || admin.displayName || Session.getActiveUser()?.getEmail?.() || 'ADMIN'),
@@ -31346,13 +32678,13 @@ function previewInvoicePDF(invoiceId, token, options) {
   if (!invoiceId) throw new Error('InvoiceId required');
   let inv = {};
   try {
-    inv = (supabaseSelect('invoices', {
+    inv = (supabaseSelect_('invoices', {
       select: 'id,invoice_no,document_type',
       filters: { id: 'eq.' + invoiceId },
       limit: 1
     }) || [])[0] || {};
   } catch (err) {
-    inv = (supabaseSelect('invoices', {
+    inv = (supabaseSelect_('invoices', {
       select: 'id,invoice_no',
       filters: { id: 'eq.' + invoiceId },
       limit: 1
@@ -31363,14 +32695,14 @@ function previewInvoicePDF(invoiceId, token, options) {
 
 
 function _invLoadInvoice_(invoiceId) {
-  const inv = supabaseSelect('invoices', {
+  const inv = supabaseSelect_('invoices', {
     filters: { id: 'eq.' + invoiceId },
     limit: 1
   })[0];
 
   if (!inv) throw new Error('Invoice not found');
 
-  const lines = supabaseSelect('invoice_lines', {
+  const lines = supabaseSelect_('invoice_lines', {
     filters: { invoice_id: 'eq.' + invoiceId }
   }) || [];
 
@@ -31389,7 +32721,7 @@ function _billingAuditInvoiceSnapshot_(invoiceId) {
 function _billingTryPostInvoiceV4_(invoiceId, token, documentType) {
   try {
     const actor = String(Session.getActiveUser()?.getEmail?.() || 'system');
-    const res = supabaseRpc('billing_post_invoice_v4', {
+    const res = supabaseRpc_('billing_post_invoice_v4', {
       p_invoice_id: invoiceId,
       p_actor: actor
     });
@@ -31482,7 +32814,7 @@ function postInvoice(invoiceId) {
   }, ['subtotal','tax_total','grand_total','freight','freight_gst_pct','posted_at']);
 
   try {
-    supabaseInsert('invoice_audit_log', {
+    supabaseInsert_('invoice_audit_log', {
       invoice_id: invoiceId,
       action: 'POSTED',
       actor: Session.getActiveUser()?.getEmail?.() || 'system',
@@ -31728,14 +33060,15 @@ function amountInWords(num) {
   return inWords(Math.floor(num)).trim() + ' Only';
 }
 
-function savePackingBulk(entries){
+function savePackingBulk(entries, token){
+  _requireModuleAccess_(token, 'PACKING', 'can_edit');
 
   if(!entries?.length)
     throw new Error('No packing entries');
 
   const packIds = [...new Set(entries.map(e => e.packId).filter(Boolean))];
   const boardRows = packIds.length
-    ? (supabaseSelect('v_packing_board',{
+    ? (supabaseSelect_('v_packing_board',{
         filters:{ pack_id:'in.(' + packIds.join(',') + ')' }
       }) || [])
     : [];
@@ -31771,20 +33104,21 @@ function savePackingBulk(entries){
 
 }
 
-function saveDispatchBulk(entries){
+function saveDispatchBulk(entries, token){
+  _requireModuleAccess_(token, 'DISPATCH', 'can_edit');
 
   if(!entries?.length)
     throw new Error('No dispatch entries');
 
   const dispatchNo =
-  supabaseRpc('get_next_dispatch_no',{})?.[0]?.get_next_dispatch_no;
+  supabaseRpc_('get_next_dispatch_no',{})?.[0]?.get_next_dispatch_no;
 
   if(!dispatchNo)
     throw new Error('Dispatch number failed');
 
   const packIds = [...new Set(entries.map(e => e.packId).filter(Boolean))];
   const packRows = packIds.length
-    ? (supabaseSelect('packing_records',{
+    ? (supabaseSelect_('packing_records',{
         filters:{ id:'in.(' + packIds.join(',') + ')' }
       }) || [])
     : [];
@@ -31795,7 +33129,7 @@ function saveDispatchBulk(entries){
 
   const soLineIds = [...new Set(packRows.map(row => row.so_line_id).filter(Boolean))];
   const existingDispatchRows = soLineIds.length
-    ? (supabaseSelect('dispatch_records',{
+    ? (supabaseSelect_('dispatch_records',{
         select:'so_line_id,dispatch_qty',
         filters:{ so_line_id:'in.(' + soLineIds.join(',') + ')' }
       }) || [])
@@ -31846,7 +33180,7 @@ function saveDispatchBulk(entries){
   });
 
   if (inserts.length) {
-    supabaseBulkInsertMinimal('dispatch_records', inserts);
+    supabaseBulkInsertMinimal_('dispatch_records', inserts);
     _opsBumpDatasetVersion_();
     _invBumpStockSnapshotVersion_();
   }
@@ -32143,12 +33477,15 @@ function _prodEntryMatchesRowIdentity_(entry, rowIdentity) {
   const targetJobReference = String(rowIdentity?.jobReference || '').trim();
   const targetSoNumber = String(rowIdentity?.soNumber || '').trim();
   const targetLineNo = String(rowIdentity?.lineNo || '').trim();
+  if (targetSoNumber && targetLineNo && soNumber && lineNo) {
+    return soNumber === targetSoNumber && lineNo === targetLineNo;
+  }
   if (targetJobReference && jobReference) return jobReference === targetJobReference;
-  return soNumber === targetSoNumber && lineNo === targetLineNo;
+  return false;
 }
 
 function _prodQueueVersion_() {
-  return (PropertiesService.getScriptProperties().getProperty('PROD_QUEUE_VERSION') || '0') + '|corr2ply-sheetplan-v11';
+  return (PropertiesService.getScriptProperties().getProperty('PROD_QUEUE_VERSION') || '0') + '|corr2ply-sheetplan-v12-job-line';
 }
 
 function _prodBumpQueueVersion_() {
@@ -32769,7 +34106,7 @@ function _prodGetStageRowsFastResult_(params) {
     filters.wo_date = 'lte.' + dateTo;
   }
 
-  const rows = _prodEnrichCorrugationFinalStageFlags_(_prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(supabaseSelect('v_production_stage_rows_fast', {
+  const rows = _prodEnrichCorrugationFinalStageFlags_(_prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(supabaseSelect_('v_production_stage_rows_fast', {
     select: 'row_key,row_kind,row_description,plan_unit,wo_id,wo_date,routing_id,wo_number,so_numbers,so_number_display,so_number,line_no,job_reference,job_ups,client_name,product_name,product_names,artwork_no,artwork_nos,process_name,process_display_name,department,planned_machine,sequence_no,expected_delivery,job_priority,department_category,planned_qty,produced_qty,balance_qty,status',
     filters: filters,
     order: 'wo_date.desc,wo_number.asc,sequence_no.asc,row_sort.asc,job_sort.asc',
@@ -32810,7 +34147,7 @@ function _prodGetStageRowsFastResult_(params) {
 }
 
 function _prodGetStageRowsForWoFast_(woId) {
-  return _prodEnrichCorrugationFinalStageFlags_(_prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(supabaseSelect('v_production_stage_rows_fast', {
+  return _prodEnrichCorrugationFinalStageFlags_(_prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(supabaseSelect_('v_production_stage_rows_fast', {
     select: 'row_key,row_kind,row_description,plan_unit,wo_id,wo_date,routing_id,wo_number,so_numbers,so_number_display,so_number,line_no,job_reference,job_ups,client_name,product_name,product_names,artwork_no,artwork_nos,process_name,process_display_name,department,planned_machine,sequence_no,expected_delivery,job_priority,department_category,planned_qty,produced_qty,balance_qty,status',
     filters: { wo_id: 'eq.' + woId },
     order: 'sequence_no.asc,row_sort.asc,job_sort.asc',
@@ -32842,7 +34179,7 @@ function _prodGetCandidateWoIdsFromFastView_(params) {
       filters.wo_date = 'lte.' + dateTo;
     }
 
-    const rows = supabaseSelect('v_production_stage_queue_fast', {
+    const rows = supabaseSelect_('v_production_stage_queue_fast', {
       select: 'wo_id,department_category,process_name,wo_date,status,balance_qty,sequence_no',
       filters: filters,
       order: 'wo_date.desc,sequence_no.asc',
@@ -32875,13 +34212,178 @@ function prodGetCategories(token) {
   return ['Flexo', 'Corrugation', 'Offset', 'Digital'];
 }
 
+function _prodMachineOperatorTableMissing_(err) {
+  const msg = String(err && err.message || '').toLowerCase();
+  return msg.indexOf('production_machine_operators') !== -1 && (
+    msg.indexOf('does not exist') !== -1 ||
+    msg.indexOf('could not find') !== -1 ||
+    msg.indexOf('schema cache') !== -1
+  );
+}
+
+function _prodNormalizeMachineMasterName_(value) {
+  const raw = String(value || '').trim();
+  const upper = raw.toUpperCase();
+  if (!raw) return '';
+  if (upper === 'FLEXO-6C' || upper === 'FLEXO 6C' || upper === 'FLEXO PRINTING MACHINE' || upper === 'FLEXO-CORRUGATION') return 'Markany Flexo E5';
+  if (upper === 'AUTO DIE CUTTING') return 'Automatic Die Cutting';
+  if (upper === 'WINDOW PASTING') return 'Manual Window Pasting';
+  if (upper === 'FLEXO INSPECTION/SLITTING MACHINE' || upper === 'RHYGUAN') return 'Rhyguan';
+  return raw;
+}
+
+function _prodOperatorMasterView_(row) {
+  return {
+    id: row.id || '',
+    machineName: row.machine_name || '',
+    operatorName: row.operator_name || '',
+    operatorCode: row.operator_code || '',
+    active: row.active !== false,
+    sortOrder: Number(row.sort_order || 0) || 0,
+    notes: row.notes || '',
+    updatedAt: row.updated_at || '',
+    updatedBy: row.updated_by || ''
+  };
+}
+
+function prodGetMachineOperatorMasters(token) {
+  _requireModuleAccess_(token, 'PRODUCTION', 'can_view');
+  try {
+    const rows = supabaseSelect_('production_machine_operators', {
+      select: 'id,machine_name,operator_name,operator_code,active,sort_order,notes,updated_at,updated_by',
+      order: 'machine_name.asc,active.desc,sort_order.asc,operator_name.asc',
+      limit: 5000
+    }) || [];
+    return {
+      available: true,
+      rows: rows.map(_prodOperatorMasterView_)
+    };
+  } catch (err) {
+    if (!_prodMachineOperatorTableMissing_(err)) throw err;
+    return {
+      available: false,
+      rows: [],
+      message: 'Machine operator master table is not installed yet.'
+    };
+  }
+}
+
+function prodSaveMachineOperatorMaster(payload, token) {
+  const admin = _requireAdmin_(token);
+  const p = payload || {};
+  const id = String(p.id || '').trim();
+  const machineName = _prodNormalizeMachineMasterName_(p.machineName || p.machine_name || '');
+  const operatorName = String(p.operatorName || p.operator_name || '').trim();
+  const operatorCode = String(p.operatorCode || p.operator_code || '').trim();
+  const sortOrder = Number(p.sortOrder || p.sort_order || 0) || 0;
+  const notes = String(p.notes || '').trim();
+  const active = p.active === false ? false : true;
+  if (!machineName) throw new Error('Machine is required');
+  if (!operatorName) throw new Error('Operator name is required');
+  const stamp = new Date().toISOString();
+  const actor = admin.userId || admin.displayName || Session.getActiveUser()?.getEmail?.() || 'ADMIN';
+  const row = {
+    machine_name: machineName,
+    operator_name: operatorName,
+    operator_code: operatorCode || null,
+    active: active,
+    sort_order: sortOrder,
+    notes: notes || null,
+    updated_at: stamp,
+    updated_by: actor
+  };
+  try {
+    if (id) {
+      supabaseUpdateMinimal_('production_machine_operators', { id: 'eq.' + id }, row);
+    } else {
+      supabaseInsertMinimal_('production_machine_operators', Object.assign({}, row, {
+        created_at: stamp
+      }));
+    }
+  } catch (err) {
+    if (_prodMachineOperatorTableMissing_(err)) {
+      throw new Error('Machine operator master table is not installed. Apply supabase_production_machine_operators.sql first.');
+    }
+    throw err;
+  }
+  try { CacheService.getScriptCache().remove(_prodCacheKey_('machine_operator_masters')); } catch (e) {}
+  return prodGetMachineOperatorMasters(token);
+}
+
+function prodToggleMachineOperatorMaster(id, active, token) {
+  const admin = _requireAdmin_(token);
+  const rowId = String(id || '').trim();
+  if (!rowId) throw new Error('Operator master id is required');
+  try {
+    supabaseUpdateMinimal_('production_machine_operators', { id: 'eq.' + rowId }, {
+      active: active === true,
+      updated_at: new Date().toISOString(),
+      updated_by: admin.userId || admin.displayName || Session.getActiveUser()?.getEmail?.() || 'ADMIN'
+    });
+  } catch (err) {
+    if (_prodMachineOperatorTableMissing_(err)) {
+      throw new Error('Machine operator master table is not installed. Apply supabase_production_machine_operators.sql first.');
+    }
+    throw err;
+  }
+  try { CacheService.getScriptCache().remove(_prodCacheKey_('machine_operator_masters')); } catch (e) {}
+  return prodGetMachineOperatorMasters(token);
+}
+
+function _prodGetActiveOperatorsForMachine_(machineName) {
+  const machine = _prodNormalizeMachineMasterName_(machineName || '');
+  if (!machine) return { available: true, rows: [] };
+  const cache = CacheService.getScriptCache();
+  const cacheKey = _prodCacheKey_('machine_operator_masters');
+  let rows = null;
+  try {
+    const cached = cache.get(cacheKey);
+    if (cached) rows = JSON.parse(cached);
+  } catch (e) {}
+  if (!rows) {
+    try {
+      rows = supabaseSelect_('production_machine_operators', {
+        select: 'machine_name,operator_name,operator_code,active,sort_order',
+        order: 'machine_name.asc,sort_order.asc,operator_name.asc',
+        limit: 5000
+      }) || [];
+      _prodCachePutJsonSafe_(cache, cacheKey, rows, 300);
+    } catch (err) {
+      if (_prodMachineOperatorTableMissing_(err)) return { available: false, rows: [] };
+      throw err;
+    }
+  }
+  const target = machine.toUpperCase();
+  return {
+    available: true,
+    rows: (rows || []).filter(function(row) {
+      return row.active !== false && _prodNormalizeMachineMasterName_(row.machine_name || '').toUpperCase() === target;
+    })
+  };
+}
+
+function _prodValidateMachineOperator_(machineName, operatorName) {
+  const machine = _prodNormalizeMachineMasterName_(machineName || '');
+  const operator = String(operatorName || '').trim();
+  if (!machine) return;
+  const lookup = _prodGetActiveOperatorsForMachine_(machine);
+  if (!lookup.available || !lookup.rows.length) return;
+  if (!operator) throw new Error('Select operator for ' + machine);
+  const operatorUpper = operator.toUpperCase();
+  const valid = lookup.rows.some(function(row) {
+    return String(row.operator_name || '').trim().toUpperCase() === operatorUpper ||
+      (row.operator_code && String(row.operator_code || '').trim().toUpperCase() === operatorUpper);
+  });
+  if (!valid) throw new Error('Selected operator is not active for ' + machine);
+}
+
 function prodGetCorrugationInventoryItems(token) {
   _requireModuleAccess_(token, 'PRODUCTION', 'can_view');
   const cache = CacheService.getScriptCache();
   const cacheKey = _prodCacheKey_('corr_inventory_items');
   const cached = cache.get(cacheKey);
   if (cached) return JSON.parse(cached);
-  const rows = supabaseSelect('inv_items', {
+  const rows = supabaseSelect_('inv_items', {
     select: 'item_code,item_name,uom,department,category',
     filters: { department: 'ilike.*CORRUGATION*' },
     order: 'item_name.asc',
@@ -32917,7 +34419,7 @@ function prodGetStageQueue(params, token) {
   const dateTo = _prodToDateKey_(p.dateTo);
   const cache = CacheService.getScriptCache();
   const cacheKey = _prodCacheKey_(JSON.stringify({
-    fn: 'stage_queue',
+    fn: 'stage_queue_corr_plan_v2',
     category: categoryGroup,
     processName: processName,
     q: q,
@@ -32962,7 +34464,7 @@ function prodGetStageQueue(params, token) {
     } else if (!showPendingAll && dateTo) {
       woFilters.wo_date = 'lte.' + dateTo;
     }
-    workOrders = supabaseSelect('work_orders', {
+    workOrders = supabaseSelect_('work_orders', {
       select: 'id,wo_number,wo_date,snapshot_json',
       filters: Object.keys(woFilters).length ? woFilters : undefined,
       order: 'wo_date.desc'
@@ -33134,7 +34636,7 @@ function _prodGetStoreIssuedPlanForWo_(wo, snapshot, targetUomOverride) {
   if (Object.prototype.hasOwnProperty.call(_prodGetStoreIssuedPlanForWo_._cache, cacheKey)) {
     return _prodGetStoreIssuedPlanForWo_._cache[cacheKey];
   }
-  const rows = supabaseSelect('inv_ledger', {
+  const rows = supabaseSelect_('inv_ledger', {
     select: 'id,remarks,qty_out',
     filters: {
       ref_type: 'eq.ISSUE',
@@ -33324,6 +34826,44 @@ function _prodPlanUnitForProductionStage_(routingRow, categoryGroup) {
   return 'UNITS';
 }
 
+function _prodIsCorrugationSheetPastingStage_(routingRow) {
+  const name = String(routingRow?.process_name || routingRow?.department || '').trim().toUpperCase();
+  return name.indexOf('CORRUGATION SHEET PASTING') !== -1 || name.indexOf('SHEET PASTING') !== -1;
+}
+
+function _prodIsCorrugationLayerAssemblyStage_(routingRow) {
+  return _prodIs2PlyMakingProcess_(routingRow) || _prodIsCorrugationSheetPastingStage_(routingRow);
+}
+
+function _prodIsCorrugationPreparedSheetStage_(routingRow) {
+  const name = String(routingRow?.process_name || routingRow?.department || '').trim().toUpperCase();
+  return name.indexOf('PRINT') !== -1 || name.indexOf('LAMINAT') !== -1 || name.indexOf('COAT') !== -1;
+}
+
+function _prodCorrugationPostPastingPlanQty_(routingList, currentIndex, categoryGroup, combinedTotals, stage1Plan) {
+  if (_prodNormalizeCategoryGroup_(categoryGroup) !== 'CORRUGATION') return null;
+  const list = Array.isArray(routingList) ? routingList : [];
+  const index = Number(currentIndex);
+  if (!(index > 0) || index >= list.length) return null;
+
+  const current = list[index] || {};
+  const previous = list[index - 1] || {};
+  if (!_prodIsCorrugationSheetPastingStage_(previous) || _prodIsCorrugationLayerAssemblyStage_(current)) {
+    return null;
+  }
+
+  // Corrugation layer stages can carry a multiple of the finished sheet count.
+  // Reset the first downstream operation to the last prepared top-sheet output.
+  for (let i = index - 2; i >= 0; i -= 1) {
+    const candidate = list[i] || {};
+    if (!_prodIsCorrugationPreparedSheetStage_(candidate)) continue;
+    return Number((combinedTotals || {})[String(candidate.id || '')] || 0);
+  }
+
+  // Plain corrugation jobs have no printing/lamination/coating stage.
+  return Number(stage1Plan || 0);
+}
+
 function _prodLastFlexoRmCarryQty_(routingList, currentIndex, combinedTotals, categoryGroup) {
   if (_prodNormalizeCategoryGroup_(categoryGroup) !== 'FLEXO') return 0;
   let carryQty = 0;
@@ -33349,9 +34889,12 @@ function _prodStageStatusFromQty_(routingStatus, plannedQty, producedQty) {
 }
 
 function _prodRowJobKey_(job) {
+  const soNumber = String(job?.so_number || '').trim();
+  const lineNo = String(job?.line_no || '').trim();
+  if (soNumber && lineNo) return soNumber + '||' + lineNo;
   const jobReference = String(job?.job_reference || '').trim();
   if (jobReference) return 'REF||' + jobReference;
-  return String(job?.so_number || '') + '||' + String(job?.line_no || '');
+  return soNumber + '||' + lineNo;
 }
 
 function _prodBuildTotalsFromEntryRows_(entryRows) {
@@ -33385,12 +34928,16 @@ function _prodFindMatchingJob_(jobs, payload) {
   const soNumber = String(payload?.soNumber || '').trim();
   const lineNo = String(payload?.lineNo || '').trim();
   if (!jobReference && !soNumber && !lineNo) return null;
+  if (soNumber && lineNo) {
+    const lineMatch = list.find(function(job) {
+      return String(job?.so_number || '').trim() === soNumber &&
+        String(job?.line_no || '').trim() === lineNo;
+    });
+    if (lineMatch) return lineMatch;
+  }
   return list.find(function(job) {
     const jobRef = String(job?.job_reference || '').trim();
-    const jobSo = String(job?.so_number || '').trim();
-    const jobLine = String(job?.line_no || '').trim();
-    if (jobReference && jobRef) return jobRef === jobReference;
-    return jobSo === soNumber && jobLine === lineNo;
+    return jobReference && jobRef && jobRef === jobReference;
   }) || null;
 }
 
@@ -33428,8 +34975,17 @@ function _prodGetPlannedAndProducedForEntry_(payload, routing, routingList, snap
   const isSeparatedStage = splitSeq && Number(routing?.sequence_no || 0) > splitSeq && (jobs || []).length;
 
   if (!isSeparatedStage) {
+    const corrugationPostPastingPlan = _prodCorrugationPostPastingPlanQty_(
+      list,
+      index,
+      categoryGroup,
+      combinedTotals,
+      stage1Plan
+    );
     const plannedQty = categoryGroup === 'FLEXO' && (_isInspectionSlittingProductionStage_(routing) || _isFlexoOfflineDieCutProductionStage_(routing, categoryGroup)) && index > 0
       ? _prodLastFlexoRmCarryQty_(list, index, combinedTotals, categoryGroup)
+      : corrugationPostPastingPlan !== null
+      ? corrugationPostPastingPlan
       : (index === 0
         ? stage1Plan
         : Number(combinedTotals[String(prev?.id || '')] || 0));
@@ -33516,13 +35072,13 @@ function _prodGetDetailedEntryRowById_(entryId) {
   const id = String(entryId || '').trim();
   if (!id) return null;
   try {
-    return (supabaseSelect('production_entries', {
+    return (supabaseSelect_('production_entries', {
       select: 'id,wo_id,routing_id,so_number,line_no,job_reference,entry_datetime,start_datetime,end_datetime,run_hours,downtime_minutes,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
       filters: { id: 'eq.' + id },
       limit: 1
     }) || [])[0] || null;
   } catch (err) {
-    return ((supabaseSelect('production_entries', {
+    return ((supabaseSelect_('production_entries', {
       select: 'id,wo_id,routing_id,entry_datetime,machine,operator_name,produced_qty,rejected_qty,ok_qty,downtime_reason,created_by',
       filters: { id: 'eq.' + id },
       limit: 1
@@ -33540,7 +35096,7 @@ function _supabaseBulkInsertInChunks_(table, rows, maxRows, maxPayloadChars) {
   list.forEach(function(row) {
     const candidate = current.concat([row]);
     if (current.length && (candidate.length > rowLimit || JSON.stringify(candidate).length > payloadLimit)) {
-      const result = supabaseBulkInsert(table, current) || [];
+      const result = supabaseBulkInsert_(table, current) || [];
       if (Array.isArray(result)) out.push.apply(out, result);
       current = [row];
       return;
@@ -33548,7 +35104,7 @@ function _supabaseBulkInsertInChunks_(table, rows, maxRows, maxPayloadChars) {
     current = candidate;
   });
   if (current.length) {
-    const result = supabaseBulkInsert(table, current) || [];
+    const result = supabaseBulkInsert_(table, current) || [];
     if (Array.isArray(result)) out.push.apply(out, result);
   }
   return out;
@@ -33714,8 +35270,17 @@ function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWo
         return;
       }
 
+      const corrugationPostPastingPlan = _prodCorrugationPostPastingPlanQty_(
+        routingList,
+        idx,
+        categoryByWoId[woId],
+        combinedTotals,
+        stage1Plan
+      );
       const plannedQty = _prodNormalizeCategoryGroup_(categoryByWoId[woId]) === 'FLEXO' && (_isInspectionSlittingProductionStage_(routing) || _isFlexoOfflineDieCutProductionStage_(routing, categoryByWoId[woId])) && idx > 0
         ? _prodLastFlexoRmCarryQty_(routingList, idx, combinedTotals, categoryByWoId[woId])
+        : corrugationPostPastingPlan !== null
+        ? corrugationPostPastingPlan
         : (idx === 0
           ? stage1Plan
           : Number(combinedTotals[String(prev && prev.id)] || 0));
@@ -33776,7 +35341,7 @@ function _selectInBatches_(table, select, key, values, order) {
   // filters deliberately small for bulk floor-entry saves.
   const chunks = _supabaseChunkValuesByFilterLength_(list, 800, 20);
   chunks.forEach(function(chunk) {
-    const rows = supabaseSelect(table, {
+    const rows = supabaseSelect_(table, {
       select: select,
       filters: (function() {
         const obj = {};
@@ -33817,18 +35382,18 @@ function getProductionBoardByWO(woId, token, forceRefresh){
     }
   } catch (err) {}
 
-  const workOrderJobs = _filterSalesServiceOnlyItems_(supabaseSelect('work_order_jobs', {
+  const workOrderJobs = _filterSalesServiceOnlyItems_(supabaseSelect_('work_order_jobs', {
     select: 'wo_id,so_number,line_no,product_name,qty,category,artwork_no,client_name,job_priority,expected_delivery,ups,group_ups,job_reference',
     filters: { wo_id: 'eq.' + woId }
   }) || []);
-  const workOrders = supabaseSelect('work_orders', {
+  const workOrders = supabaseSelect_('work_orders', {
     select: 'id,wo_number,wo_date,snapshot_json',
     filters: { id: 'eq.' + woId },
     limit: 1
   }) || [];
   const wo = workOrders[0] || null;
   if (!wo) throw new Error('Work order not found');
-  const routingRows = supabaseSelect('work_order_routing', {
+  const routingRows = supabaseSelect_('work_order_routing', {
     select: 'id,wo_id,sequence_no,process_name,department,status,planned_machine',
     filters: { wo_id: 'eq.' + woId },
     order: 'sequence_no.asc'
@@ -33985,7 +35550,7 @@ function _prodPostCorrugationFgCompletion_(payload, productionEntry, routing, ro
   const entryId = String(productionEntry && productionEntry.id || '').trim();
   if (entryId) {
     try {
-      const existingLog = supabaseSelect('production_fg_completion_log', {
+      const existingLog = supabaseSelect_('production_fg_completion_log', {
         select: 'id',
         filters: { production_entry_id: 'eq.' + entryId },
         limit: 1
@@ -34023,7 +35588,7 @@ function _prodPostCorrugationFgCompletion_(payload, productionEntry, routing, ro
     const currentPackedWeight = Number(pack.packed_weight_kg || 0);
     const nextPackedQty = _prodRound3_(currentPackedQty + Number(allocation.qty || 0));
     const nextPackedWeight = _prodRound3_(currentPackedWeight + Number(allocation.weightKg || 0));
-    supabaseUpsertMinimal('packing_records', [{
+    supabaseUpsertMinimal_('packing_records', [{
       id: pack.id,
       so_id: line.soId,
       so_line_id: line.soLineId,
@@ -34108,7 +35673,7 @@ function _prodPostCorrugationFgCompletion_(payload, productionEntry, routing, ro
       throw new Error('Packing entry log schema is not applied. Run supabase_packing_entry_log.sql first.');
     }
     try {
-      supabaseBulkInsertMinimal('production_fg_completion_log', logRows);
+      supabaseBulkInsertMinimal_('production_fg_completion_log', logRows);
     } catch (err) {
       if (_prodCorrugationFgTableMissing_(err)) {
         throw new Error('Corrugation FG schema is not applied. Run supabase_corrugation_fg_completion.sql first.');
@@ -34116,6 +35681,166 @@ function _prodPostCorrugationFgCompletion_(payload, productionEntry, routing, ro
       throw err;
     }
   }
+}
+
+function _prodGetCorrugationFgRowsForEntryIds_(entryIds) {
+  const ids = [...new Set((entryIds || []).map(function(id) {
+    return String(id || '').trim();
+  }).filter(Boolean))];
+  if (!ids.length) return [];
+  try {
+    return _selectInBatches_(
+      'production_fg_completion_log',
+      'id,production_entry_id,pack_id,so_id,so_line_id,so_number,line_no,product_code,product_name,fg_qty,fg_weight_kg,source_routing_id,source_stage,remarks,posted_at,posted_by',
+      'production_entry_id',
+      ids
+    ) || [];
+  } catch (err) {
+    if (_prodCorrugationFgTableMissing_(err)) return [];
+    throw err;
+  }
+}
+
+function _prodGetCorrugationFgTotalsByEntryIds_(entryIds) {
+  const totals = {};
+  _prodGetCorrugationFgRowsForEntryIds_(entryIds).forEach(function(row) {
+    const key = String(row.production_entry_id || '').trim();
+    if (!key) return;
+    if (!totals[key]) totals[key] = { qty: 0, weightKg: 0, lineCount: 0 };
+    totals[key].qty += Number(row.fg_qty || 0);
+    totals[key].weightKg += Number(row.fg_weight_kg || 0);
+    totals[key].lineCount += 1;
+  });
+  return totals;
+}
+
+function _prodIsAutoFgPackingLog_(row) {
+  return String(row && row.source_stage || '').trim().toUpperCase() === 'CORRUGATION_FINAL_PRODUCTION';
+}
+
+function _prodPackingLogBelongsToEntry_(row, entryId) {
+  const id = String(entryId || '').trim();
+  return !!id && _prodIsAutoFgPackingLog_(row) &&
+    String(row && row.remarks || '').indexOf('production_entry_id=' + id) !== -1;
+}
+
+function _prodGetCorrugationFgMutationState_(entryId) {
+  const id = String(entryId || '').trim();
+  const fgRows = _prodGetCorrugationFgRowsForEntryIds_([id]);
+  if (!fgRows.length) {
+    return { entryId: id, fgRows: [], packingLogRows: [], packRows: [], qty: 0, weightKg: 0 };
+  }
+  const packIds = [...new Set(fgRows.map(function(row) {
+    return String(row.pack_id || '').trim();
+  }).filter(Boolean))];
+  const allPackingLogs = _packSelectEntryLogRowsByPackIds_(packIds, true) || [];
+  const packingLogRows = allPackingLogs.filter(function(row) {
+    return _prodPackingLogBelongsToEntry_(row, id);
+  });
+  const linkedPackIds = {};
+  packingLogRows.forEach(function(row) {
+    linkedPackIds[String(row.pack_id || '').trim()] = true;
+  });
+  const missingPackLog = packIds.find(function(packId) {
+    return !linkedPackIds[packId];
+  });
+  if (missingPackLog) {
+    throw new Error('Linked auto-packing detail is missing for this production entry. No correction was made.');
+  }
+  const packRows = packIds.map(function(packId) {
+    const pack = _packGetRecordById_(packId);
+    if (!pack || !pack.id) throw new Error('Linked packing record is missing for this production entry. No correction was made.');
+    return pack;
+  });
+  return {
+    entryId: id,
+    fgRows: fgRows,
+    packingLogRows: packingLogRows,
+    packRows: packRows,
+    qty: fgRows.reduce(function(sum, row) { return sum + Number(row.fg_qty || 0); }, 0),
+    weightKg: fgRows.reduce(function(sum, row) { return sum + Number(row.fg_weight_kg || 0); }, 0)
+  };
+}
+
+function _prodCleanupCorrugationFgArtifacts_(entryId, knownPackRows, changedBy, reason) {
+  const id = String(entryId || '').trim();
+  const fgRows = _prodGetCorrugationFgRowsForEntryIds_([id]);
+  const knownPacks = Array.isArray(knownPackRows) ? knownPackRows.filter(function(row) {
+    return row && row.id;
+  }) : [];
+  const packIds = [...new Set(fgRows.map(function(row) {
+    return String(row.pack_id || '').trim();
+  }).concat(knownPacks.map(function(row) {
+    return String(row.id || '').trim();
+  })).filter(Boolean))];
+  const packingLogRows = packIds.length
+    ? (_packSelectEntryLogRowsByPackIds_(packIds, true) || []).filter(function(row) {
+        return _prodPackingLogBelongsToEntry_(row, id);
+      })
+    : [];
+  packingLogRows.forEach(function(row) {
+    _packAuditEntryChange_('DELETE', row, null, changedBy, reason || 'Production entry correction');
+  });
+  packingLogRows.forEach(function(row) {
+    supabaseDeleteMinimal_('packing_entry_log', { id: 'eq.' + String(row.id || '') });
+  });
+  if (fgRows.length) {
+    supabaseDeleteMinimal_('production_fg_completion_log', { production_entry_id: 'eq.' + id });
+  }
+  const knownPackMap = {};
+  knownPacks.forEach(function(pack) {
+    knownPackMap[String(pack.id || '')] = pack;
+  });
+  packIds.forEach(function(packId) {
+    const pack = knownPackMap[packId] || _packGetRecordById_(packId);
+    if (!pack || !pack.id) return;
+    _packRebuildSummaryFromLogs_(pack.id, pack);
+  });
+  return { fgRows: fgRows, packingLogRows: packingLogRows, packIds: packIds };
+}
+
+function _prodReverseCorrugationFgCompletion_(entryId, changedBy, reason) {
+  const state = _prodGetCorrugationFgMutationState_(entryId);
+  if (!state.fgRows.length) return state;
+  _prodCleanupCorrugationFgArtifacts_(entryId, state.packRows, changedBy, reason);
+  return state;
+}
+
+function _prodGetCorrugationFgRepostContext_(entryRow, routingRow) {
+  const routing = routingRow || {};
+  const woId = String(routing.wo_id || (entryRow && entryRow.wo_id) || '').trim();
+  if (!woId) throw new Error('Work order reference is missing for FG correction.');
+  const routingList = _selectInBatches_(
+    'work_order_routing',
+    'id,wo_id,sequence_no,process_name,department,planned_machine,status',
+    'wo_id',
+    [woId],
+    'sequence_no.asc'
+  ) || [];
+  const jobs = _selectInBatches_(
+    'work_order_jobs',
+    'wo_id,so_number,line_no,product_name,qty,ups,group_ups,job_reference',
+    'wo_id',
+    [woId]
+  ) || [];
+  return {
+    routingList: routingList,
+    jobs: jobs,
+    categoryGroup: 'CORRUGATION'
+  };
+}
+
+function _prodBuildFgRepostPayload_(entryRow, producedQty, rejectedQty, fgWeightKg, categoryGroup) {
+  const parsed = _prodParseEntryNotes_(entryRow || {});
+  return {
+    categoryGroup: categoryGroup || 'CORRUGATION',
+    soNumber: parsed.soNumber || '',
+    lineNo: parsed.lineNo || '',
+    jobReference: parsed.jobReference || '',
+    producedQty: Number(producedQty || 0),
+    rejectedQty: Number(rejectedQty || 0),
+    fgWeightKg: Number(fgWeightKg || 0)
+  };
 }
 
 
@@ -34281,6 +36006,7 @@ function saveProductionBulk(entries, token) {
     if (isCorrugationFgCompletion && goodQty > 0 && !(Number(payload.fgWeightKg || 0) > 0)) {
       throw new Error('Enter FG box weight in kg for final corrugation entry.');
     }
+    _prodValidateMachineOperator_(payload.machine || routing.planned_machine || '', payload.operator || '');
     const entryTime = payload.endDate
       ? _prodKolkataLocalToIso_(payload.endDate)
       : (payload.entryDate
@@ -34361,7 +36087,7 @@ function saveProductionBulk(entries, token) {
     try {
       if (corrugationFgRefs.length) {
         try {
-          supabaseSelect('production_fg_completion_log', { select: 'id', limit: 1 });
+          supabaseSelect_('production_fg_completion_log', { select: 'id', limit: 1 });
         } catch (err) {
           if (_prodCorrugationFgTableMissing_(err)) {
             throw new Error('Corrugation FG schema is not applied. Run supabase_corrugation_fg_completion.sql first.');
@@ -34389,12 +36115,12 @@ function saveProductionBulk(entries, token) {
         } catch (detailErr) {
           insertedIds.forEach(function(id) {
             try {
-              supabaseDeleteMinimal('corrugation_2ply_entry_details', { production_entry_id: 'eq.' + id });
+              supabaseDeleteMinimal_('corrugation_2ply_entry_details', { production_entry_id: 'eq.' + id });
             } catch (cleanupErr) {}
           });
           insertedIds.forEach(function(id) {
             try {
-              supabaseDeleteMinimal('production_entries', { id: 'eq.' + id });
+              supabaseDeleteMinimal_('production_entries', { id: 'eq.' + id });
             } catch (cleanupErr) {}
           });
           throw detailErr;
@@ -34472,12 +36198,13 @@ function _prodGetCorr2PlyDetailsByEntryIds_(entryIds) {
   }
 }
 
-function _prodBuildAdminEntryView_(entry, detailRows) {
+function _prodBuildAdminEntryView_(entry, detailRows, fgCompletion) {
   const row = _prodHydrateEntryIdentityFromNotes_(entry || {});
   const parsed = _prodParseEntryNotes_(row);
   const startValue = row.start_datetime || parsed.startDateTime || row.entry_datetime || '';
   const endValue = row.end_datetime || parsed.endDateTime || row.entry_datetime || '';
   const details = Array.isArray(detailRows) ? detailRows : [];
+  const fg = fgCompletion || {};
   const runHours = Number(row.run_hours || 0) || _prodRunHoursFromDateTimes_(startValue, endValue);
   return {
     id: row.id || '',
@@ -34508,7 +36235,10 @@ function _prodBuildAdminEntryView_(entry, detailRows) {
     }).filter(Boolean).join(' / '),
     totalConsumedKg: details.reduce(function(sum, detail) {
       return sum + Number(detail.total_consumed_kg || 0);
-    }, 0)
+    }, 0),
+    hasCorrugationFgCompletion: Number(fg.lineCount || 0) > 0,
+    fgQty: Number(fg.qty || 0),
+    fgWeightKg: Number(fg.weightKg || 0)
   };
 }
 
@@ -34539,7 +36269,7 @@ function _prodBuildEntryAuditPayload_(entry) {
 
 function _prodAuditEntryChange_(action, beforeRow, afterRow, changedBy, reason) {
   try {
-    supabaseInsertMinimal('production_entry_audit_log', {
+    supabaseInsertMinimal_('production_entry_audit_log', {
       production_entry_id: beforeRow?.id || afterRow?.id || null,
       wo_id: beforeRow?.wo_id || afterRow?.wo_id || null,
       routing_id: beforeRow?.routing_id || afterRow?.routing_id || null,
@@ -34560,7 +36290,7 @@ function _prodUpdateCorr2PlyDetailsForEntry_(entryId, producedQty, rejectedQty) 
   const id = String(entryId || '').trim();
   if (!id) return;
   try {
-    const rows = supabaseSelect('corrugation_2ply_entry_details', {
+    const rows = supabaseSelect_('corrugation_2ply_entry_details', {
       select: 'id,flute,cut_size_mm,liner_reel_width_mm,fluting_reel_width_mm,liner_actual_gsm,fluting_actual_gsm',
       filters: { production_entry_id: 'eq.' + id },
       limit: 50
@@ -34570,7 +36300,7 @@ function _prodUpdateCorr2PlyDetailsForEntry_(entryId, producedQty, rejectedQty) 
       const rejectedSheets = Number(rejectedQty || 0);
       const linerKg = _prodCorrRound3_(producedSheets * Number(row.liner_reel_width_mm || 0) * Number(row.cut_size_mm || 0) * Number(row.liner_actual_gsm || 0) / 1000000000);
       const flutingKg = _prodCorrRound3_(producedSheets * Number(row.fluting_reel_width_mm || 0) * Number(row.cut_size_mm || 0) * Number(row.fluting_actual_gsm || 0) * _prodCorrFluteFactor_(row.flute || '') / 1000000000);
-      supabaseUpdateMinimal('corrugation_2ply_entry_details', {
+      supabaseUpdateMinimal_('corrugation_2ply_entry_details', {
         id: 'eq.' + String(row.id || '')
       }, {
         produced_sheets: producedSheets,
@@ -34592,7 +36322,7 @@ function _prodGetStageInfoForExistingEntry_(entryRow, routingRow) {
   if (!woId) {
     return { plannedQty: 0, producedQty: 0, balanceQty: 0, rowKind: 'COMBINED', jobKey: '' };
   }
-  const workOrder = (supabaseSelect('work_orders', {
+  const workOrder = (supabaseSelect_('work_orders', {
     select: 'id,wo_number,snapshot_json',
     filters: { id: 'eq.' + woId },
     limit: 1
@@ -34632,6 +36362,7 @@ function _prodGetStageInfoForExistingEntry_(entryRow, routingRow) {
 
 function _prodGetEntryMutationBlockReason_(entryRow, routingRow) {
   const routing = routingRow || {};
+  const entryId = String(entryRow && entryRow.id || '').trim();
   const woId = String(routing.wo_id || entryRow?.wo_id || '').trim();
   if (!woId) return 'Work order reference is missing for this production entry.';
   const currentSequence = Number(routing.sequence_no || 0);
@@ -34694,11 +36425,22 @@ function _prodGetEntryMutationBlockReason_(entryRow, routingRow) {
     const packingLogRows = candidatePackIds.length ? _packSelectEntryLogRowsByPackIds_(candidatePackIds, false) : null;
     if (Array.isArray(packingLogRows)) {
       const packedTotalsByLine = {};
+      const ownAutoPackingRows = [];
       packingLogRows.forEach(function(row) {
+        if (_prodIsAutoFgPackingLog_(row)) {
+          if (_prodPackingLogBelongsToEntry_(row, entryId)) ownAutoPackingRows.push(row);
+          return;
+        }
         const key = String(row.so_number || '').trim() + '||' + String(row.line_no || '').trim();
         if (!lineKeys[key]) return;
         packedTotalsByLine[key] = (packedTotalsByLine[key] || 0) + Number(row.packed_qty || 0);
       });
+      for (let i = 0; i < ownAutoPackingRows.length; i += 1) {
+        const linkedBlockReason = _packGetMutationBlockReason_(ownAutoPackingRows[i]);
+        if (linkedBlockReason) {
+          return linkedBlockReason.replace('Packing corrections are locked', 'Production corrections are locked');
+        }
+      }
       const packingHit = Object.keys(packedTotalsByLine).find(function(key) {
         return Number(packedTotalsByLine[key] || 0) > 0;
       });
@@ -34706,6 +36448,9 @@ function _prodGetEntryMutationBlockReason_(entryRow, routingRow) {
         return 'Packing has already been posted for this work order.';
       }
     } else {
+      if (_prodGetCorrugationFgRowsForEntryIds_([entryId]).length) {
+        return 'Linked packing detail is unavailable. Apply supabase_packing_entry_log.sql before correcting this final production entry.';
+      }
       const packingHit = relevantPackingRows.find(function(row) {
         return Number(row.packed_qty || 0) > 0;
       });
@@ -34756,9 +36501,49 @@ function prodAdminListStageEntries(payload, token) {
   const corrDetailsByEntry = _prodGetCorr2PlyDetailsByEntryIds_(entries.map(function(entry) {
     return entry.id;
   }));
+  const fgTotalsByEntry = _prodGetCorrugationFgTotalsByEntryIds_(entries.map(function(entry) {
+    return entry.id;
+  }));
   return entries.map(function(entry) {
-    return _prodBuildAdminEntryView_(entry, corrDetailsByEntry[String(entry.id || '')] || []);
+    const entryId = String(entry.id || '');
+    return _prodBuildAdminEntryView_(
+      entry,
+      corrDetailsByEntry[entryId] || [],
+      fgTotalsByEntry[entryId] || null
+    );
   });
+}
+
+function _prodPersistProductionEntryUpdate_(entryId, updateRow) {
+  const id = String(entryId || '').trim();
+  const row = Object.assign({}, updateRow || {});
+  try {
+    supabaseUpdateMinimal_('production_entries', { id: 'eq.' + id }, row);
+  } catch (err) {
+    if (!_prodOptionalEntryTimeColsMissing_(err)) throw err;
+    delete row.start_datetime;
+    delete row.end_datetime;
+    delete row.run_hours;
+    delete row.downtime_minutes;
+    supabaseUpdateMinimal_('production_entries', { id: 'eq.' + id }, row);
+  }
+}
+
+function _prodExistingEntryUpdateRow_(entry) {
+  const row = entry || {};
+  return {
+    entry_datetime: row.entry_datetime || null,
+    start_datetime: row.start_datetime || null,
+    end_datetime: row.end_datetime || null,
+    run_hours: row.run_hours == null ? null : Number(row.run_hours || 0),
+    downtime_minutes: row.downtime_minutes == null ? null : Number(row.downtime_minutes || 0),
+    machine: row.machine || '',
+    operator_name: row.operator_name || '',
+    produced_qty: Number(row.produced_qty || 0),
+    rejected_qty: Number(row.rejected_qty || 0),
+    ok_qty: _getProductionEntryGoodQty_(row),
+    downtime_reason: row.downtime_reason || ''
+  };
 }
 
 function prodAdminUpdateEntry(payload, token) {
@@ -34768,7 +36553,7 @@ function prodAdminUpdateEntry(payload, token) {
   const existing = _prodGetDetailedEntryRowById_(id);
   if (!existing) throw new Error('Production entry not found');
   const routingId = String(existing.routing_id || '').trim();
-  const routing = (supabaseSelect('work_order_routing', {
+  const routing = (supabaseSelect_('work_order_routing', {
     select: 'id,wo_id,sequence_no,process_name,department',
     filters: { id: 'eq.' + routingId },
     limit: 1
@@ -34793,12 +36578,22 @@ function prodAdminUpdateEntry(payload, token) {
   if (!startTime) throw new Error('Start time is required');
   if (!endTime) throw new Error('End time is required');
   if (!machine) throw new Error('Machine is required');
+  _prodValidateMachineOperator_(machine, operator);
   if (!(producedQty > 0)) throw new Error('Produced quantity must be greater than zero');
   if (rejectedQty > producedQty) throw new Error('Reject exceeds produced');
   if (!changeReason) throw new Error('Change reason is required');
   if (producedQty > Number(stageInfo.balanceQty || 0)) {
     throw new Error('Produced quantity cannot exceed the remaining stage balance for this correction');
   }
+
+  const fgState = _prodGetCorrugationFgMutationState_(id);
+  const hasLinkedFg = fgState.fgRows.length > 0;
+  const fgWeightKg = Object.prototype.hasOwnProperty.call(payload || {}, 'fgWeightKg')
+    ? Number(payload.fgWeightKg || 0)
+    : Number(fgState.weightKg || 0);
+  if (hasLinkedFg && !(fgWeightKg > 0)) throw new Error('FG weight must be greater than zero');
+  const fgContext = hasLinkedFg ? _prodGetCorrugationFgRepostContext_(existing, routing) : null;
+  const changedBy = String(admin.userId || admin.displayName || 'ADMIN');
 
   const shiftDateTimes = _prodResolveShiftDateTimes_(entryDate, startTime, endTime);
   const startDateTime = shiftDateTimes.startDateTime;
@@ -34830,20 +36625,50 @@ function prodAdminUpdateEntry(payload, token) {
     ok_qty: goodQty,
     downtime_reason: updatedNotes
   };
+
   try {
-    supabaseUpdateMinimal('production_entries', {
-      id: 'eq.' + id
-    }, updateRow);
+    if (hasLinkedFg) {
+      _prodReverseCorrugationFgCompletion_(id, changedBy, changeReason);
+    }
+    _prodPersistProductionEntryUpdate_(id, updateRow);
+    if (hasLinkedFg) {
+      _prodPostCorrugationFgCompletion_(
+        _prodBuildFgRepostPayload_(existing, producedQty, rejectedQty, fgWeightKg, fgContext.categoryGroup),
+        { id: id },
+        routing,
+        fgContext.routingList,
+        fgContext.jobs,
+        changedBy
+      );
+    }
   } catch (err) {
-    if (!_prodOptionalEntryTimeColsMissing_(err)) throw err;
-    const fallbackRow = Object.assign({}, updateRow);
-    delete fallbackRow.start_datetime;
-    delete fallbackRow.end_datetime;
-    delete fallbackRow.run_hours;
-    delete fallbackRow.downtime_minutes;
-    supabaseUpdateMinimal('production_entries', {
-      id: 'eq.' + id
-    }, fallbackRow);
+    let rollbackError = null;
+    if (hasLinkedFg) {
+      try {
+        _prodCleanupCorrugationFgArtifacts_(id, fgState.packRows, changedBy, 'Rollback failed production correction');
+        _prodPersistProductionEntryUpdate_(id, _prodExistingEntryUpdateRow_(existing));
+        _prodPostCorrugationFgCompletion_(
+          _prodBuildFgRepostPayload_(
+            existing,
+            Number(existing.produced_qty || 0),
+            Number(existing.rejected_qty || 0),
+            Number(fgState.weightKg || 0),
+            fgContext.categoryGroup
+          ),
+          { id: id },
+          routing,
+          fgContext.routingList,
+          fgContext.jobs,
+          changedBy
+        );
+      } catch (restoreErr) {
+        rollbackError = restoreErr;
+      }
+    }
+    if (rollbackError) {
+      throw new Error(String(err && err.message || err) + ' Rollback also needs attention: ' + String(rollbackError && rollbackError.message || rollbackError));
+    }
+    throw err;
   }
   _prodUpdateCorr2PlyDetailsForEntry_(id, producedQty, rejectedQty);
   const updated = _prodGetDetailedEntryRowById_(id) || Object.assign({}, existing, {
@@ -34859,9 +36684,10 @@ function prodAdminUpdateEntry(payload, token) {
     ok_qty: goodQty,
     downtime_reason: updatedNotes
   });
-  _prodAuditEntryChange_('UPDATE', existing, updated, admin.userId || admin.displayName || 'ADMIN', changeReason);
+  _prodAuditEntryChange_('UPDATE', existing, updated, changedBy, changeReason);
   _prodBumpQueueVersion_();
   _opsBumpDatasetVersion_();
+  if (hasLinkedFg) _invBumpStockSnapshotVersion_();
   return { ok: true };
 }
 
@@ -34874,7 +36700,7 @@ function prodAdminDeleteEntry(entryId, reason, token) {
   const existing = _prodGetDetailedEntryRowById_(id);
   if (!existing) throw new Error('Production entry not found');
   const routingId = String(existing.routing_id || '').trim();
-  const routing = (supabaseSelect('work_order_routing', {
+  const routing = (supabaseSelect_('work_order_routing', {
     select: 'id,wo_id,sequence_no,process_name,department',
     filters: { id: 'eq.' + routingId },
     limit: 1
@@ -34882,10 +36708,47 @@ function prodAdminDeleteEntry(entryId, reason, token) {
   if (!routing) throw new Error('Routing row not found for this production entry');
   const blockReason = _prodGetEntryMutationBlockReason_(existing, routing);
   if (blockReason) throw new Error(blockReason);
-  _prodAuditEntryChange_('DELETE', existing, null, admin.userId || admin.displayName || 'ADMIN', deleteReason);
-  supabaseDeleteMinimal('production_entries', { id: 'eq.' + id });
+  const changedBy = String(admin.userId || admin.displayName || 'ADMIN');
+  const fgState = _prodGetCorrugationFgMutationState_(id);
+  const hasLinkedFg = fgState.fgRows.length > 0;
+  const fgContext = hasLinkedFg ? _prodGetCorrugationFgRepostContext_(existing, routing) : null;
+  _prodAuditEntryChange_('DELETE', existing, null, changedBy, deleteReason);
+  try {
+    if (hasLinkedFg) {
+      _prodReverseCorrugationFgCompletion_(id, changedBy, deleteReason);
+    }
+    supabaseDeleteMinimal_('production_entries', { id: 'eq.' + id });
+  } catch (err) {
+    let rollbackError = null;
+    if (hasLinkedFg && _prodGetDetailedEntryRowById_(id)) {
+      try {
+        _prodCleanupCorrugationFgArtifacts_(id, fgState.packRows, changedBy, 'Rollback failed production deletion');
+        _prodPostCorrugationFgCompletion_(
+          _prodBuildFgRepostPayload_(
+            existing,
+            Number(existing.produced_qty || 0),
+            Number(existing.rejected_qty || 0),
+            Number(fgState.weightKg || 0),
+            fgContext.categoryGroup
+          ),
+          { id: id },
+          routing,
+          fgContext.routingList,
+          fgContext.jobs,
+          changedBy
+        );
+      } catch (restoreErr) {
+        rollbackError = restoreErr;
+      }
+    }
+    if (rollbackError) {
+      throw new Error(String(err && err.message || err) + ' Rollback also needs attention: ' + String(rollbackError && rollbackError.message || rollbackError));
+    }
+    throw err;
+  }
   _prodBumpQueueVersion_();
   _opsBumpDatasetVersion_();
+  if (hasLinkedFg) _invBumpStockSnapshotVersion_();
   return { ok: true };
 }
 
@@ -34895,7 +36758,7 @@ function shortCloseStage(routingId, reason, token) {
   if (!reason)
     throw new Error('Reason required');
 
-  supabaseUpdate(
+  supabaseUpdate_(
     'work_order_routing',
     { id: 'eq.' + routingId },
     {
@@ -34922,7 +36785,7 @@ function searchWorkOrders(query, token){
   const safe = q.replace(/[%*,()]/g, ' ').trim();
 
   try {
-    const fastRows = supabaseSelect('v_production_jobcard_lookup_fast', {
+    const fastRows = supabaseSelect_('v_production_jobcard_lookup_fast', {
       select: 'wo_id,wo_number,wo_date,artwork_nos,client_name,product_names,so_numbers,department_category',
       filters: {
         or: '(wo_number.ilike.*' + safe + '*,artwork_nos.ilike.*' + safe + '*,client_name.ilike.*' + safe + '*,product_names.ilike.*' + safe + '*,so_numbers.ilike.*' + safe + '*)'
@@ -34950,7 +36813,7 @@ function searchWorkOrders(query, token){
   } catch (err) {}
 
   const matchedWoIds = {};
-  const directWoRows = supabaseSelect('work_orders', {
+  const directWoRows = supabaseSelect_('work_orders', {
     select: 'id,wo_number,wo_date',
     filters: { wo_number: 'ilike.*' + safe + '*' },
     order: 'wo_date.desc',
@@ -34963,7 +36826,7 @@ function searchWorkOrders(query, token){
   ['artwork_no', 'client_name', 'product_name', 'so_number'].forEach(function(field) {
     const filters = {};
     filters[field] = 'ilike.*' + safe + '*';
-    const rows = supabaseSelect('work_order_jobs', {
+    const rows = supabaseSelect_('work_order_jobs', {
       select: 'wo_id',
       filters: filters,
       limit: 30
@@ -35030,6 +36893,10 @@ this.getWorkOrder = getWorkOrder;
 this.getFlexoWorkOrder = getFlexoWorkOrder;
 this.saveAndExportWO = saveAndExportWO;
 this.saveFlexoWorkOrder = saveFlexoWorkOrder;
+this.saveFlexoWorkOrderV2 = saveFlexoWorkOrderV2;
+this.submitWorkOrderWastageOverride = submitWorkOrderWastageOverride;
+this.listWorkOrderWastageApprovals = listWorkOrderWastageApprovals;
+this.decideWorkOrderWastageApproval = decideWorkOrderWastageApproval;
 this.deleteWorkOrder = deleteWorkOrder;
 this.getNextWONumber = getNextWONumber;
 this.getNextFlexoWONumber = getNextFlexoWONumber;
@@ -35129,6 +36996,8 @@ this.invApplyRateCorrection = invApplyRateCorrection;
 
 this.invListIssueJSON = invListIssueJSON;
 this.invListWOIssueVarianceJSON = invListWOIssueVarianceJSON;
+this.invListWOExcessIssueReviewJSON = invListWOExcessIssueReviewJSON;
+this.invSaveWOExcessIssueReview = invSaveWOExcessIssueReview;
 this.invListRTSJSON = invListRTSJSON;
 this.invListRFPJSON = invListRFPJSON;
 this.invListAdjustmentsJSON = invListAdjustmentsJSON;
@@ -35607,10 +37476,17 @@ function _reportsRequireSession_(token) {
 
 function _reportsTrySelect_(table, opts) {
   try {
-    return supabaseSelect(table, opts || {}) || [];
+    return supabaseSelect_(table, opts || {}) || [];
   } catch (err) {
     return [];
   }
+}
+
+function _reportsIsStatementTimeout_(err) {
+  const msg = String((err && err.message) || err || '').toLowerCase();
+  return msg.indexOf('57014') !== -1 ||
+    msg.indexOf('statement timeout') !== -1 ||
+    msg.indexOf('canceling statement due to statement timeout') !== -1;
 }
 
 function _reportsSelectAll_(table, opts) {
@@ -35618,22 +37494,54 @@ function _reportsSelectAll_(table, opts) {
   delete base.limit;
   delete base.offset;
 
-  const pageSize = 1000;
+  let pageSize = 1000;
   const out = [];
   let offset = 0;
 
   while (true) {
-    const rows = _reportsTrySelect_(table, Object.assign({}, base, {
-      limit: pageSize,
-      offset: offset
-    }));
+    let rows;
+    try {
+      rows = supabaseSelect_(table, Object.assign({}, base, {
+        limit: pageSize,
+        offset: offset
+      })) || [];
+    } catch (err) {
+      if (_reportsIsStatementTimeout_(err) && pageSize > 100) {
+        pageSize = Math.max(100, Math.floor(pageSize / 2));
+        continue;
+      }
+      rows = [];
+    }
     if (!rows.length) break;
 
     out.push.apply(out, rows);
     if (rows.length < pageSize) break;
-    offset += pageSize;
+    offset += rows.length;
   }
 
+  return out;
+}
+
+function _reportsSelectAllByInChunks_(table, opts, key, values, chunkSize) {
+  const seen = {};
+  const list = (values || []).filter(function(value) {
+    const normalized = String(value == null ? '' : value).trim();
+    if (!normalized || seen[normalized]) return false;
+    seen[normalized] = true;
+    return true;
+  });
+  if (!list.length) return [];
+
+  const out = [];
+  const base = Object.assign({}, opts || {});
+  const chunks = _supabaseChunkValuesByFilterLength_(list, 1200, Number(chunkSize || 35));
+  chunks.forEach(function(chunk) {
+    const query = Object.assign({}, base);
+    query.filters = Object.assign({}, base.filters || {});
+    query.filters[key] = _supabaseInFilter_(chunk);
+    const rows = _reportsSelectAll_(table, query);
+    if (rows && rows.length) out.push.apply(out, rows);
+  });
   return out;
 }
 
@@ -35642,20 +37550,29 @@ function _reportsSelectAllRequired_(table, opts) {
   delete base.limit;
   delete base.offset;
 
-  const pageSize = 1000;
+  let pageSize = 1000;
   const out = [];
   let offset = 0;
 
   while (true) {
-    const rows = supabaseSelect(table, Object.assign({}, base, {
-      limit: pageSize,
-      offset: offset
-    })) || [];
+    let rows;
+    try {
+      rows = supabaseSelect_(table, Object.assign({}, base, {
+        limit: pageSize,
+        offset: offset
+      })) || [];
+    } catch (err) {
+      if (_reportsIsStatementTimeout_(err) && pageSize > 100) {
+        pageSize = Math.max(100, Math.floor(pageSize / 2));
+        continue;
+      }
+      throw err;
+    }
     if (!rows.length) break;
 
     out.push.apply(out, rows);
     if (rows.length < pageSize) break;
-    offset += pageSize;
+    offset += rows.length;
   }
 
   return out;
@@ -35728,7 +37645,7 @@ function _reportsTraceabilityRows_() {
       };
     });
   } else {
-    result = (listSalesOrders({ limit: 300 }) || []).map(function(row) {
+    result = (listSalesOrders({ limit: 300 }, token) || []).map(function(row) {
     return {
       soNumber: row.so_number || '',
       soDate: row.so_date || '',
@@ -35895,21 +37812,156 @@ function _reportsStatusPasses_(row, filters, fields) {
   });
 }
 
+function _reportsFastFilterTerm_(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\*\(\),]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _reportsFastViewFilters_(filters, dateColumn, billingColumn) {
+  const queryFilters = _reportsApplyDateFilterToQuery_(filters, dateColumn);
+  const q = _reportsFastFilterTerm_(filters && filters.q);
+  const status = _reportsFastFilterTerm_(filters && filters.status);
+  if (q) queryFilters.match_text = 'ilike.*' + q + '*';
+  if (status) queryFilters.status_text = 'ilike.*' + status + '*';
+  if (filters && filters.pendingOnly && billingColumn) {
+    queryFilters[billingColumn] = 'neq.CLOSED';
+  }
+  return queryFilters;
+}
+
+function _reportsSalesOrderFastSelect_() {
+  return [
+    'so_number',
+    'line_no',
+    'so_date',
+    'so_time',
+    'po_number',
+    'po_date',
+    'so_datetime',
+    'so_created_at',
+    'sales_rep',
+    'client_name',
+    'client_code',
+    'division',
+    'product_code',
+    'product_name',
+    'category',
+    'order_qty',
+    'unit',
+    'rate',
+    'line_amount',
+    'expected_delivery',
+    'final_delivery',
+    'accounts_status',
+    'business_status',
+    'sales_approval_status',
+    'billing_status',
+    'billed_qty',
+    'billing_pending_qty',
+    'invoice_nos',
+    'invoice_dates',
+    'match_text',
+    'status_text'
+  ].join(',');
+}
+
+function _reportsPlanningFastSelect_() {
+  return [
+    'so_number',
+    'line_no',
+    'so_date',
+    'so_time',
+    'po_number',
+    'po_date',
+    'so_line_status',
+    'closure_status',
+    'closure_reason',
+    'closed_by',
+    'closed_at',
+    'status_updated_at',
+    'division',
+    'so_datetime',
+    'so_created_at',
+    'sales_rep',
+    'client_name',
+    'client_code',
+    'product_code',
+    'product_name',
+    'category',
+    'order_qty',
+    'unit',
+    'rate',
+    'expected_delivery',
+    'final_delivery',
+    'accounts_status',
+    'accounts_at',
+    'business_status',
+    'business_at',
+    'sales_approval_status',
+    'sales_approval_at',
+    'artwork_no',
+    'product_type',
+    'plate_status',
+    'die_status',
+    'artwork_status',
+    'artwork_at',
+    'artwork_approved_at',
+    'wo_count',
+    'wo_numbers',
+    'routing_count',
+    'routing_status',
+    'routing_marked_at',
+    'routing_steps',
+    'current_stage',
+    'current_stage_status',
+    'stage_last_updated_at',
+    'stage_summary',
+    'planning_billing_status',
+    'posted_billed_qty',
+    'billing_gap_qty',
+    'short_closed_qty',
+    'operational_billing_pending_qty',
+    'partially_billed_flag',
+    'posted_invoice_count',
+    'posted_invoice_nos',
+    'posted_invoice_dates',
+    'posted_first_invoice_date',
+    'posted_last_invoice_date',
+    'posted_last_billed_at',
+    'match_text',
+    'status_text'
+  ].join(',');
+}
+
 function _reportsPlanningRows_(filters) {
   const cacheKey = _reportsCacheKey_('PLANNING_ROWS', { filters: filters || {} });
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
 
-  const queryOpts = {
+  const fastQueryOpts = {
+    select: _reportsPlanningFastSelect_(),
+    filters: _reportsFastViewFilters_(filters, 'so_date', 'planning_billing_status'),
+    order: 'so_datetime.desc,so_number.desc,line_no.asc'
+  };
+  const fallbackQueryOpts = {
     filters: _reportsApplyDateFilterToQuery_(filters, 'so_date'),
     order: 'so_datetime.desc,so_number.desc,line_no.asc'
   };
   let sourceRows;
   try {
-    sourceRows = _reportsSelectAllRequired_('v_report_planning_lines_enriched', queryOpts);
+    sourceRows = _reportsSelectAllRequired_('v_report_planning_lifecycle_fast', fastQueryOpts);
   } catch (err) {
-    if (!_supabaseRelationMissing_(err, 'v_report_planning_lines_enriched')) throw err;
-    sourceRows = _reportsSelectAll_('v_report_planning_lines', queryOpts);
+    if (!_supabaseRelationMissing_(err, 'v_report_planning_lifecycle_fast') && !_reportsIsStatementTimeout_(err)) throw err;
+    try {
+      sourceRows = _reportsSelectAllRequired_('v_report_planning_lines_enriched', fallbackQueryOpts);
+    } catch (fallbackErr) {
+      if (!_supabaseRelationMissing_(fallbackErr, 'v_report_planning_lines_enriched') && !_reportsIsStatementTimeout_(fallbackErr)) throw fallbackErr;
+      sourceRows = _reportsSelectAll_('v_report_planning_lines', fallbackQueryOpts);
+    }
   }
 
   const result = sourceRows.map(function(row) {
@@ -36095,8 +38147,8 @@ function _reportsSectionPlanning_(token, params) {
     tables: [{
       key: 'planning',
       title: 'Planning Report',
-      subtitle: 'One row per sales order line from approval through invoicing. Pending only means billing is not closed yet.',
-      minWidth: 5200,
+      subtitle: 'Fast lifecycle view from SO approval through artwork, WO / routing, current stage, and posted billing closure.',
+      minWidth: 4200,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -36140,34 +38192,7 @@ function _reportsSectionPlanning_(token, params) {
         { key:'currentStage', label:'Current Stage' },
         { key:'currentStageStatus', label:'Stage Status', type:'status' },
         { key:'stageLastUpdatedAt', label:'Stage Update Time', type:'datetime' },
-        { key:'stageSummary', label:'Stage Qty Update' },
-        { key:'rmAvailabilityStatus', label:'RM Availability', type:'status' },
-        { key:'rmRequiredQty', label:'RM Required Qty', type:'number' },
-        { key:'rmIssuedQty', label:'RM Issued Qty', type:'number' },
-        { key:'rmPendingQty', label:'RM Pending Qty', type:'number' },
-        { key:'rmInStockQty', label:'RM In Stock Qty', type:'number' },
-        { key:'rmShortageQty', label:'RM Shortage Qty', type:'number' },
-        { key:'rmPoNos', label:'RM PO Nos' },
-        { key:'rmFirstPoDate', label:'RM PO Date', type:'date' },
-        { key:'rmPendingReceiptQty', label:'RM Pending Receipt Qty', type:'number' },
-        { key:'rmLatestGrnDate', label:'RM Latest GRN Date', type:'date' },
-        { key:'rmReceiptRefs', label:'RM GRN / Receipt Refs' },
-        { key:'rmPrNos', label:'RM PR Nos' },
-        { key:'rmDetail', label:'RM Detail' },
-        { key:'plateProcurementStatus', label:'Plate Procurement', type:'status' },
-        { key:'platePoNos', label:'Plate PO Nos' },
-        { key:'plateOrderedOn', label:'Plate Order Date', type:'date' },
-        { key:'plateReceivedOn', label:'Plate Receipt Date', type:'date' },
-        { key:'platePendingQty', label:'Plate Pending Qty', type:'number' },
-        { key:'plateVendors', label:'Plate Vendor' },
-        { key:'plateReceiptRefs', label:'Plate Receipt Refs' },
-        { key:'dieProcurementStatus', label:'Die Procurement', type:'status' },
-        { key:'diePoNos', label:'Die PO Nos' },
-        { key:'dieOrderedOn', label:'Die Order Date', type:'date' },
-        { key:'dieReceivedOn', label:'Die Receipt Date', type:'date' },
-        { key:'diePendingQty', label:'Die Pending Qty', type:'number' },
-        { key:'dieVendors', label:'Die Vendor' },
-        { key:'dieReceiptRefs', label:'Die Receipt Refs' },
+        { key:'stageSummary', label:'Routing Stage Status' },
         { key:'billingStatus', label:'Billing Status', type:'status' },
         { key:'billedQty', label:'Billed Qty', type:'number' },
         { key:'billingPendingQty', label:'Billing Gap Qty', type:'number' },
@@ -36542,12 +38567,18 @@ function _reportsProcessCostStageKey_(soLineId, jobKey, routingId) {
   return _reportsProcessCostKey_(soLineId, jobKey) + '||' + String(routingId || '');
 }
 
-function _reportsJobProcessCostRows_(filters, allowedJobKeys) {
+function _reportsJobProcessCostRows_(filters, allowedJobKeys, allowedSoLineIds) {
   const allowed = allowedJobKeys || null;
-  return _reportsSelectAll_('v_report_job_process_cost_lines', {
+  const sourceRows = allowedSoLineIds && allowedSoLineIds.length
+    ? _reportsSelectAllByInChunks_('v_report_job_process_cost_lines', {
+        filters: {},
+        order: 'so_date.desc,so_number.desc,line_no.asc,job_reference.asc,production_date.asc,stage_sequence.asc'
+      }, 'so_line_id', allowedSoLineIds, 25)
+    : _reportsSelectAll_('v_report_job_process_cost_lines', {
     filters: {},
     order: 'so_date.desc,so_number.desc,line_no.asc,job_reference.asc,production_date.asc,stage_sequence.asc'
-  }).map(function(row) {
+  });
+  return sourceRows.map(function(row) {
     return {
       soLineId: row.so_line_id || '',
       soNumber: row.so_number || '',
@@ -36741,6 +38772,7 @@ function _reportsSectionJobProfitability_(token, params) {
       processCostStatus: row.process_cost_status || 'NO_COST',
       processHoursSource: row.process_hours_source || '',
       processCostMachines: row.process_cost_machines || '',
+      processCostAllocationBasis: row.process_cost_allocation_basis || '',
       completeCostTillDate: completeCostTillDate,
       latestProductionStage: row.latest_production_stage || '',
       latestProductionMachine: row.latest_production_machine || '',
@@ -36792,6 +38824,7 @@ function _reportsSectionJobProfitability_(token, params) {
         'processCostStatus',
         'processHoursSource',
         'processCostMachines',
+        'processCostAllocationBasis',
         'invoiceNos'
       ]) &&
       _reportsStatusPasses_(row, filters, [
@@ -36801,22 +38834,28 @@ function _reportsSectionJobProfitability_(token, params) {
         'jobType',
         'costAllocationBasis',
         'rmMaterialStatus',
-        'processCostStatus'
+        'processCostStatus',
+        'processCostAllocationBasis'
       ]);
   });
 
   const jobFilterMap = {};
+  const soLineIdMap = {};
   rows.forEach(function(row) {
     jobFilterMap[_reportsProcessCostKey_(row.soLineId, row.jobKey)] = true;
+    if (row.soLineId) soLineIdMap[row.soLineId] = true;
   });
+  const matchedSoLineIds = Object.keys(soLineIdMap);
   const hasMatchedJobs = rows.length > 0;
-  const processCostRows = hasMatchedJobs ? _reportsJobProcessCostRows_(filters, jobFilterMap) : [];
+  const processCostRows = hasMatchedJobs ? _reportsJobProcessCostRows_(filters, jobFilterMap, matchedSoLineIds) : [];
   const processCostMaps = _reportsBuildProcessCostMaps_(processCostRows);
 
-  const productionStageRows = hasMatchedJobs ? _reportsSelectAll_('v_report_job_profitability_production_stages', {
+  const productionStageSourceRows = hasMatchedJobs ? _reportsSelectAllByInChunks_('v_report_job_profitability_production_stages', {
     filters: {},
     order: 'so_date.desc,so_number.desc,line_no.asc,job_reference.asc,stage_sequence.asc,last_production_at.desc'
-  }).map(function(row) {
+  }, 'so_line_id', matchedSoLineIds, 25) : [];
+
+  const productionStageRows = productionStageSourceRows.map(function(row) {
     const stageCost = processCostMaps.byStage[_reportsProcessCostStageKey_(row.so_line_id || '', row.job_key || '', row.routing_id || '')] || {};
     return {
       soLineId: row.so_line_id || '',
@@ -36893,7 +38932,7 @@ function _reportsSectionJobProfitability_(token, params) {
         'processCostStatus',
         'stagePosition'
       ]);
-  }) : [];
+  });
 
   return {
     ok: true,
@@ -36915,7 +38954,7 @@ function _reportsSectionJobProfitability_(token, params) {
       key: 'jobprofitability',
       title: 'Job Profitability Report',
       subtitle: 'Date range is based on Last Billing Date. Complete cost includes RM issued value, plate/die tooling cost, and MHR-based process cost.',
-      minWidth: 7050,
+      minWidth: 7200,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -36967,6 +39006,7 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'processCostStatus', label:'Process Cost Status', type:'status' },
         { key:'processHoursSource', label:'Hours Source', type:'status' },
         { key:'processCostMachines', label:'Process Machines' },
+        { key:'processCostAllocationBasis', label:'Process Cost Basis', type:'status' },
         { key:'completeCostTillDate', label:'Complete Cost Till Date', type:'money' },
         { key:'latestProductionStage', label:'Latest Production Stage' },
         { key:'latestProductionMachine', label:'Latest Machine' },
@@ -37454,10 +39494,23 @@ function _reportsSectionOTIF_(token, params) {
 }
 
 function _reportsSalesOrderRows_(filters) {
-  return _reportsSelectAll_('v_report_planning_lines', {
+  const fastQueryOpts = {
+    select: _reportsSalesOrderFastSelect_(),
+    filters: _reportsFastViewFilters_(filters, 'so_date', 'billing_status'),
+    order: 'so_datetime.desc,so_number.desc,line_no.asc'
+  };
+  const fallbackQueryOpts = {
     filters: _reportsApplyDateFilterToQuery_(filters, 'so_date'),
     order: 'so_datetime.desc,so_number.desc,line_no.asc'
-  }).map(function(row) {
+  };
+  let sourceRows;
+  try {
+    sourceRows = _reportsSelectAllRequired_('v_report_sales_order_lines_fast', fastQueryOpts);
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'v_report_sales_order_lines_fast') && !_reportsIsStatementTimeout_(err)) throw err;
+    sourceRows = _reportsSelectAll_('v_report_planning_lines', fallbackQueryOpts);
+  }
+  return sourceRows.map(function(row) {
     const orderQty = _reportsSafeNumber_(row.order_qty);
     const rate = _reportsSafeNumber_(row.rate);
     const soDateTime = row.so_datetime || row.so_created_at || row.so_date || '';
@@ -37829,7 +39882,7 @@ function _reportsInventoryReceiptMetaByPrNo_(prNos) {
 
   for (let i = 0; i < ids.length; i += 40) {
     const chunk = ids.slice(i, i + 40);
-    const rows = supabaseSelect('inv_ledger', {
+    const rows = supabaseSelect_('inv_ledger', {
       select: 'id,ref_no,created_at,qty_in,remarks',
       filters: {
         ref_type: 'eq.PR-RECEIPT',
@@ -41775,19 +43828,19 @@ function salesCommandGetDashboard(params, token) {
   const weekStart = Utilities.formatDate(weekStartDate, tz, 'yyyy-MM-dd');
   const divisionQueryStart = weekStart < monthStart ? weekStart : monthStart;
   try {
-    repRows = supabaseSelect('v_sales_dashboard_rep_summary', {
+    repRows = supabaseSelect_('v_sales_dashboard_rep_summary', {
       order: 'order_value_mtd.desc,sales_rep.asc',
       limit: 100
     }) || [];
-    clientRows = supabaseSelect('v_sales_dashboard_client_summary', {
+    clientRows = supabaseSelect_('v_sales_dashboard_client_summary', {
       order: 'order_value_mtd.desc,client_name.asc',
       limit: 200
     }) || [];
-    activityRows = supabaseSelect('v_sales_dashboard_activity_feed', {
+    activityRows = supabaseSelect_('v_sales_dashboard_activity_feed', {
       order: 'event_at.desc',
       limit: 40
     }) || [];
-    overdueRows = supabaseSelect('v_sales_live_line_snapshot', {
+    overdueRows = supabaseSelect_('v_sales_live_line_snapshot', {
       select: 'so_number,line_no,sales_rep,client_name,product_name,due_date,overdue_days,open_order_value,operational_open_qty,last_activity_at',
       filters: {
         is_overdue: 'eq.true',
@@ -42196,7 +44249,7 @@ function _planningAutoCloseFullyDispatchedLines_(rows) {
 
   _supabaseChunkValuesByFilterLength_(ids, 1200, 40).forEach(function(chunk) {
     try {
-      supabaseUpdateMinimal('sales_order_lines', { id: _supabaseInFilter_(chunk) }, payload);
+      supabaseUpdateMinimal_('sales_order_lines', { id: _supabaseInFilter_(chunk) }, payload);
     } catch (err) {
       if (_planningLifecycleColumnsMissing_(err)) {
         throw new Error('Run sales_order_line_status_schema.sql before using the billed closure planning module.');
@@ -42550,7 +44603,7 @@ function planningUpdateBilledLineStatus(payload, token) {
 
   let line;
   try {
-    line = (supabaseSelect('sales_order_lines', {
+    line = (supabaseSelect_('sales_order_lines', {
       select: 'id,so_id,line_no,qty,status,closed_at,closed_by',
       filters: { id: 'eq.' + soLineId },
       limit: 1
@@ -42563,7 +44616,7 @@ function planningUpdateBilledLineStatus(payload, token) {
   }
   if (!line || !line.id) throw new Error('Sales order line not found');
 
-  const soHeader = line.so_id ? (supabaseSelect('sales_orders', {
+  const soHeader = line.so_id ? (supabaseSelect_('sales_orders', {
     select: 'so_number',
     filters: { id: 'eq.' + line.so_id },
     limit: 1
@@ -42609,7 +44662,7 @@ function planningUpdateBilledLineStatus(payload, token) {
   }
 
   try {
-    supabaseUpdateMinimal('sales_order_lines', { id: 'eq.' + soLineId }, update);
+    supabaseUpdateMinimal_('sales_order_lines', { id: 'eq.' + soLineId }, update);
   } catch (err) {
     if (_planningLifecycleColumnsMissing_(err)) {
       throw new Error('Run sales_order_line_status_schema.sql before using the billed closure planning module.');
@@ -42619,7 +44672,7 @@ function planningUpdateBilledLineStatus(payload, token) {
 
   let persistedLine = line;
   try {
-    persistedLine = (supabaseSelect('sales_order_lines', {
+    persistedLine = (supabaseSelect_('sales_order_lines', {
       select: 'id,so_id,line_no,qty,status,closed_at,closed_by,status_updated_at',
       filters: { id: 'eq.' + soLineId },
       limit: 1
