@@ -12,6 +12,75 @@ function _getSupabaseConfig_() {
   }
   return { url, key };
 }
+
+function _supabaseTransientHttpCode_(code) {
+  return [
+    408, 425, 429,
+    500, 502, 503, 504,
+    520, 521, 522, 523, 524
+  ].indexOf(Number(code || 0)) !== -1;
+}
+
+function _supabaseRequestCanRetry_(path, method, payload) {
+  const verb = String(method || 'get').trim().toLowerCase();
+  if (verb === 'get' || verb === 'head') return true;
+
+  const rpc = String(path || '').match(/\/rest\/v1\/rpc\/([^/?]+)/i);
+  const rpcName = rpc ? String(rpc[1] || '').trim().toLowerCase() : '';
+  if (rpcName === 'post_purchase_grn_transaction_v2' ||
+      rpcName === 'post_purchase_grn_transaction') {
+    const header = payload && payload.p_header;
+    return !!String(header && header.idempotency_key || '').trim();
+  }
+  return false;
+}
+
+function _supabaseResponseHeader_(response, name) {
+  if (!response || !name) return '';
+  let headers = {};
+  try {
+    headers = response.getAllHeaders ? response.getAllHeaders() : {};
+  } catch (err) {
+    return '';
+  }
+  const target = String(name).toLowerCase();
+  const key = Object.keys(headers || {}).find(function(headerName) {
+    return String(headerName || '').toLowerCase() === target;
+  });
+  return key ? String(headers[key] || '').trim() : '';
+}
+
+function _supabaseHttpErrorMessage_(code, responseText, response, retrySafe) {
+  const status = Number(code || 0);
+  const raw = String(responseText || '').trim();
+  const requestId = _supabaseResponseHeader_(response, 'sb-request-id') ||
+    _supabaseResponseHeader_(response, 'x-request-id') ||
+    _supabaseResponseHeader_(response, 'cf-ray');
+  const requestSuffix = requestId ? ' [Request ' + requestId + ']' : '';
+
+  if (_supabaseTransientHttpCode_(status)) {
+    const action = retrySafe
+      ? 'Please refresh and retry.'
+      : 'The result of this save was not confirmed. Refresh the relevant register first; retry only if the record was not created.';
+    return 'Supabase is temporarily unavailable (HTTP ' + status + '). ' + action + requestSuffix;
+  }
+
+  let parsed = null;
+  try {
+    parsed = raw ? JSON.parse(raw) : null;
+  } catch (err) {}
+  const detail = parsed && typeof parsed === 'object'
+    ? [
+        parsed.message,
+        parsed.details,
+        parsed.hint,
+        parsed.code ? 'Code: ' + parsed.code : ''
+      ].filter(Boolean).join(' | ')
+    : raw;
+  const safeDetail = String(detail || 'Request failed').slice(0, 1800);
+  return 'Supabase error ' + status + ': ' + safeDetail + requestSuffix;
+}
+
 function _supabaseFetch_(path, method, payload, queryParams, extraHeaders) {
   const { url, key } = _getSupabaseConfig_();
 
@@ -43,12 +112,24 @@ headers: {
     options.payload = JSON.stringify(payload);
   }
 
-  let res;
+  let res = null;
   let lastErr = null;
+  const retrySafe = _supabaseRequestCanRetry_(path, options.method, payload);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       res = UrlFetchApp.fetch(fullUrl, options);
       lastErr = null;
+      const responseCode = Number(res.getResponseCode() || 0);
+      if (responseCode >= 200 && responseCode < 300) break;
+      if (_supabaseTransientHttpCode_(responseCode) && retrySafe && attempt < 2) {
+        Logger.log(
+          'Transient Supabase HTTP ' + responseCode + ' for ' +
+          String(options.method || 'get').toUpperCase() + ' ' + path +
+          '; retry ' + (attempt + 2) + '/3'
+        );
+        Utilities.sleep(600 * Math.pow(2, attempt));
+        continue;
+      }
       break;
     } catch (err) {
       lastErr = err;
@@ -60,7 +141,7 @@ headers: {
       if (!transient || attempt === 2) {
         throw err;
       }
-      Utilities.sleep(400 * (attempt + 1));
+      Utilities.sleep(600 * Math.pow(2, attempt));
     }
   }
   if (!res && lastErr) throw lastErr;
@@ -68,7 +149,7 @@ headers: {
   const text = res.getContentText();
 
   if (code < 200 || code >= 300) {
-    throw new Error(`Supabase error ${code}: ${text}`);
+    throw new Error(_supabaseHttpErrorMessage_(code, text, res, retrySafe));
   }
 
   return text ? JSON.parse(text) : null;
@@ -603,7 +684,9 @@ const M_PREFIX_TRADING_ITEMS = [
   { itemCode: 'MTR021', itemName: 'Stepney Cover', category: 'Stepney Cover', hsnGroup: 'STEPNEY COVER', gstPct: 18, unit: 'Pcs' },
   { itemCode: 'MTR022', itemName: 'Helmet', category: 'Helmet', hsnGroup: 'HELMET', gstPct: 18, unit: 'Pcs' },
   { itemCode: 'MTR023', itemName: 'Shoes', category: 'Shoes', hsnGroup: 'SHOES', gstPct: 18, unit: 'Pcs' },
-  { itemCode: 'MTR024', itemName: 'Gloves', category: 'Gloves', hsnGroup: 'GLOVES', gstPct: 18, unit: 'Pcs' }
+  { itemCode: 'MTR024', itemName: 'Gloves', category: 'Gloves', hsnGroup: 'GLOVES', gstPct: 18, unit: 'Pcs' },
+  { itemCode: 'MTR025', itemName: 'Mouse Pad', category: 'Mouse Pad', hsnGroup: 'MOUSE PAD', gstPct: 18, unit: 'Pcs' },
+  { itemCode: 'MTR026', itemName: 'Paper Weight', category: 'Paper Weight', hsnGroup: 'PAPER WEIGHT', gstPct: 18, unit: 'Pcs' }
 ];
 
 const SL_PREFIX_COMMON_ITEMS = [
@@ -823,8 +906,10 @@ const PAGE_MODULE_MAP = {
   'dispatch':'DISPATCH',
   'production':'PRODUCTION',
   'billing':'BILLING',
+  'adjustmentnotes':'BILLING',
   'printinvoice':'BILLING',
   'printchallan':'BILLING',
+  'printadjustment':'BILLING',
   'planning':'PLANNING',
   'reports':'REPORTS',
   'salesdashboard':'REPORTS',
@@ -1516,6 +1601,23 @@ function _requireMastersWriteAccess_(token, preferredAction) {
   throw new Error('Unauthorized');
 }
 
+function _mastersCanManageVendors_(user) {
+  if (!user) return false;
+  const roleCode = String(user.role || '').trim().toUpperCase();
+  if (roleCode === 'ADMIN') return true;
+  if (roleCode.indexOf('ACCOUNT') !== -1) return true;
+  return _userHasPermission_(user, 'SALES_ORDER_APPROVAL', 'can_approve_accounts');
+}
+
+function _requireVendorMasterAccess_(token) {
+  const user = getSessionUser(token);
+  if (!user) {
+    throw new Error('Your ERP session is missing or expired. Sign in again before maintaining vendors.');
+  }
+  if (_mastersCanManageVendors_(user)) return user;
+  throw new Error('Vendor Master is restricted to Accounts and Admin users.');
+}
+
 function _clientNormalizePartyPayloadRows_(clientRecord, payload) {
   const rows = Array.isArray(payload && payload.parties) ? payload.parties : [];
   const normalized = rows.map(function(row) {
@@ -1580,15 +1682,21 @@ function _clientNormalizePartyPayloadRows_(clientRecord, payload) {
 }
 
 function mastersGetBootstrap(token) {
-  _requireModuleAccess_(token, 'MASTERS', 'can_view');
-  const cacheKey = _cacheKeyHash_('MASTERS_BOOTSTRAP', _mastersCacheVersion_());
+  const user = _requireModuleAccess_(token, 'MASTERS', 'can_view');
+  const canManageVendors = _mastersCanManageVendors_(user);
+  const cacheKey = _cacheKeyHash_(
+    'MASTERS_BOOTSTRAP',
+    _mastersCacheVersion_() + '|' + (canManageVendors ? 'WITH_VENDORS' : 'CLIENTS_ONLY')
+  );
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
   try {
     const resultFromView = {
       ok: true,
       source: 'view',
-      clients: _mastersGetBootstrapFromView_()
+      clients: _mastersGetBootstrapFromView_(),
+      canManageVendors: canManageVendors,
+      vendors: canManageVendors ? _purchaseListVendors_() : []
     };
     _putCachedJson_(cacheKey, resultFromView, 180);
     return resultFromView;
@@ -1616,6 +1724,8 @@ function mastersGetBootstrap(token) {
   const result = {
     ok: true,
     source: 'fallback',
+    canManageVendors: canManageVendors,
+    vendors: canManageVendors ? _purchaseListVendors_() : [],
     clients: clients.map(function(row) {
       const parties = partyMap[String(row.id || '')] || [];
       return _mastersClientPayloadFromRows_(row, parties);
@@ -1711,6 +1821,216 @@ function mastersToggleClientStatus(clientId, active, token) {
   supabaseUpdateMinimal_('clients', { id: 'eq.' + id }, { active: nextActive });
   _touchMastersCacheVersion_();
   return { ok: true, clientId: id, active: nextActive };
+}
+
+function _mastersExportSelectedIds_(values, label) {
+  const seen = {};
+  const ids = (Array.isArray(values) ? values : []).map(function(value) {
+    return String(value || '').trim();
+  }).filter(function(id) {
+    if (!id || seen[id]) return false;
+    seen[id] = true;
+    return true;
+  });
+  if (!ids.length) throw new Error('No ' + label + ' rows are selected for export.');
+  if (ids.length > 5000) throw new Error('The export is limited to 5,000 ' + label + ' rows at a time.');
+  return ids;
+}
+
+function mastersExportClientsExcel(payload, token) {
+  _requireModuleAccess_(token, 'MASTERS', 'can_view');
+  const selectedIds = _mastersExportSelectedIds_(payload && payload.clientIds, 'client');
+  const selected = {};
+  selectedIds.forEach(function(id) { selected[id] = true; });
+
+  const clientRows = (_clientSelectRows_({
+    order: 'client_name.asc',
+    limit: 5000
+  }) || []).filter(function(row) {
+    return selected[String(row.id || '')] === true;
+  });
+  if (!clientRows.length) throw new Error('No matching clients were found for export.');
+
+  const clientIds = clientRows.map(function(row) { return String(row.id || ''); }).filter(Boolean);
+  const parties = _clientPartySelectRowsByClientIds_(
+    clientIds,
+    'client_id.asc,address_type.asc,is_default.desc,label.asc,party_name.asc'
+  ) || [];
+  const partyMap = {};
+  parties.forEach(function(row) {
+    const key = String(row.client_id || '');
+    if (!partyMap[key]) partyMap[key] = [];
+    partyMap[key].push(row);
+  });
+  const clients = clientRows.map(function(row) {
+    return _mastersClientPayloadFromRows_(row, partyMap[String(row.id || '')] || []);
+  });
+  const generatedAt = Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'Asia/Kolkata',
+    'dd-MMM-yyyy HH:mm'
+  );
+  const fileStamp = Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'Asia/Kolkata',
+    'yyyyMMdd-HHmm'
+  );
+  const clientSheetRows = clients.map(function(row) {
+    return [
+      row.clientCode,
+      row.clientName,
+      row.state,
+      row.category,
+      row.gstin,
+      row.panNo,
+      row.creditDays,
+      row.paymentTerms,
+      row.billToCount,
+      row.shipToCount,
+      row.active !== false
+    ];
+  });
+  const partySheetRows = [];
+  clients.forEach(function(client) {
+    (client.parties || []).forEach(function(party) {
+      partySheetRows.push([
+        client.clientCode,
+        client.clientName,
+        party.addressType,
+        party.isDefault === true,
+        party.label,
+        party.partyName,
+        party.addressLine1,
+        party.addressLine2,
+        party.city,
+        party.state,
+        party.pincode,
+        party.gstin,
+        party.panNo,
+        party.paymentTerms,
+        party.contactPerson,
+        party.contactPhone,
+        party.active !== false
+      ]);
+    });
+  });
+
+  return _reportsExportWorkbookXlsx_({
+    fileName: 'client-master-' + fileStamp + '.xlsx',
+    sheets: [
+      {
+        name: 'Clients',
+        title: 'Client Master',
+        subtitle: 'Filtered client register with commercial controls',
+        generatedAt: generatedAt,
+        columns: [
+          { label:'Client Code' },
+          { label:'Client Name' },
+          { label:'State' },
+          { label:'Category' },
+          { label:'GSTIN' },
+          { label:'PAN No.' },
+          { label:'Credit Days', type:'number' },
+          { label:'Payment Terms' },
+          { label:'Bill To Rows', type:'number' },
+          { label:'Ship To Rows', type:'number' },
+          { label:'Active' }
+        ],
+        rows: clientSheetRows
+      },
+      {
+        name: 'Client Parties',
+        title: 'Client Bill To and Ship To Master',
+        subtitle: 'All address records belonging to the filtered client register',
+        generatedAt: generatedAt,
+        columns: [
+          { label:'Client Code' },
+          { label:'Client Name' },
+          { label:'Address Type' },
+          { label:'Default' },
+          { label:'Label' },
+          { label:'Party Name' },
+          { label:'Address Line 1' },
+          { label:'Address Line 2' },
+          { label:'City' },
+          { label:'State' },
+          { label:'Pincode' },
+          { label:'GSTIN' },
+          { label:'PAN No.' },
+          { label:'Payment Terms' },
+          { label:'Contact Person' },
+          { label:'Contact Phone' },
+          { label:'Active' }
+        ],
+        rows: partySheetRows
+      }
+    ]
+  });
+}
+
+function mastersExportVendorsExcel(payload, token) {
+  _requireVendorMasterAccess_(token);
+  const selectedIds = _mastersExportSelectedIds_(payload && payload.vendorIds, 'vendor');
+  const selected = {};
+  selectedIds.forEach(function(id) { selected[id] = true; });
+  const vendors = _purchaseListVendors_().filter(function(row) {
+    return selected[String(row.id || '')] === true;
+  });
+  if (!vendors.length) throw new Error('No matching vendors were found for export.');
+
+  const generatedAt = Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'Asia/Kolkata',
+    'dd-MMM-yyyy HH:mm'
+  );
+  const fileStamp = Utilities.formatDate(
+    new Date(),
+    Session.getScriptTimeZone() || 'Asia/Kolkata',
+    'yyyyMMdd-HHmm'
+  );
+  return _reportsExportWorkbookXlsx_({
+    fileName: 'vendor-master-' + fileStamp + '.xlsx',
+    sheets: [{
+      name: 'Vendors',
+      title: 'Vendor Master',
+      subtitle: 'Accounts-controlled filtered vendor register',
+      generatedAt: generatedAt,
+      columns: [
+        { label:'Vendor Code' },
+        { label:'Vendor Name' },
+        { label:'Category' },
+        { label:'Contact Person' },
+        { label:'Email' },
+        { label:'Phone' },
+        { label:'GSTIN' },
+        { label:'Address' },
+        { label:'City' },
+        { label:'State' },
+        { label:'Notes' },
+        { label:'Active' },
+        { label:'Created At' },
+        { label:'Updated At' }
+      ],
+      rows: vendors.map(function(row) {
+        return [
+          row.vendorCode,
+          row.vendorName,
+          row.category,
+          row.contactPerson,
+          row.email,
+          row.phone,
+          row.gstin,
+          row.address,
+          row.city,
+          row.state,
+          row.notes,
+          row.isActive !== false,
+          row.createdAt,
+          row.updatedAt
+        ];
+      })
+    }]
+  });
 }
 
 /******************************************************
@@ -2305,6 +2625,8 @@ function _purchaseMapPOHeader_(h) {
 
 function _purchaseMapPOLine_(l) {
   l = l || {};
+  const stockQty = l.stock_qty == null ? Number(l.qty || 0) : Number(l.stock_qty || 0);
+  const purchaseQty = l.purchase_qty == null ? stockQty : Number(l.purchase_qty || 0);
   return {
     id: l.id,
     poId: l.po_id,
@@ -2315,6 +2637,20 @@ function _purchaseMapPOLine_(l) {
     itemCode: l.item_code || '',
     itemName: l.item_name || '',
     qty: Number(l.qty || 0),
+    stockQty: stockQty,
+    stockUom: l.stock_uom || '',
+    purchaseQty: purchaseQty,
+    purchaseUom: l.purchase_uom || '',
+    conversionType: l.conversion_type || '',
+    conversionFactor: l.conversion_factor == null ? '' : Number(l.conversion_factor || 0),
+    rateKey: l.rate_key || '',
+    rateMasterId: l.rate_master_id || '',
+    ratePolicy: l.rate_policy || '',
+    rateOverrideApprovalId: l.rate_override_approval_id || '',
+    rateOverrideReason: l.rate_override_reason || '',
+    masterRateCeiling: Number(l.master_rate_ceiling || 0),
+    masterTaxPctSnapshot: Number(l.master_tax_pct_snapshot || 0),
+    rateControlStatus: l.rate_control_status || '',
     rate: Number(l.rate || 0),
     taxPct: Number(l.tax_pct || 0),
     amount: Number(l.amount || 0),
@@ -2324,6 +2660,44 @@ function _purchaseMapPOLine_(l) {
     jobRef: l.job_ref || '',
     remarks: l.remarks || '',
     createdAt: l.created_at || ''
+  };
+}
+
+function _purchasePOLineDbPayload_(line, poId, poNo) {
+  line = line || {};
+  return {
+    id: line.id,
+    po_id: poId,
+    po_no: poNo || line.poNo,
+    line_no: line.lineNo,
+    source_type: line.sourceType,
+    source_ref: line.sourceRef,
+    item_code: line.itemCode,
+    item_name: line.itemName,
+    qty: line.qty,
+    stock_qty: line.stockQty == null ? line.qty : line.stockQty,
+    stock_uom: line.stockUom || '',
+    purchase_qty: line.purchaseQty == null ? line.qty : line.purchaseQty,
+    purchase_uom: line.purchaseUom || line.stockUom || '',
+    conversion_type: line.conversionType || '',
+    conversion_factor: line.conversionFactor || 1,
+    rate_key: line.rateKey || '',
+    rate_master_id: line.rateMasterId || null,
+    rate_policy: line.ratePolicy || '',
+    rate_override_approval_id: line.rateOverrideApprovalId || null,
+    rate_override_reason: line.rateOverrideReason || '',
+    master_rate_ceiling: Number(line.masterRateCeiling || 0) || null,
+    master_tax_pct_snapshot: line.masterTaxPctSnapshot == null ? null : Number(line.masterTaxPctSnapshot || 0),
+    rate_control_status: line.rateControlStatus || 'MANUAL_ALLOWED',
+    rate: line.rate,
+    tax_pct: line.taxPct,
+    amount: line.amount,
+    tax_amount: line.taxAmount,
+    total_amount: line.totalAmount,
+    department: line.department,
+    job_ref: line.jobRef,
+    remarks: line.remarks,
+    created_at: line.createdAt
   };
 }
 
@@ -2545,6 +2919,9 @@ function _purchaseListPOReceipts_(opts) {
       receiptDate: r.receipt_date || '',
       challanNo: r.challan_no || '',
       qty: Number(r.qty || 0),
+      stockUom: r.stock_uom || '',
+      purchaseQty: r.purchase_qty == null ? Number(r.qty || 0) : Number(r.purchase_qty || 0),
+      purchaseUom: r.purchase_uom || r.stock_uom || '',
       rate: Number(r.rate || 0),
       remarks: r.remarks || '',
       sourceRef: r.source_ref || '',
@@ -2767,7 +3144,7 @@ function _purchaseIsServiceToolingDepartment_(department) {
 
 function _purchaseReceiptHasOptionalLinkageColumnError_(err) {
   const message = String(err && err.message ? err.message : err || '');
-  return /purchase_po_receipts\.(source_ref|job_ref|artwork_no|so_refs)|column "(source_ref|job_ref|artwork_no|so_refs)" of relation "purchase_po_receipts" does not exist|column purchase_po_receipts\.(source_ref|job_ref|artwork_no|so_refs) does not exist|find the '(source_ref|job_ref|artwork_no|so_refs)' column of 'purchase_po_receipts'/i.test(message);
+  return /purchase_po_receipts\.(source_ref|job_ref|artwork_no|so_refs|grn_no|idempotency_key|ledger_id|lot_id|rate_override_approval_id|rate_ceiling_snapshot|rate_control_status|stock_uom|purchase_uom|purchase_qty|tax_pct)|column "(source_ref|job_ref|artwork_no|so_refs|grn_no|idempotency_key|ledger_id|lot_id|rate_override_approval_id|rate_ceiling_snapshot|rate_control_status|stock_uom|purchase_uom|purchase_qty|tax_pct)" of relation "purchase_po_receipts" does not exist|find the '(source_ref|job_ref|artwork_no|so_refs|grn_no|idempotency_key|ledger_id|lot_id|rate_override_approval_id|rate_ceiling_snapshot|rate_control_status|stock_uom|purchase_uom|purchase_qty|tax_pct)' column of 'purchase_po_receipts'/i.test(message);
 }
 
 function _purchaseReceiptDbRow_(row, includeOptionalLinkage) {
@@ -2793,6 +3170,17 @@ function _purchaseReceiptDbRow_(row, includeOptionalLinkage) {
     dbRow.job_ref = jobRef;
     dbRow.artwork_no = String(row.artworkNo || sourceRef || row.itemCode || '').trim();
     dbRow.so_refs = String(row.soRefs || jobRef || '').trim();
+    dbRow.grn_no = String(row.grnNo || '').trim();
+    dbRow.idempotency_key = String(row.idempotencyKey || '').trim();
+    dbRow.ledger_id = row.ledgerId || null;
+    dbRow.lot_id = row.lotId || null;
+    dbRow.rate_override_approval_id = row.rateOverrideApprovalId || null;
+    dbRow.rate_ceiling_snapshot = row.rateCeilingSnapshot == null ? null : Number(row.rateCeilingSnapshot || 0);
+    dbRow.rate_control_status = row.rateControlStatus || 'MANUAL_ALLOWED';
+    dbRow.stock_uom = String(row.stockUom || '').trim();
+    dbRow.purchase_uom = String(row.purchaseUom || '').trim();
+    dbRow.purchase_qty = row.purchaseQty == null ? Number(row.qty || 0) : Number(row.purchaseQty || 0);
+    dbRow.tax_pct = Number(row.taxPct || 0);
   }
   return dbRow;
 }
@@ -3123,7 +3511,7 @@ function _purchaseNormalizeVendor_(payload, existing) {
     contactPerson: String(payload.contactPerson || '').trim(),
     email: String(payload.email || '').trim(),
     phone: String(payload.phone || '').trim(),
-    gstin: String(payload.gstin || '').trim(),
+    gstin: String(payload.gstin || '').trim().toUpperCase(),
     address: String(payload.address || '').trim(),
     city: String(payload.city || '').trim(),
     state: String(payload.state || '').trim(),
@@ -3144,7 +3532,8 @@ function purchaseListVendorsJSON() {
   };
 }
 
-function purchaseSaveVendor(payload) {
+function purchaseSaveVendor(payload, token) {
+  _requireVendorMasterAccess_(_authTokenFromPayload_(payload, token));
   if (!payload) throw new Error('Vendor details are required');
 
   const required = [
@@ -3168,6 +3557,22 @@ function purchaseSaveVendor(payload) {
 
   const existing = _purchaseListVendors_().find(v => v.id === payload.id) || null;
   const record = _purchaseNormalizeVendor_(payload, existing);
+  const duplicateName = _purchaseListVendors_().find(function(v) {
+    return v.id !== record.id &&
+      String(v.vendorName || '').trim().toUpperCase() === record.vendorName.toUpperCase();
+  });
+  if (duplicateName) {
+    throw new Error('Vendor name already exists: ' + duplicateName.vendorName);
+  }
+  if (record.gstin) {
+    const duplicateGstin = _purchaseListVendors_().find(function(v) {
+      return v.id !== record.id &&
+        String(v.gstin || '').trim().toUpperCase() === record.gstin.toUpperCase();
+    });
+    if (duplicateGstin) {
+      throw new Error('GSTIN is already used by vendor ' + duplicateGstin.vendorName);
+    }
+  }
 
   const dbRow = {
     id: record.id,
@@ -3193,10 +3598,12 @@ function purchaseSaveVendor(payload) {
     supabaseInsert_('purchase_vendors', dbRow);
   }
   PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  _touchMastersCacheVersion_();
   return { ok: true, vendor: record };
 }
 
-function purchaseSetVendorStatus(payload) {
+function purchaseSetVendorStatus(payload, token) {
+  _requireVendorMasterAccess_(_authTokenFromPayload_(payload, token));
   if (!payload || !payload.id) throw new Error('Vendor id is required');
   const existing = _purchaseListVendors_().find(v => v.id === String(payload.id || '').trim());
   if (!existing) throw new Error('Vendor not found');
@@ -3206,6 +3613,7 @@ function purchaseSetVendorStatus(payload) {
     updated_at: _purchaseNowIso_()
   });
   PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  _touchMastersCacheVersion_();
   return { ok: true, id: existing.id, isActive: isActive };
 }
 
@@ -3337,6 +3745,1388 @@ function purchaseSaveLeadTimeBulk(payload) {
   return { ok: true, updated: updated, updatedAt: now };
 }
 
+function _purchaseRateTableMissing_(err) {
+  return _supabaseRelationMissing_(err, 'purchase_rate_masters') ||
+    _supabaseRelationMissing_(err, 'purchase_rate_item_policies') ||
+    _supabaseRelationMissing_(err, 'purchase_rate_override_approvals') ||
+    _supabaseRelationMissing_(err, 'v_purchase_rate_master_setup_v2') ||
+    _supabaseRelationMissing_(err, 'v_purchase_orders_rate_control_v1') ||
+    _supabaseRelationMissing_(err, 'v_purchase_po_detail_rate_control_v1') ||
+    _supabaseRelationMissing_(err, 'v_purchase_po_print_lines_rate_control_v1') ||
+    _supabaseRelationMissing_(err, 'stock_qty') ||
+    _supabaseRelationMissing_(err, 'purchase_qty') ||
+    _supabaseRelationMissing_(err, 'purchase_uom') ||
+    _supabaseRelationMissing_(err, 'rate_key') ||
+    _supabaseRelationMissing_(err, 'rate_policy') ||
+    _supabaseRelationMissing_(err, 'master_rate_ceiling') ||
+    _supabaseRelationMissing_(err, 'master_tax_pct_snapshot') ||
+    _supabaseRelationMissing_(err, 'rate_control_status') ||
+    _supabaseRelationMissing_(err, 'request_fingerprint') ||
+    _supabaseRelationMissing_(err, 'requested_by_user_id') ||
+    _supabaseRelationMissing_(err, 'requested_purchase_qty') ||
+    _supabaseRelationMissing_(err, 'expires_at') ||
+    _supabaseRelationMissing_(err, 'idempotency_key') ||
+    _supabaseRelationMissing_(err, 'rate_ceiling_snapshot');
+}
+
+function _purchaseRateInstallMessage_() {
+  return 'Purchase rate control schema is incomplete. Apply the purchase-rate migrations through supabase/purchase_po_gst_editable_20260724.sql in Supabase first.';
+}
+
+function _purchaseRateRequireApprovalSession_(token) {
+  const user = getSessionUser(token);
+  if (!user) throw new Error('Unauthorized');
+  const roleCode = String(user.role || '').trim().toUpperCase();
+  if (roleCode === 'ADMIN') return user;
+  if (['ACCOUNT','ACCOUNTS','ACCOUNT_HEAD','ACCOUNTS_HEAD','BUSINESS','BUSINESS_HEAD','BUSINESS HEAD'].indexOf(roleCode) !== -1) return user;
+  if (_userHasPermission_(user, 'SALES_ORDER_APPROVAL', 'can_approve_accounts')) return user;
+  if (_userHasPermission_(user, 'SALES_ORDER_APPROVAL', 'can_approve_business')) return user;
+  throw new Error('You do not have permission to approve purchase rate overrides.');
+}
+
+function _purchaseNormalizeRatePolicy_(value) {
+  const key = String(value || '').trim().toUpperCase();
+  return ['RATE_CONTROLLED','MANUAL_ALLOWED','TEMP_EXCEPTION'].indexOf(key) !== -1 ? key : 'MANUAL_ALLOWED';
+}
+
+function _purchaseNormalizeRateKey_(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ');
+}
+
+function _purchaseNormalizeRmTypeCode_(value) {
+  return _purchaseNormalizeRateKey_(value);
+}
+
+function _purchaseMapRmTypeMasterRow_(row, usage) {
+  row = row || {};
+  const key = String(row.rm_type_code || '').trim().toUpperCase();
+  const counts = usage && usage[key] || {};
+  return {
+    id: row.id || '',
+    code: row.rm_type_code || '',
+    name: row.rm_type_name || row.rm_type_code || '',
+    notes: row.notes || '',
+    active: row.active !== false,
+    itemCount: Number(counts.itemCount || 0),
+    policyCount: Number(counts.policyCount || 0),
+    rateCount: Number(counts.rateCount || 0),
+    usageCount: Number(counts.itemCount || 0) + Number(counts.policyCount || 0) + Number(counts.rateCount || 0),
+    updatedAt: row.updated_at || '',
+    updatedBy: row.updated_by || ''
+  };
+}
+
+function _purchaseListRmTypeMasterRows_(includeInactive) {
+  const filters = {};
+  if (includeInactive !== true) filters.active = 'eq.true';
+  try {
+    return _supabaseSelectAll_('purchase_rm_type_master', {
+      select: '*',
+      filters: filters,
+      order: 'rm_type_name.asc,rm_type_code.asc'
+    }, 1000, 5000) || [];
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'purchase_rm_type_master')) {
+      throw new Error('RM Type master is not installed. Re-run supabase_purchase_rate_control.sql in Supabase.');
+    }
+    throw err;
+  }
+}
+
+function _purchaseFindRmTypeMaster_(code, includeInactive) {
+  const normalized = _purchaseNormalizeRmTypeCode_(code);
+  if (!normalized) return null;
+  const rows = supabaseSelect_('purchase_rm_type_master', {
+    select: '*',
+    filters: {
+      rm_type_code: 'ilike.' + normalized
+    },
+    limit: 5
+  }) || [];
+  return rows.find(function(row) {
+    return includeInactive === true || row.active !== false;
+  }) || null;
+}
+
+function _purchaseRmTypeUsageMap_() {
+  const usage = {};
+  function add(code, field) {
+    const key = String(code || '').trim().toUpperCase();
+    if (!key) return;
+    usage[key] = usage[key] || { itemCount: 0, policyCount: 0, rateCount: 0 };
+    usage[key][field] = Number(usage[key][field] || 0) + 1;
+  }
+  (_supabaseSelectAll_('inv_items', {
+    select: 'rm_type'
+  }, 1000, 50000) || []).forEach(function(row) { add(row.rm_type, 'itemCount'); });
+  (_supabaseSelectAll_('purchase_rate_item_policies', {
+    select: 'rate_key'
+  }, 1000, 50000) || []).forEach(function(row) { add(row.rate_key, 'policyCount'); });
+  (_supabaseSelectAll_('purchase_rate_masters', {
+    select: 'rate_key'
+  }, 1000, 50000) || []).forEach(function(row) { add(row.rate_key, 'rateCount'); });
+  return usage;
+}
+
+function _purchaseTouchRmTypeVersions_() {
+  const props = PropertiesService.getScriptProperties();
+  const now = String(Date.now());
+  props.setProperty('PURCHASE_CACHE_VERSION', now);
+  props.setProperty('ITEM_MASTER_CACHE_VERSION', now);
+  props.setProperty('ITEM_MASTER_PURCHASE_UOM_VERSION', now);
+}
+
+function adminListPurchaseRateSetup(token) {
+  _requireAdmin_(token);
+  const rateMasters = _purchaseListRateMasterRows_().map(_purchaseMapRateMasterRow_);
+  const purchaseUoms = [];
+  let uomRows = [];
+  try {
+    uomRows = _supabaseSelectAll_('v_inv_item_purchase_uom_setup', {
+      select: 'purchase_uom,stock_uom'
+    }, 1000, 50000) || [];
+  } catch (err) {
+    if (!_itemMasterPurchaseUomSetupViewMissing_(err)) throw err;
+    uomRows = _supabaseSelectAll_('inv_items', {
+      select: 'uom'
+    }, 1000, 50000) || [];
+  }
+  uomRows.forEach(function(row) {
+    const value = String(row.purchase_uom || row.stock_uom || row.uom || '').trim().toUpperCase();
+    if (value) purchaseUoms.push(value);
+  });
+  rateMasters.forEach(function(row) {
+    const value = String(row.purchaseUom || '').trim().toUpperCase();
+    if (value) purchaseUoms.push(value);
+  });
+  return {
+    ok: true,
+    rmTypes: _purchaseListRmTypeMasterRows_(true).map(function(row) {
+      return _purchaseMapRmTypeMasterRow_(row, {});
+    }),
+    rateMasters: rateMasters,
+    purchaseUoms: [...new Set(purchaseUoms)].sort()
+  };
+}
+
+function invListPurchaseRmTypeSetup(token) {
+  _requireModuleAccess_(token, 'INVENTORY', 'can_view');
+  const usage = _purchaseRmTypeUsageMap_();
+  let setupRows;
+  try {
+    setupRows = _supabaseSelectAll_('v_purchase_rate_master_setup_v2', {
+      select: 'item_id,item_code,item_name,category,department,rm_type,stock_uom,purchase_uom,rate_key,control_policy,policy_notes,setup_status,conversion_setup_status,conversion_rule_active,conversion_type',
+      order: 'rate_key.asc,purchase_uom.asc,item_name.asc'
+    }, 1000, 50000) || [];
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err)) throw new Error(_purchaseRateInstallMessage_());
+    throw err;
+  }
+  const rows = setupRows.map(function(row) {
+    return {
+      itemId: row.item_id || '',
+      itemCode: row.item_code || '',
+      itemName: row.item_name || '',
+      category: row.category,
+      department: row.department,
+      rmType: row.rm_type || '',
+      stockUom: row.stock_uom || '',
+      purchaseUom: row.purchase_uom || row.stock_uom || '',
+      rateKey: _purchaseNormalizeRateKey_(row.rate_key || row.rm_type || ''),
+      controlPolicy: _purchaseNormalizeRatePolicy_(row.control_policy),
+      policyNotes: row.policy_notes || '',
+      setupStatus: String(row.setup_status || '').trim().toUpperCase() || 'MANUAL_ALLOWED',
+      conversionSetupStatus: String(row.conversion_setup_status || '').trim().toUpperCase(),
+      conversionRuleActive: row.conversion_rule_active !== false,
+      conversionType: row.conversion_type || ''
+    };
+  });
+  return {
+    ok: true,
+    rmTypes: _purchaseListRmTypeMasterRows_(true).map(function(row) {
+      return _purchaseMapRmTypeMasterRow_(row, usage);
+    }),
+    rows: rows
+  };
+}
+
+function _purchaseSaveRmTypeForUser_(payload, user) {
+  const p = payload || {};
+  const id = String(p.id || '').trim();
+  const existing = id ? (supabaseSelect_('purchase_rm_type_master', {
+    select: '*',
+    filters: { id: 'eq.' + id },
+    limit: 1
+  }) || [])[0] : null;
+  if (id && !existing) throw new Error('RM Type not found');
+
+  const code = _purchaseNormalizeRmTypeCode_(p.code || p.rmTypeCode || p.name);
+  const name = String(p.name || p.rmTypeName || code).trim();
+  if (!code) throw new Error('RM Type code is required');
+  if (!name) throw new Error('RM Type name is required');
+
+  const duplicate = (supabaseSelect_('purchase_rm_type_master', {
+    select: 'id,rm_type_code',
+    filters: { rm_type_code: 'ilike.' + code },
+    limit: 5
+  }) || []).find(function(row) { return String(row.id || '') !== id; });
+  if (duplicate) throw new Error('RM Type already exists: ' + duplicate.rm_type_code);
+
+  if (existing && String(existing.rm_type_code || '').trim().toUpperCase() !== code.toUpperCase()) {
+    const usage = _purchaseRmTypeUsageMap_()[String(existing.rm_type_code || '').trim().toUpperCase()] || {};
+    const used = Number(usage.itemCount || 0) + Number(usage.policyCount || 0) + Number(usage.rateCount || 0);
+    if (used > 0) throw new Error('Used RM Types cannot be renamed. Deactivate this type and create a new one.');
+  }
+
+  const actor = _authActorName_(user);
+  const now = _purchaseNowIso_();
+  const row = {
+    rm_type_code: code,
+    rm_type_name: name,
+    notes: String(p.notes || '').trim(),
+    active: p.active === false ? false : true,
+    updated_at: now,
+    updated_by: actor
+  };
+  let savedId = id;
+  if (existing) {
+    supabaseUpdateMinimal_('purchase_rm_type_master', { id: 'eq.' + id }, row);
+  } else {
+    savedId = Utilities.getUuid();
+    supabaseInsertMinimal_('purchase_rm_type_master', Object.assign({
+      id: savedId,
+      created_at: now,
+      created_by: actor
+    }, row));
+  }
+  supabaseInsertMinimal_('purchase_rate_master_audit', {
+    entity_type: 'RM_TYPE',
+    entity_id: savedId,
+    entity_key: code,
+    action: existing ? 'UPDATE' : 'INSERT',
+    before_data: existing,
+    after_data: Object.assign({ id: savedId }, row),
+    changed_by: actor
+  });
+  _purchaseTouchRmTypeVersions_();
+  return { ok: true, id: savedId };
+}
+
+function adminSavePurchaseRmType(payload, token) {
+  return _purchaseSaveRmTypeForUser_(payload, _requireAdmin_(token));
+}
+
+function _purchaseRequireInventorySetupWrite_(payload, token, allowCreate) {
+  const user = getSessionUser(_authTokenFromPayload_(payload, token));
+  if (!user) throw new Error('Your ERP session has expired. Sign in again and retry.');
+  if (String(user.role || '').trim().toUpperCase() === 'ADMIN') return user;
+  const modules = ['INVENTORY','ITEMMASTER','MASTERS'];
+  const allowed = modules.some(function(moduleCode) {
+    return _userHasPermission_(user, moduleCode, 'can_edit') ||
+      (allowCreate !== true && _userHasPermission_(user, moduleCode, 'can_delete')) ||
+      (allowCreate === true && _userHasPermission_(user, moduleCode, 'can_create'));
+  });
+  if (!allowed) {
+    throw new Error('Inventory, Item Master, or Masters edit permission is required to maintain RM Types and item rate-control policies.');
+  }
+  return user;
+}
+
+function invSavePurchaseRmType(payload, token) {
+  const user = _purchaseRequireInventorySetupWrite_(payload, token, true);
+  return _purchaseSaveRmTypeForUser_(payload, user);
+}
+
+function _purchaseDeleteRmTypeForUser_(id, user) {
+  const key = String(id || '').trim();
+  if (!key) throw new Error('RM Type id is required');
+  const existing = (supabaseSelect_('purchase_rm_type_master', {
+    select: '*',
+    filters: { id: 'eq.' + key },
+    limit: 1
+  }) || [])[0];
+  if (!existing) throw new Error('RM Type not found');
+  const usage = _purchaseRmTypeUsageMap_()[String(existing.rm_type_code || '').trim().toUpperCase()] || {};
+  const used = Number(usage.itemCount || 0) + Number(usage.policyCount || 0) + Number(usage.rateCount || 0);
+  if (used > 0) throw new Error('This RM Type is in use and cannot be deleted. Deactivate it instead.');
+  supabaseDeleteMinimal_('purchase_rm_type_master', { id: 'eq.' + key });
+  supabaseInsertMinimal_('purchase_rate_master_audit', {
+    entity_type: 'RM_TYPE',
+    entity_id: key,
+    entity_key: existing.rm_type_code || '',
+    action: 'DELETE',
+    before_data: existing,
+    after_data: null,
+    changed_by: _authActorName_(user)
+  });
+  _purchaseTouchRmTypeVersions_();
+  return { ok: true };
+}
+
+function adminDeletePurchaseRmType(id, token) {
+  return _purchaseDeleteRmTypeForUser_(id, _requireAdmin_(token));
+}
+
+function invDeletePurchaseRmType(id, token) {
+  const user = _purchaseRequireInventorySetupWrite_(null, token, false);
+  return _purchaseDeleteRmTypeForUser_(id, user);
+}
+
+function _purchaseRateRound_(value, places) {
+  const n = Number(value || 0);
+  return Number(n.toFixed(places || 4));
+}
+
+function _purchaseListRateMasterRows_() {
+  try {
+    return _supabaseSelectAll_('purchase_rate_masters', {
+      select: '*',
+      order: 'rate_key.asc,purchase_uom.asc,effective_from.desc,updated_at.desc'
+    }, 1000, 10000) || [];
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err)) throw new Error(_purchaseRateInstallMessage_());
+    throw err;
+  }
+}
+
+function _purchaseMapRateMasterRow_(row) {
+  row = row || {};
+  return {
+    id: row.id || '',
+    rateKey: row.rate_key || '',
+    rateName: row.rate_name || row.rate_key || '',
+    purchaseUom: row.purchase_uom || '',
+    rate: row.rate == null ? '' : Number(row.rate || 0),
+    taxPct: Number(row.tax_pct || 0),
+    effectiveFrom: row.effective_from || '',
+    effectiveTo: row.effective_to || '',
+    status: row.status || '',
+    notes: row.notes || '',
+    createdAt: row.created_at || '',
+    createdBy: row.created_by || '',
+    updatedAt: row.updated_at || '',
+    updatedBy: row.updated_by || ''
+  };
+}
+
+function adminSavePurchaseRateMaster(payload, token) {
+  const admin = _requireAdmin_(_authTokenFromPayload_(payload, token));
+  const p = payload || {};
+  const id = String(p.id || '').trim();
+  const existing = id ? (supabaseSelect_('purchase_rate_masters', {
+    select: '*',
+    filters: { id: 'eq.' + id },
+    limit: 1
+  }) || [])[0] : null;
+  if (id && !existing) throw new Error('Purchase rate master not found');
+
+  let rateKey = _purchaseNormalizeRateKey_(p.rateKey || p.rate_key);
+  const rmTypeMaster = _purchaseFindRmTypeMaster_(rateKey, !!existing);
+  if (!rmTypeMaster) throw new Error('Select an active RM Type from the master');
+  rateKey = rmTypeMaster.rm_type_code;
+  if (!existing && rmTypeMaster.active === false) throw new Error('Inactive RM Types cannot receive new purchase rates');
+
+  const purchaseUom = String(p.purchaseUom || p.purchase_uom || '').trim().toUpperCase();
+  const rate = Number(p.rate);
+  const taxPct = Number(p.taxPct || p.tax_pct || 0);
+  const effectiveFrom = String(p.effectiveFrom || p.effective_from || _purchaseIsoDate_(new Date())).trim();
+  const effectiveTo = String(p.effectiveTo || p.effective_to || '').trim();
+  const status = String(p.status || 'ACTIVE').trim().toUpperCase();
+  if (!purchaseUom) throw new Error('Purchase UOM is required');
+  if (!(rate > 0)) throw new Error('Purchase rate must be greater than zero');
+  if (!(taxPct >= 0 && taxPct <= 100)) throw new Error('GST % must be between 0 and 100');
+  if (!effectiveFrom) throw new Error('Effective From is required');
+  if (effectiveTo && effectiveTo < effectiveFrom) throw new Error('Effective To cannot be before Effective From');
+  if (['DRAFT','ACTIVE','INACTIVE'].indexOf(status) === -1) throw new Error('Invalid rate status');
+
+  if (existing) {
+    if (String(existing.rate_key || '').trim().toUpperCase() !== String(rateKey).trim().toUpperCase() ||
+        String(existing.purchase_uom || '').trim().toUpperCase() !== purchaseUom) {
+      throw new Error('RM Type and Purchase UOM cannot be changed on an existing rate. Create a new rate master instead.');
+    }
+  }
+
+  const actor = _authActorName_(admin);
+  const now = _purchaseNowIso_();
+  const savedId = id || Utilities.getUuid();
+  const row = {
+    id: savedId,
+    rate_key: rateKey,
+    rate_name: String(p.rateName || p.rate_name || rmTypeMaster.rm_type_name || rateKey).trim() || rateKey,
+    purchase_uom: purchaseUom,
+    rate: _purchaseRateRound_(rate, 4),
+    tax_pct: _purchaseRateRound_(taxPct, 2),
+    effective_from: effectiveFrom,
+    effective_to: effectiveTo || null,
+    status: status,
+    notes: String(p.notes || '').trim(),
+    updated_at: now,
+    updated_by: actor
+  };
+  if (!existing) {
+    row.created_at = now;
+    row.created_by = actor;
+  }
+  supabaseUpsertMinimal_('purchase_rate_masters', row, { onConflict: 'id' });
+  supabaseInsertMinimal_('purchase_rate_master_audit', {
+    entity_type: 'RATE_MASTER',
+    entity_id: savedId,
+    entity_key: rateKey + '|' + purchaseUom,
+    action: existing ? 'UPDATE' : 'INSERT',
+    before_data: existing,
+    after_data: row,
+    changed_by: actor
+  });
+  PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  return { ok: true, id: savedId };
+}
+
+function adminDeactivatePurchaseRateMaster(id, token) {
+  const admin = _requireAdmin_(token);
+  const key = String(id || '').trim();
+  if (!key) throw new Error('Purchase rate master id is required');
+  const existing = (supabaseSelect_('purchase_rate_masters', {
+    select: '*',
+    filters: { id: 'eq.' + key },
+    limit: 1
+  }) || [])[0];
+  if (!existing) throw new Error('Purchase rate master not found');
+  if (String(existing.status || '').toUpperCase() === 'INACTIVE') return { ok: true };
+  const now = _purchaseNowIso_();
+  const after = Object.assign({}, existing, {
+    status: 'INACTIVE',
+    updated_at: now,
+    updated_by: _authActorName_(admin)
+  });
+  supabaseUpdateMinimal_('purchase_rate_masters', { id: 'eq.' + key }, {
+    status: after.status,
+    updated_at: after.updated_at,
+    updated_by: after.updated_by
+  });
+  supabaseInsertMinimal_('purchase_rate_master_audit', {
+    entity_type: 'RATE_MASTER',
+    entity_id: key,
+    entity_key: String(existing.rate_key || '') + '|' + String(existing.purchase_uom || ''),
+    action: 'DEACTIVATE',
+    before_data: existing,
+    after_data: after,
+    changed_by: after.updated_by
+  });
+  PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  return { ok: true };
+}
+
+function _purchaseGetRateMasterSetupRows_(filters) {
+  try {
+    return _supabaseSelectAll_('v_purchase_rate_master_setup_v2', {
+      select: '*',
+      filters: filters || {},
+      order: 'rate_key.asc,purchase_uom.asc,item_name.asc'
+    }, 1000, 50000) || [];
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err)) throw new Error(_purchaseRateInstallMessage_());
+    throw err;
+  }
+}
+
+function _purchaseMapRateMasterSetupRow_(row) {
+  row = row || {};
+  const policy = _purchaseNormalizeRatePolicy_(row.control_policy);
+  const rate = row.rate == null ? '' : Number(row.rate || 0);
+  const setupStatus = String(row.setup_status || '').trim().toUpperCase() ||
+    (policy === 'RATE_CONTROLLED' && !(Number(rate || 0) > 0) ? 'MISSING_RATE' : 'MANUAL_ALLOWED');
+  return {
+    itemId: row.item_id || '',
+    itemCode: row.item_code || '',
+    itemName: row.item_name || '',
+    category: row.category || '',
+    department: row.department || '',
+    rmType: row.rm_type || '',
+    stockUom: row.stock_uom || '',
+    purchaseUom: row.purchase_uom || row.stock_uom || '',
+    rateKey: _purchaseNormalizeRateKey_(row.rate_key || row.rm_type || ''),
+    controlPolicy: policy,
+    policyNotes: row.policy_notes || '',
+    rateMasterId: row.rate_master_id || '',
+    rateName: row.rate_name || row.rate_key || row.rm_type || '',
+    rate: rate,
+    taxPct: Number(row.tax_pct || 0),
+    effectiveFrom: row.effective_from || '',
+    effectiveTo: row.effective_to || '',
+    rateStatus: row.rate_status || '',
+    rateNotes: row.rate_notes || '',
+    setupStatus: setupStatus,
+    conversionSetupStatus: String(row.conversion_setup_status || '').trim().toUpperCase(),
+    conversionRuleActive: row.conversion_rule_active !== false,
+    conversionType: row.conversion_type || ''
+  };
+}
+
+function purchaseListRateMasterSetupJSON(opts) {
+  const p = opts || {};
+  const q = String(p.q || '').trim().toLowerCase();
+  let rows = _purchaseGetRateMasterSetupRows_({}).map(_purchaseMapRateMasterSetupRow_);
+  if (q) {
+    rows = rows.filter(function(row) {
+      return [row.itemCode, row.itemName, row.category, row.department, row.rmType, row.rateKey, row.purchaseUom, row.setupStatus]
+        .join(' ').toLowerCase().indexOf(q) !== -1;
+    });
+  }
+  const status = String(p.setupStatus || '').trim().toUpperCase();
+  if (status) rows = rows.filter(function(row) { return String(row.setupStatus || '').toUpperCase() === status; });
+  return { ok: true, rows: rows };
+}
+
+function _purchaseSaveRatePoliciesForUser_(payload, user) {
+  const actor = _authActorName_(user);
+  const sourceRows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+  if (!sourceRows.length) throw new Error('No item policy rows supplied');
+  if (sourceRows.length > 250) throw new Error('A maximum of 250 item policy rows can be saved at once');
+  const now = new Date().toISOString();
+  const rowsByItem = {};
+  sourceRows.forEach(function(src) {
+    const itemCode = String(src.itemCode || src.item_code || '').trim();
+    if (!itemCode) throw new Error('Item code is required');
+    rowsByItem[itemCode.toUpperCase()] = src;
+  });
+  const rows = Object.keys(rowsByItem).map(function(key) { return rowsByItem[key]; });
+  const activeRmTypes = _purchaseListRmTypeMasterRows_(false);
+  const rmTypeByCode = {};
+  activeRmTypes.forEach(function(row) {
+    rmTypeByCode[String(row.rm_type_code || '').trim().toUpperCase()] = row;
+  });
+  const itemCodes = rows.map(function(src) {
+    return String(src.itemCode || src.item_code || '').trim();
+  });
+  const priorRows = _supabaseSelectByKeyInBatches_(
+    'purchase_rate_item_policies',
+    '*',
+    'item_code',
+    itemCodes,
+    null,
+    25
+  ) || [];
+  const priorByItem = {};
+  priorRows.forEach(function(row) {
+    priorByItem[String(row.item_code || '').trim().toUpperCase()] = row;
+  });
+  const policyRows = [];
+  const auditRows = [];
+
+  rows.forEach(function(src) {
+    const itemCode = String(src.itemCode || src.item_code || '').trim();
+    let rateKey = _purchaseNormalizeRateKey_(src.rateKey || src.rate_key || src.rmType || src.rm_type || '');
+    const policy = _purchaseNormalizeRatePolicy_(src.controlPolicy || src.control_policy);
+    if (rateKey) {
+      const rmTypeMaster = rmTypeByCode[rateKey.toUpperCase()];
+      if (!rmTypeMaster) throw new Error('Select an active RM Type from the master for ' + itemCode);
+      rateKey = rmTypeMaster.rm_type_code;
+    }
+    if (policy === 'RATE_CONTROLLED' && !rateKey) throw new Error('Rate key is required for controlled item ' + itemCode);
+
+    const priorPolicy = priorByItem[itemCode.toUpperCase()] || null;
+    const policyRow = {
+      item_code: itemCode,
+      rate_key: rateKey,
+      control_policy: policy,
+      notes: String(src.policyNotes || src.policy_notes || '').trim(),
+      created_at: priorPolicy && priorPolicy.created_at || now,
+      created_by: priorPolicy && priorPolicy.created_by || actor,
+      updated_at: now,
+      updated_by: actor
+    };
+    policyRows.push(policyRow);
+    auditRows.push({
+      entity_type: 'ITEM_POLICY',
+      entity_id: priorPolicy && priorPolicy.id ? priorPolicy.id : null,
+      entity_key: itemCode,
+      action: priorPolicy ? 'UPDATE' : 'INSERT',
+      before_data: priorPolicy,
+      after_data: policyRow,
+      changed_by: actor,
+      changed_at: now
+    });
+  });
+
+  try {
+    supabaseUpsertMinimal_('purchase_rate_item_policies', policyRows, { onConflict: 'item_code' });
+    supabaseBulkInsertMinimal_('purchase_rate_master_audit', auditRows);
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err)) throw new Error(_purchaseRateInstallMessage_());
+    throw err;
+  }
+  try {
+    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  } catch (cacheErr) {
+    console.warn('Purchase policy cache version was not refreshed: ' + String(cacheErr && cacheErr.message || cacheErr));
+  }
+  return { ok: true, updated: policyRows.length };
+}
+
+function adminSavePurchaseRatePolicies(payload, token) {
+  return _purchaseSaveRatePoliciesForUser_(payload, _requireAdmin_(_authTokenFromPayload_(payload, token)));
+}
+
+function invSavePurchaseRatePolicies(payload, token) {
+  const user = _purchaseRequireInventorySetupWrite_(payload, token, true);
+  return _purchaseSaveRatePoliciesForUser_(payload, user);
+}
+
+function purchaseSaveRateMasterSetup(payload, token) {
+  _requireAdmin_(_authTokenFromPayload_(payload, token));
+  throw new Error('Item-wise purchase rate maintenance has been retired. Maintain rates once by RM Type and Purchase UOM in Admin > Purchase Rates.');
+}
+
+function purchaseSubmitRateOverrideRequest(payload, token) {
+  const p = payload || {};
+  const contextType = String(p.contextType || p.context_type || 'PO_RATE').trim().toUpperCase();
+  if (['PO_RATE','GRN_RATE'].indexOf(contextType) === -1) throw new Error('Invalid purchase rate override context');
+  const authToken = _authTokenFromPayload_(payload, token);
+  const user = contextType === 'GRN_RATE'
+    ? _invRequireGRNWrite_(payload, token)
+    : _requireAnyModuleAccess_(authToken, [
+        { module: 'PURCHASE', action: 'can_create' },
+        { module: 'PURCHASE', action: 'can_edit' }
+      ]);
+  const actor = _authActorName_(user);
+  let itemCode = String(p.itemCode || p.item_code || '').trim();
+  let itemName = String(p.itemName || p.item_name || '').trim();
+  let rateKey = String(p.rateKey || p.rate_key || '').trim();
+  let purchaseUom = String(p.purchaseUom || p.purchase_uom || '').trim();
+  const reason = String(p.reason || '').trim();
+  const requestedRate = _purchaseRateRound_(p.requestedRate || p.requested_rate, 2);
+  let masterRate = 0;
+  let masterTaxPct = 0;
+  let stockUom = '';
+  let requestedPurchaseQty = 0;
+  let ceilingSource = 'RATE_MASTER';
+  const requestedTaxPct = _purchaseRateRound_(p.requestedTaxPct || p.requested_tax_pct, 2);
+  let requestedQty = Number(p.requestedQty || p.requested_qty || 0);
+  const prNo = String(p.prNo || p.pr_no || '').trim();
+  const poNo = String(p.poNo || p.po_no || '').trim();
+  const poLineId = String(p.poLineId || p.po_line_id || '').trim();
+  let vendorId = String(p.vendorId || p.vendor_id || '').trim();
+  let vendorName = String(p.vendorName || p.vendor_name || '').trim();
+  if (!itemCode) throw new Error('Item code is required for rate override request');
+  if (!(requestedRate > 0)) throw new Error('Requested override rate must be greater than zero');
+  if (!(requestedTaxPct >= 0 && requestedTaxPct <= 100)) throw new Error('Requested GST % must be between 0 and 100');
+  if (!(requestedQty > 0)) throw new Error('Requested quantity must be greater than zero');
+  if (!reason) throw new Error('Override reason is required');
+  if (!vendorId && !vendorName) throw new Error('Vendor is required for rate override request');
+  if (contextType === 'PO_RATE' && !prNo) throw new Error('PR No is required for PO rate override request');
+  if (contextType === 'GRN_RATE' && (!poNo || !poLineId)) throw new Error('PO No and PO line are required for GRN rate override request');
+
+  if (contextType === 'PO_RATE') {
+    const vendor = _purchaseListVendors_().find(function(row) {
+      return (vendorId && String(row.id || '').trim() === vendorId) ||
+        (!vendorId && vendorName && String(row.vendorName || '').trim().toUpperCase() === vendorName.toUpperCase());
+    });
+    if (!vendor || vendor.isActive === false) throw new Error('Active vendor not found for rate override request');
+    vendorId = vendor.id;
+    vendorName = vendor.vendorName;
+    const prMap = _purchaseGetInventoryPRValidationMap_([prNo]);
+    const pr = prMap[prNo];
+    if (!pr) throw new Error('Purchase request not found: ' + prNo);
+    if (String(pr.itemCode || '').trim().toUpperCase() !== itemCode.toUpperCase()) {
+      throw new Error('Purchase request item does not match the override item.');
+    }
+    const persistedPoLine = poNo && poLineId ? _purchaseGetPOLineById_(poNo, poLineId) : null;
+    const rateCtx = persistedPoLine && Number(persistedPoLine.masterRateCeiling || 0) > 0
+      ? {
+          controlPolicy: persistedPoLine.ratePolicy,
+          masterReady: true,
+          rate: persistedPoLine.masterRateCeiling,
+          taxPct: persistedPoLine.masterTaxPctSnapshot,
+          rateKey: persistedPoLine.rateKey,
+          purchaseUom: persistedPoLine.purchaseUom
+        }
+      : (_purchaseGetItemRateContextMap_([itemCode], p.orderDate || p.order_date || _purchaseIsoDate_(new Date()))[itemCode.toUpperCase()] || {});
+    if (persistedPoLine && String(persistedPoLine.sourceRef || '').trim() !== prNo) {
+      throw new Error('Purchase order line does not match the override purchase request.');
+    }
+    if (_purchaseNormalizeRatePolicy_(rateCtx.controlPolicy) !== 'RATE_CONTROLLED') {
+      throw new Error('This item is not under purchase rate control.');
+    }
+    if (!rateCtx.masterReady) {
+      throw new Error('An active purchase rate master is required before requesting an override.');
+    }
+    masterRate = _purchaseRateRound_(rateCtx.rate, 2);
+    masterTaxPct = _purchaseRateRound_(rateCtx.taxPct, 2);
+    itemName = pr.itemName || itemName;
+    rateKey = rateCtx.rateKey || rateKey;
+    purchaseUom = rateCtx.purchaseUom || purchaseUom;
+    stockUom = persistedPoLine && persistedPoLine.stockUom || rateCtx.stockUom || pr.uom || '';
+    const conversionFactor = Number(persistedPoLine && persistedPoLine.conversionFactor || rateCtx.conversionFactor || 1) || 1;
+    const enteredPurchaseQty = Number(p.requestedPurchaseQty ?? p.requested_purchase_qty);
+    if (Number.isFinite(enteredPurchaseQty) && enteredPurchaseQty > 0) {
+      requestedQty = Number((enteredPurchaseQty / conversionFactor).toFixed(3));
+      requestedPurchaseQty = _purchaseRateRound_(enteredPurchaseQty, 6);
+    } else {
+      requestedPurchaseQty = _purchaseRateRound_(requestedQty * conversionFactor, 6);
+    }
+    ceilingSource = persistedPoLine ? 'PO_LINE_SNAPSHOT' : 'RATE_MASTER';
+  } else {
+    const poLine = _purchaseGetPOLineById_(poNo, poLineId);
+    if (!poLine) throw new Error('Purchase order line not found.');
+    if (String(poLine.itemCode || '').trim().toUpperCase() !== itemCode.toUpperCase()) {
+      throw new Error('Purchase order line item does not match the override item.');
+    }
+    if (_purchaseNormalizeRatePolicy_(poLine.ratePolicy) !== 'RATE_CONTROLLED') {
+      throw new Error('This PO line is not under purchase rate control.');
+    }
+    const poHeader = _purchaseGetPOHeaderByNo_(poNo);
+    if (!poHeader || _purchaseIsCancelledStatus_(poHeader.status)) {
+      throw new Error('Purchase order is not available for a GRN rate override.');
+    }
+    masterRate = _purchaseEffectiveGRNCeiling_(poLine);
+    masterTaxPct = Number(poLine.taxPct || 0);
+    itemCode = poLine.itemCode || itemCode;
+    itemName = poLine.itemName || itemName;
+    rateKey = poLine.rateKey || rateKey;
+    purchaseUom = poLine.purchaseUom || purchaseUom;
+    stockUom = poLine.stockUom || '';
+    const conversionFactor = Number(poLine.conversionFactor || 1) || 1;
+    const enteredPurchaseQty = Number(p.requestedPurchaseQty ?? p.requested_purchase_qty);
+    if (Number.isFinite(enteredPurchaseQty) && enteredPurchaseQty > 0) {
+      requestedQty = Number((enteredPurchaseQty / conversionFactor).toFixed(3));
+      requestedPurchaseQty = _purchaseRateRound_(enteredPurchaseQty, 6);
+    } else {
+      requestedPurchaseQty = _purchaseRateRound_(requestedQty * conversionFactor, 6);
+    }
+    vendorId = poHeader && poHeader.vendorId || vendorId;
+    vendorName = poHeader && poHeader.vendorName || vendorName;
+    ceilingSource = 'MASTER_RATE_SNAPSHOT';
+  }
+
+  if (!(requestedQty > 0) || !(requestedPurchaseQty > 0)) {
+    throw new Error('Requested quantity is below the supported stock UOM precision.');
+  }
+  const clientPurchaseQty = Number(p.requestedPurchaseQty ?? p.requested_purchase_qty);
+  if (Number.isFinite(clientPurchaseQty) &&
+      clientPurchaseQty > 0 &&
+      Math.abs(clientPurchaseQty - requestedPurchaseQty) > 0.0001) {
+    throw new Error('Requested purchase quantity does not match the approved UOM conversion.');
+  }
+  if (!(masterRate > 0)) throw new Error('A valid purchase rate ceiling is required before requesting an override.');
+  if (!_purchaseRateExceedsCeiling_(requestedRate, masterRate)) {
+    throw new Error('Override is not required. The entered rate is within the allowed ceiling of ' + masterRate + '.');
+  }
+  if (requestedTaxPct < 0 || requestedTaxPct > 100) {
+    throw new Error('Requested GST % must be between 0 and 100.');
+  }
+
+  const row = {
+    client_request_key: String(p.clientRequestKey || p.client_request_key || '').trim() || Utilities.getUuid(),
+    context_type: contextType,
+    po_no: poNo,
+    po_line_id: poLineId || null,
+    pr_no: prNo,
+    grn_no: String(p.grnNo || p.grn_no || '').trim(),
+    item_code: itemCode,
+    item_name: itemName,
+    rate_key: rateKey,
+    purchase_uom: purchaseUom,
+    master_rate: masterRate,
+    requested_rate: requestedRate,
+    master_tax_pct: masterTaxPct,
+    requested_tax_pct: requestedTaxPct,
+    requested_qty: _purchaseRateRound_(requestedQty, 6),
+    requested_purchase_qty: requestedPurchaseQty,
+    stock_uom: stockUom,
+    vendor_id: vendorId,
+    vendor_name: vendorName,
+    reason: reason,
+    ceiling_source: ceilingSource,
+    payload_json: p,
+    requested_by: actor,
+    requested_by_user_id: String(user.userId || user.email || '').trim()
+  };
+  try {
+    return supabaseRpc_('submit_purchase_rate_override', { p_request: row });
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err) || _supabaseRelationMissing_(err, 'submit_purchase_rate_override')) {
+      throw new Error(_purchaseRateInstallMessage_());
+    }
+    throw err;
+  }
+}
+
+function listPurchaseRateOverrideApprovals(status, token) {
+  _purchaseRateRequireApprovalSession_(token);
+  try {
+    supabaseUpdateMinimal_('purchase_rate_override_approvals', {
+      status: 'eq.APPROVED',
+      expires_at: 'lte.' + _purchaseNowIso_()
+    }, {
+      status: 'EXPIRED',
+      stale_reason: 'Approval validity period expired before use',
+      updated_at: _purchaseNowIso_()
+    });
+  } catch (expiryErr) {
+    if (_purchaseRateTableMissing_(expiryErr)) throw new Error(_purchaseRateInstallMessage_());
+    throw expiryErr;
+  }
+  const st = String(status || 'PENDING').trim().toUpperCase();
+  const filters = {};
+  if (st && st !== 'ALL') filters.status = 'eq.' + st;
+  let rows = [];
+  try {
+    rows = _supabaseSelectAll_('purchase_rate_override_approvals', {
+      select: '*',
+      filters: filters,
+      order: 'requested_at.desc'
+    }, 1000, 5000) || [];
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err)) throw new Error(_purchaseRateInstallMessage_());
+    throw err;
+  }
+  return {
+    ok: true,
+    rows: rows.map(function(row) {
+      const detail = row.payload_json && typeof row.payload_json === 'object'
+        ? row.payload_json
+        : _safeJsonObject_(row.payload_json);
+      return {
+        id: row.id,
+        requestRef: row.request_ref || '',
+        status: row.status || '',
+        contextType: row.context_type || '',
+        poNo: row.po_no || '',
+        poLineId: row.po_line_id || '',
+        prNo: row.pr_no || '',
+        grnNo: row.grn_no || '',
+        itemCode: row.item_code || '',
+        itemName: row.item_name || '',
+        rateKey: row.rate_key || '',
+        purchaseUom: row.purchase_uom || '',
+        masterRate: Number(row.master_rate || 0),
+        requestedRate: Number(row.requested_rate || 0),
+        masterTaxPct: Number(row.master_tax_pct || 0),
+        requestedTaxPct: Number(row.requested_tax_pct || 0),
+        requestedQty: Number(row.requested_qty || 0),
+        stockUom: row.stock_uom || '',
+        requestedPurchaseQty: Number(row.requested_purchase_qty || 0),
+        vendorId: row.vendor_id || '',
+        vendorName: row.vendor_name || '',
+        ceilingSource: row.ceiling_source || '',
+        expiresAt: row.expires_at || '',
+        staleReason: row.stale_reason || '',
+        overageAmount: Number((Number(row.requested_rate || 0) - Number(row.master_rate || 0)).toFixed(4)),
+        overagePct: Number(row.master_rate || 0) > 0
+          ? Number((((Number(row.requested_rate || 0) - Number(row.master_rate || 0)) / Number(row.master_rate || 0)) * 100).toFixed(2))
+          : 0,
+        reason: row.reason || '',
+        approvalRemarks: row.approval_remarks || '',
+        requestedBy: row.requested_by || '',
+        requestedByUserId: row.requested_by_user_id || '',
+        requestedAt: row.requested_at || '',
+        decidedBy: row.decided_by || '',
+        decidedAt: row.decided_at || '',
+        consumedAt: row.consumed_at || '',
+        consumedRef: row.consumed_ref || ''
+      };
+    })
+  };
+}
+
+function _purchaseRateOverrideDecisionStaleReason_(row) {
+  const contextType = String(row && row.context_type || '').trim().toUpperCase();
+  try {
+    if (contextType === 'PO_RATE') {
+      const prNo = String(row.pr_no || '').trim();
+      const pr = _purchaseGetInventoryPRValidationMap_([prNo])[prNo];
+      if (!pr) return 'Purchase request no longer exists';
+      if (['CANCELLED','SHORT_CLOSED'].indexOf(String(pr.status || '').trim().toUpperCase()) !== -1) {
+        return 'Purchase request is no longer open for ordering';
+      }
+      if (String(pr.itemCode || '').trim().toUpperCase() !== String(row.item_code || '').trim().toUpperCase()) {
+        return 'Purchase request item has changed';
+      }
+      if (String(row.po_line_id || '').trim()) {
+        const persistedLine = _purchaseGetPOLineById_(row.po_no, row.po_line_id);
+        const persistedHeader = _purchaseGetPOHeaderByNo_(row.po_no);
+        if (!persistedLine || !persistedHeader || _purchaseIsCancelledStatus_(persistedHeader.status)) {
+          return 'Purchase order or line is no longer available for editing';
+        }
+        if (Math.abs(Number(persistedLine.masterRateCeiling || 0) - Number(row.master_rate || 0)) > 0.0001 ||
+            Math.abs(Number(persistedLine.masterTaxPctSnapshot || 0) - Number(row.master_tax_pct || 0)) > 0.0001 ||
+            String(persistedLine.rateKey || '').trim().toUpperCase() !== String(row.rate_key || '').trim().toUpperCase() ||
+            String(persistedLine.purchaseUom || '').trim().toUpperCase() !== String(row.purchase_uom || '').trim().toUpperCase()) {
+          return 'The PO line rate-control snapshot changed after this request was raised';
+        }
+        return '';
+      }
+      const detail = row.payload_json && typeof row.payload_json === 'object'
+        ? row.payload_json
+        : _safeJsonObject_(row.payload_json);
+      const effectiveDate = detail.orderDate || detail.order_date || _purchaseIsoDate_(new Date());
+      const rateCtx = _purchaseGetItemRateContextMap_([row.item_code], effectiveDate)[String(row.item_code || '').trim().toUpperCase()];
+      if (!rateCtx || _purchaseNormalizeRatePolicy_(rateCtx.controlPolicy) !== 'RATE_CONTROLLED' || !rateCtx.masterReady) {
+        return 'The applicable rate master is missing, expired, or no longer controlled';
+      }
+      if (Math.abs(Number(rateCtx.rate || 0) - Number(row.master_rate || 0)) > 0.0001 ||
+          Math.abs(Number(rateCtx.taxPct || 0) - Number(row.master_tax_pct || 0)) > 0.0001 ||
+          String(rateCtx.rateKey || '').trim().toUpperCase() !== String(row.rate_key || '').trim().toUpperCase() ||
+          String(rateCtx.purchaseUom || '').trim().toUpperCase() !== String(row.purchase_uom || '').trim().toUpperCase()) {
+        return 'The applicable rate master changed after this request was raised';
+      }
+      return '';
+    }
+    if (contextType === 'GRN_RATE') {
+      const poLine = _purchaseGetPOLineById_(row.po_no, row.po_line_id);
+      const poHeader = _purchaseGetPOHeaderByNo_(row.po_no);
+      if (!poLine || !poHeader || _purchaseIsCancelledStatus_(poHeader.status)) {
+        return 'Purchase order or line is no longer available for receipt';
+      }
+      if (String(poLine.itemCode || '').trim().toUpperCase() !== String(row.item_code || '').trim().toUpperCase()) {
+        return 'Purchase order line item has changed';
+      }
+      if (String(row.vendor_id || '').trim() &&
+          String(poHeader.vendorId || '').trim() !== String(row.vendor_id || '').trim()) {
+        return 'Purchase order vendor changed after this request was raised';
+      }
+      if (Math.abs(_purchaseEffectiveGRNCeiling_(poLine) - Number(row.master_rate || 0)) > 0.0001 ||
+          Math.abs(Number(poLine.taxPct || 0) - Number(row.master_tax_pct || 0)) > 0.0001) {
+        return 'The PO or master rate ceiling changed after this request was raised';
+      }
+    }
+  } catch (err) {
+    return 'Unable to revalidate the underlying purchase data: ' + String(err && err.message || err);
+  }
+  return '';
+}
+
+function decidePurchaseRateOverrideApproval(requestId, decision, remarks, token) {
+  const user = _purchaseRateRequireApprovalSession_(token);
+  const id = String(requestId || '').trim();
+  const next = String(decision || '').trim().toUpperCase();
+  const decisionRemarks = String(remarks || '').trim();
+  if (!id) throw new Error('Purchase rate approval request id is required');
+  if (['APPROVED','REJECTED'].indexOf(next) === -1) throw new Error('Decision must be APPROVED or REJECTED');
+  if (!decisionRemarks) throw new Error('Approval or rejection remarks are required');
+  const rows = supabaseSelect_('purchase_rate_override_approvals', {
+    filters: { id: 'eq.' + id },
+    limit: 1
+  }) || [];
+  const row = rows[0] || null;
+  if (!row) throw new Error('Purchase rate override request not found');
+  if (String(row.status || '').toUpperCase() !== 'PENDING') throw new Error('Only pending purchase rate overrides can be decided');
+  const staleReason = _purchaseRateOverrideDecisionStaleReason_(row);
+  if (staleReason) {
+    supabaseRpc_('mark_purchase_rate_override_stale', {
+      p_id: id,
+      p_reason: staleReason
+    });
+    throw new Error('This request is stale and was closed: ' + staleReason);
+  }
+  const result = supabaseRpc_('decide_purchase_rate_override', {
+    p_id: id,
+    p_decision: next,
+    p_remarks: decisionRemarks,
+    p_decided_by: _authActorName_(user),
+    p_decided_by_user_id: String(user.userId || user.email || '').trim(),
+    p_valid_days: 3
+  });
+  if (!result || result.ok === false) {
+    throw new Error(result && result.message || 'Purchase rate approval could not be completed');
+  }
+  return result;
+}
+
+function _purchaseConversionFactorFromSetup_(setup) {
+  const row = setup || {};
+  const type = _itemMasterNormalizePurchaseConversionType_(row.conversion_type || row.conversionType, row.stock_uom || row.stockUom);
+  const widthMm = Number(row.rule_width_mm || row.width_mm || row.ruleWidthMm || row.widthMm || 0);
+  const lengthMm = Number(row.rule_length_mm || row.length_mm || row.ruleLengthMm || row.lengthMm || 0);
+  const gsm = Number(row.rule_gsm || row.gsm || row.ruleGsm || 0);
+  const fixed = Number(row.fixed_factor || row.fixedFactor || 0);
+  if (type === 'FIXED_FACTOR') return fixed > 0 ? Number(fixed.toFixed(8)) : 0;
+  if (type === 'AREA_WIDTH') return widthMm > 0 ? Number((widthMm / 1000).toFixed(8)) : 0;
+  if (type === 'SHEET_AREA') return widthMm > 0 && lengthMm > 0 ? Number(((widthMm * lengthMm) / 1000000).toFixed(8)) : 0;
+  if (type === 'WEIGHT_GSM_RM') return widthMm > 0 && gsm > 0 ? Number(((widthMm / 1000) * gsm / 1000).toFixed(8)) : 0;
+  if (type === 'WEIGHT_GSM_SHEET') return widthMm > 0 && lengthMm > 0 && gsm > 0 ? Number((((widthMm * lengthMm) / 1000000) * gsm / 1000).toFixed(8)) : 0;
+  return 1;
+}
+
+function _purchaseGetItemRateContextMap_(itemCodes, effectiveDate) {
+  const codes = [...new Set((itemCodes || []).map(function(code) { return String(code || '').trim(); }).filter(Boolean))];
+  const out = {};
+  if (!codes.length) return out;
+  const targetDate = _purchaseIsoDate_(effectiveDate);
+  let setupRows = [];
+  try {
+    setupRows = _supabaseSelectByKeyInBatches_('v_purchase_rate_master_setup_v2', '*', 'item_code', codes, null, 25) || [];
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err)) throw new Error(_purchaseRateInstallMessage_());
+    throw err;
+  }
+  const uomRows = _supabaseSelectByKeyInBatches_('v_inv_item_purchase_uom_setup', '*', 'item_code', codes, null, 25) || [];
+  const uomByCode = {};
+  uomRows.forEach(function(row) {
+    const code = String(row.item_code || '').trim().toUpperCase();
+    if (code) uomByCode[code] = row;
+  });
+  const datedMasterByKey = {};
+  if (targetDate) {
+    const datedMasters = _supabaseSelectAll_('purchase_rate_masters', {
+      select: '*',
+      filters: {
+        status: 'eq.ACTIVE',
+        effective_from: 'lte.' + targetDate
+      },
+      order: 'effective_from.desc,updated_at.desc'
+    }, 1000, 50000) || [];
+    datedMasters.forEach(function(master) {
+      const effectiveTo = String(master.effective_to || '').trim();
+      if (effectiveTo && effectiveTo < targetDate) return;
+      const key = _purchaseNormalizeRateKey_(master.rate_key).toUpperCase() + '|' + String(master.purchase_uom || '').trim().toUpperCase();
+      if (key !== '|' && !datedMasterByKey[key]) datedMasterByKey[key] = master;
+    });
+  }
+  setupRows.forEach(function(row) {
+    const code = String(row.item_code || '').trim().toUpperCase();
+    if (!code) return;
+    const uom = uomByCode[code] || {};
+    const purchaseUom = row.purchase_uom || uom.purchase_uom || row.stock_uom || '';
+    const rateKey = _purchaseNormalizeRateKey_(row.rate_key || row.rm_type || '');
+    const datedMaster = targetDate
+      ? datedMasterByKey[rateKey.toUpperCase() + '|' + String(purchaseUom || '').trim().toUpperCase()]
+      : null;
+    const effectiveRow = targetDate
+      ? Object.assign({}, row, datedMaster ? {
+          rate_master_id: datedMaster.id || '',
+          rate_name: datedMaster.rate_name || rateKey,
+          rate: datedMaster.rate,
+          tax_pct: datedMaster.tax_pct,
+          effective_from: datedMaster.effective_from,
+          effective_to: datedMaster.effective_to,
+          rate_status: datedMaster.status,
+          rate_notes: datedMaster.notes || ''
+        } : {
+          rate_master_id: '',
+          rate_name: rateKey,
+          rate: null,
+          tax_pct: 0,
+          effective_from: '',
+          effective_to: '',
+          rate_status: '',
+          rate_notes: ''
+        })
+      : row;
+    const mapped = _purchaseMapRateMasterSetupRow_(effectiveRow);
+    mapped.rate = _purchaseRateRound_(mapped.rate, 2);
+    mapped.taxPct = _purchaseRateRound_(mapped.taxPct, 2);
+    const conversionType = _itemMasterNormalizePurchaseConversionType_(uom.conversion_type || 'SAME_AS_STOCK', row.stock_uom);
+    const conversionFactor = _purchaseConversionFactorFromSetup_(uom);
+    const policy = _purchaseNormalizeRatePolicy_(mapped.controlPolicy);
+    if (targetDate && policy === 'RATE_CONTROLLED') {
+      const conversionReady = String(uom.setup_status || mapped.conversionSetupStatus || '').trim().toUpperCase() === 'COMPLETE' &&
+        uom.rule_active !== false && mapped.conversionRuleActive !== false && conversionFactor > 0;
+      mapped.setupStatus = !rateKey
+        ? 'MISSING_RATE_KEY'
+        : (!purchaseUom
+          ? 'MISSING_PURCHASE_UOM'
+          : (!conversionReady ? 'INCOMPLETE_CONVERSION' : (datedMaster ? 'READY' : 'MISSING_RATE')));
+    }
+    out[code] = Object.assign({}, mapped, {
+      conversionType: conversionType,
+      conversionFactor: conversionFactor,
+      conversionSetupStatus: String(uom.setup_status || mapped.conversionSetupStatus || 'MISSING').trim().toUpperCase(),
+      conversionRuleActive: uom.rule_active !== false && mapped.conversionRuleActive !== false,
+      stockUom: row.stock_uom || uom.stock_uom || '',
+      purchaseUom: purchaseUom,
+      rateLocked: false,
+      masterReady: mapped.setupStatus === 'READY' &&
+        String(uom.setup_status || mapped.conversionSetupStatus || '').trim().toUpperCase() === 'COMPLETE' &&
+        uom.rule_active !== false && mapped.conversionRuleActive !== false &&
+        conversionFactor > 0 && Number(mapped.rate || 0) > 0
+    });
+  });
+  return out;
+}
+
+function _purchaseTryGetItemRateContextMap_(itemCodes) {
+  try {
+    return _purchaseGetItemRateContextMap_(itemCodes);
+  } catch (err) {
+    if (String(err && err.message || err || '').indexOf(_purchaseRateInstallMessage_()) !== -1 || _purchaseRateTableMissing_(err)) {
+      Logger.log('Purchase rate context unavailable: ' + (err && err.message ? err.message : err));
+      return {};
+    }
+    throw err;
+  }
+}
+
+function _purchaseRateExceedsCeiling_(rate, ceiling) {
+  return Number(rate || 0) - Number(ceiling || 0) > 0.0001;
+}
+
+function _purchaseEffectiveGRNCeiling_(line) {
+  const row = line || {};
+  const poRate = Number(row.rate || row.poRate || 0);
+  const masterCeiling = Number(row.masterRateCeiling || row.master_rate_ceiling || 0);
+  return masterCeiling > 0 ? masterCeiling : poRate;
+}
+
+function _purchaseRateOverrideMatches_(row, line, contextType) {
+  const src = line || {};
+  const type = String(contextType || '').trim().toUpperCase();
+  if (!row || String(row.context_type || '').trim().toUpperCase() !== type) return false;
+  if (String(row.status || '').trim().toUpperCase() !== 'APPROVED' || row.consumed_at) return false;
+  if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) return false;
+  if (String(row.item_code || '').trim().toUpperCase() !== String(src.itemCode || src.item_code || '').trim().toUpperCase()) return false;
+  if (String(row.purchase_uom || '').trim().toUpperCase() !== String(src.purchaseUom || src.purchase_uom || '').trim().toUpperCase()) return false;
+  if (String(row.rate_key || '').trim().toUpperCase() !== String(src.rateKey || src.rate_key || '').trim().toUpperCase()) return false;
+  if (Math.abs(Number(row.requested_rate || 0) - Number(src.rate || 0)) > 0.0001) return false;
+  if (Math.abs(Number(row.requested_tax_pct || 0) - Number(src.taxPct || src.tax_pct || 0)) > 0.0001) return false;
+  if (Math.abs(Number(row.requested_qty || 0) - Number(src.qty || src.requestedQty || src.requested_qty || 0)) > 0.0001) return false;
+  const expectedPurchaseQty = Number(
+    src.purchaseQty ?? src.requestedPurchaseQty ?? src.purchase_qty ?? src.requested_purchase_qty
+  );
+  if (Number(row.requested_purchase_qty || 0) > 0 &&
+      Number.isFinite(expectedPurchaseQty) &&
+      expectedPurchaseQty > 0 &&
+      Math.abs(Number(row.requested_purchase_qty || 0) - expectedPurchaseQty) > 0.0001) return false;
+  const expectedCeiling = Number(src.masterRateCeiling || src.master_rate_ceiling || 0);
+  const expectedTax = Number(src.masterTaxPctSnapshot ?? src.master_tax_pct_snapshot);
+  if (expectedCeiling > 0 && Math.abs(Number(row.master_rate || 0) - expectedCeiling) > 0.0001) return false;
+  if (Number.isFinite(expectedTax) && Math.abs(Number(row.master_tax_pct || 0) - expectedTax) > 0.0001) return false;
+
+  const prNo = String(src.prNo || src.sourceRef || src.source_ref || '').trim();
+  const poNo = String(src.poNo || src.po_no || '').trim();
+  const poLineId = String(src.poLineId || src.po_line_id || '').trim();
+  const vendorId = String(src.vendorId || src.vendor_id || '').trim();
+  const vendorName = String(src.vendorName || src.vendor_name || '').trim().toUpperCase();
+  if (type === 'PO_RATE' && (!prNo || String(row.pr_no || '').trim() !== prNo)) return false;
+  if (type === 'PO_RATE' && String(row.po_no || '').trim() && String(row.po_no || '').trim() !== poNo) return false;
+  if (type === 'PO_RATE' && String(row.po_line_id || '').trim() && String(row.po_line_id || '').trim() !== poLineId) return false;
+  if (type === 'GRN_RATE' && (!poNo || !poLineId || String(row.po_no || '').trim() !== poNo || String(row.po_line_id || '').trim() !== poLineId)) return false;
+  if (String(row.vendor_id || '').trim()) {
+    if (!vendorId || String(row.vendor_id || '').trim() !== vendorId) return false;
+  } else if (String(row.vendor_name || '').trim()) {
+    if (!vendorName || String(row.vendor_name || '').trim().toUpperCase() !== vendorName) return false;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+function _purchaseSelectApprovedRateOverride_(line, contextType) {
+  const approvalId = String(line && (line.rateOverrideApprovalId || line.rate_override_approval_id) || '').trim();
+  let rows = [];
+  if (approvalId) {
+    rows = supabaseSelect_('purchase_rate_override_approvals', {
+      select: '*',
+      filters: { id: 'eq.' + approvalId },
+      limit: 1
+    }) || [];
+  } else {
+    const itemCode = String(line && (line.itemCode || line.item_code) || '').trim().toUpperCase();
+    if (!itemCode) return null;
+    rows = (supabaseSelect_('purchase_rate_override_approvals', {
+      select: '*',
+      filters: {
+        status: 'eq.APPROVED',
+        context_type: 'eq.' + String(contextType || '').trim().toUpperCase()
+      },
+      order: 'decided_at.desc,requested_at.desc',
+      limit: 50
+    }) || []).filter(function(row) { return _purchaseRateOverrideMatches_(row, line, contextType); });
+  }
+  const row = rows[0] || null;
+  if (!row) throw new Error('Purchase rate override approval not found');
+  if (String(row.status || '').toUpperCase() !== 'APPROVED') throw new Error('Purchase rate override is not approved');
+  if (row.consumed_at) throw new Error('Purchase rate override was already consumed');
+  if (contextType && String(row.context_type || '').toUpperCase() !== String(contextType || '').toUpperCase()) {
+    throw new Error('Purchase rate override context does not match');
+  }
+  if (!_purchaseRateOverrideMatches_(row, line, contextType)) {
+    throw new Error('Purchase rate override does not match this vendor, quantity, item, rate, or document line');
+  }
+  return row;
+}
+
+function _purchaseConsumeRateOverride_(approvalId, consumedRef) {
+  const id = String(approvalId || '').trim();
+  if (!id) return;
+  try {
+    return supabaseRpc_('consume_purchase_rate_override', {
+      p_id: id,
+      p_consumed_ref: String(consumedRef || '').trim()
+    });
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err) || _supabaseRelationMissing_(err, 'consume_purchase_rate_override')) {
+      throw new Error(_purchaseRateInstallMessage_());
+    }
+    throw err;
+  }
+}
+
+function _purchasePOAuditDbRows_(entries) {
+  return (entries || []).filter(Boolean).map(function(entry) {
+    return {
+      po_line_id: entry.poLineId || null,
+      line_no: entry.lineNo == null ? null : Number(entry.lineNo),
+      entity_type: entry.entityType,
+      action: entry.action,
+      before_data: entry.beforeData == null ? null : entry.beforeData,
+      after_data: entry.afterData == null ? null : entry.afterData,
+      changed_by: entry.changedBy || '',
+      changed_at: entry.changedAt || _purchaseNowIso_()
+    };
+  });
+}
+
+function _purchaseSavePOTransaction_(mode, headerRow, lineRows, deleteLineIds, auditEntries) {
+  try {
+    return supabaseRpc_('save_purchase_order_transaction', {
+      p_mode: String(mode || '').trim().toUpperCase(),
+      p_header: headerRow || {},
+      p_lines: lineRows || [],
+      p_delete_line_ids: deleteLineIds || [],
+      p_audit_entries: _purchasePOAuditDbRows_(auditEntries)
+    });
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err) || _supabaseRelationMissing_(err, 'save_purchase_order_transaction')) {
+      throw new Error(_purchaseRateInstallMessage_());
+    }
+    throw err;
+  }
+}
+
+function _purchasePostGRNTransaction_(headerRow, lineRows) {
+  try {
+    return supabaseRpc_('post_purchase_grn_transaction_v2', {
+      p_header: headerRow || {},
+      p_lines: lineRows || []
+    });
+  } catch (err) {
+    if (_purchaseRateTableMissing_(err) || _supabaseRelationMissing_(err, 'post_purchase_grn_transaction_v2')) {
+      throw new Error(_purchaseRateInstallMessage_());
+    }
+    throw err;
+  }
+}
+
+function _purchaseResolveDualQuantity_(line, conversionFactor, fallbackStockQty) {
+  const source = line || {};
+  const rawFactor = Number(conversionFactor);
+  const factor = Number.isFinite(rawFactor) && rawFactor > 0 ? rawFactor : 1;
+  const hasPurchaseQty = source.purchaseQty !== undefined &&
+    source.purchaseQty !== null &&
+    String(source.purchaseQty).trim() !== '';
+  const enteredPurchaseQty = hasPurchaseQty ? Number(source.purchaseQty) : 0;
+  const enteredStockQty = Number(
+    fallbackStockQty !== undefined && fallbackStockQty !== null
+      ? fallbackStockQty
+      : source.qty || source.stockQty || 0
+  );
+  const stockQty = hasPurchaseQty
+    ? Number((enteredPurchaseQty / factor).toFixed(3))
+    : Number(enteredStockQty.toFixed(3));
+  const purchaseQty = hasPurchaseQty
+    ? Number(enteredPurchaseQty.toFixed(6))
+    : Number((stockQty * factor).toFixed(6));
+  return {
+    stockQty: stockQty,
+    purchaseQty: purchaseQty,
+    conversionFactor: factor,
+    purchaseQtyEntered: hasPurchaseQty
+  };
+}
+
+function _purchaseApplyRateControlToLine_(line, prCtx, base) {
+  const ctx = base || {};
+  const policy = _purchaseNormalizeRatePolicy_(ctx.controlPolicy);
+  const rawFactor = Number(ctx.conversionFactor);
+  const factor = Number.isFinite(rawFactor) && rawFactor > 0 ? rawFactor : 0;
+  const quantity = _purchaseResolveDualQuantity_(
+    base.purchaseQty !== undefined ? { purchaseQty: base.purchaseQty } : line,
+    factor > 0 ? factor : 1,
+    base.stockQty == null ? (base.qty || line.qty || 0) : base.stockQty
+  );
+  const stockQty = quantity.stockQty;
+  const purchaseQty = quantity.purchaseQty;
+  let rate = _purchaseRateRound_(line.rate, 2);
+  const hasEnteredTaxPct = line.taxPct !== undefined &&
+    line.taxPct !== null &&
+    String(line.taxPct).trim() !== '';
+  let taxPct = hasEnteredTaxPct ? _purchaseRateRound_(line.taxPct, 2) : 0;
+  let override = null;
+  let rateControlStatus = 'MANUAL_ALLOWED';
+  let masterRateCeiling = 0;
+  let masterTaxPctSnapshot = taxPct;
+
+  if (policy === 'RATE_CONTROLLED') {
+    if (String(ctx.conversionSetupStatus || '').trim().toUpperCase() !== 'COMPLETE' || ctx.conversionRuleActive === false || !(factor > 0)) {
+      throw new Error('Complete and activate the purchase UOM conversion for ' + ctx.itemCode + ' before releasing the PO.');
+    }
+    if (!ctx.masterReady) {
+      throw new Error('Active purchase rate master missing for ' + ctx.itemCode + ' (' + (ctx.rateKey || 'No rate key') + ' / ' + (ctx.purchaseUom || 'No purchase UOM') + ').');
+    }
+    const masterRate = _purchaseRateRound_(ctx.rate, 2);
+    const masterTaxPct = _purchaseRateRound_(ctx.taxPct, 2);
+    masterRateCeiling = masterRate;
+    masterTaxPctSnapshot = masterTaxPct;
+    if (!rate) rate = masterRate;
+    if (!hasEnteredTaxPct) taxPct = masterTaxPct;
+    if (_purchaseRateExceedsCeiling_(rate, masterRate)) {
+      override = _purchaseSelectApprovedRateOverride_(Object.assign({}, line, {
+        itemCode: ctx.itemCode,
+        sourceRef: prCtx && prCtx.prNo || base.sourceRef || '',
+        poNo: base.poNo || line.poNo || '',
+        poLineId: line.id || line.poLineId || '',
+        qty: stockQty,
+        purchaseUom: ctx.purchaseUom || '',
+        rateKey: ctx.rateKey || '',
+        rate: rate,
+        taxPct: taxPct,
+        masterRateCeiling: masterRate,
+        masterTaxPctSnapshot: masterTaxPct,
+        vendorId: line.vendorId || line.vendor_id || '',
+        vendorName: line.vendorName || line.vendor_name || ''
+      }), 'PO_RATE');
+      if (String(override.item_code || '').trim().toUpperCase() !== String(ctx.itemCode || '').trim().toUpperCase()) {
+        throw new Error('Purchase rate override item does not match ' + ctx.itemCode);
+      }
+      if (Math.abs(Number(override.requested_rate || 0) - rate) > 0.0001 ||
+          Math.abs(Number(override.requested_tax_pct || 0) - taxPct) > 0.0001) {
+        throw new Error('Approved purchase rate override does not match requested rate/tax for ' + ctx.itemCode);
+      }
+      rateControlStatus = 'OVERRIDE_APPROVED';
+    } else {
+      rateControlStatus = 'WITHIN_CEILING';
+    }
+  }
+
+  if (!(rate > 0)) throw new Error('Invalid PO rate for ' + prCtx.prNo);
+  if (taxPct < 0 || taxPct > 100) throw new Error('GST % must be between 0 and 100 for ' + prCtx.prNo);
+
+  const basicAmount = Number((purchaseQty * rate).toFixed(2));
+  const taxAmount = Number((basicAmount * taxPct / 100).toFixed(2));
+  base.stockQty = stockQty;
+  base.stockUom = ctx.stockUom || prCtx.uom || '';
+  base.purchaseQty = purchaseQty;
+  base.purchaseUom = ctx.purchaseUom || base.stockUom || '';
+  base.conversionType = ctx.conversionType || 'SAME_AS_STOCK';
+  base.conversionFactor = factor > 0 ? factor : 1;
+  base.rateKey = ctx.rateKey || '';
+  base.rateMasterId = ctx.rateMasterId || '';
+  base.ratePolicy = policy;
+  base.rateOverrideApprovalId = override && override.id || '';
+  base.rateOverrideNeedsConsumption = !!override;
+  base.rateOverrideReason = String(line.rateOverrideReason || line.overrideReason || '').trim();
+  base.masterRateCeiling = masterRateCeiling;
+  base.masterTaxPctSnapshot = masterTaxPctSnapshot;
+  base.rateControlStatus = rateControlStatus;
+  base.rate = rate;
+  base.taxPct = taxPct;
+  base.amount = basicAmount;
+  base.taxAmount = taxAmount;
+  base.totalAmount = Number((basicAmount + taxAmount).toFixed(2));
+  return base;
+}
+
 function _purchaseSafeNumber_(value) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? n : 0;
@@ -3379,7 +5169,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
   const requestLimit = Math.max(targetPrNos.length || 0, Math.max(1, Number(opts.limit || defaultLimit) || defaultLimit));
   const cacheKey = _cacheKeyHash_('PURCHASE_REQUESTS_OPEN', JSON.stringify({
     v: purchaseCacheVersion,
-    logic: 'supabase-pr-read-model-v5-lifecycle-status',
+    logic: 'supabase-pr-read-model-v6-rate-ceiling',
     status: String(opts.status || ''),
     pendingOnly: opts.pendingOnly === true ? 1 : 0,
     fromDate: String(opts.fromDate || ''),
@@ -3438,6 +5228,9 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
   if (viewRows !== null) {
     let itemUomMap = {};
     let activePoLineMap = {};
+    const rateContextMap = _purchaseTryGetItemRateContextMap_(viewRows.map(function(r) {
+      return r.item_code;
+    }));
     if (!viewHasPrecomputedPo) {
       const itemCodes = [...new Set(viewRows.map(function(r) {
         return String(r.item_code || '').trim();
@@ -3456,6 +5249,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
       }), receiptSeed);
     }
     const normalized = viewRows.map(function(r) {
+      const rateCtx = rateContextMap[String(r.item_code || '').trim().toUpperCase()] || {};
       const linked = viewHasPrecomputedPo
         ? {
             orderedQty: Number(r.ordered_qty || 0),
@@ -3475,6 +5269,11 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
       const availableToOrderQty = Object.prototype.hasOwnProperty.call(r, 'available_to_order_qty')
         ? Number(r.available_to_order_qty || 0)
         : Math.max(0, pendingReceiptQty - Number(linked.openPOQty || 0));
+      const stockQty = availableToOrderQty;
+      const conversionFactor = Number(rateCtx.conversionFactor || 1) || 1;
+      const purchaseQty = Number((stockQty * conversionFactor).toFixed(6));
+      const resolvedRate = Number(rateCtx.masterReady ? rateCtx.rate : linked.latestRate || 0);
+      const resolvedTaxPct = Number(rateCtx.masterReady ? rateCtx.taxPct : linked.latestTaxPct || r.tax_pct || 0);
       const lifecycleStatus = _purchasePRLifecycleStatus_({
         prStatus: rawStatus,
         requestedQty: requestedQty,
@@ -3498,8 +5297,20 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
         openPOQty: Number(linked.openPOQty || 0),
         shortClosedQty: Number(linked.shortClosedQty || 0),
         uom: String(r.uom || itemUomMap[r.item_code] || '').trim(),
-        poRate: Number(linked.latestRate || 0),
-        taxPct: Number(linked.latestTaxPct || r.tax_pct || 0),
+        poRate: resolvedRate,
+        taxPct: resolvedTaxPct,
+        stockUom: rateCtx.stockUom || String(r.uom || itemUomMap[r.item_code] || '').trim(),
+        purchaseUom: rateCtx.purchaseUom || rateCtx.stockUom || String(r.uom || itemUomMap[r.item_code] || '').trim(),
+        purchaseQty: purchaseQty,
+        conversionFactor: conversionFactor,
+        conversionType: rateCtx.conversionType || 'SAME_AS_STOCK',
+        rateKey: rateCtx.rateKey || '',
+        ratePolicy: rateCtx.controlPolicy || '',
+        rateMasterId: rateCtx.rateMasterId || '',
+        masterRate: Number(rateCtx.rate || 0),
+        masterTaxPct: Number(rateCtx.taxPct || 0),
+        rateSetupStatus: rateCtx.setupStatus || '',
+        rateLocked: rateCtx.rateLocked === true,
         firstPoDate: linked.firstPoDate || '',
         latestPoDate: linked.latestPoDate || '',
         availableToOrderQty: availableToOrderQty,
@@ -3558,8 +5369,10 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
   });
 
   const poLineMap = _purchaseBuildActivePRPoLineMap_(rows.map(function(r) { return r.pr_no; }), prReceiptMap);
+  const rateContextMap = _purchaseTryGetItemRateContextMap_(itemCodes);
 
   const normalized = rows.map(r => {
+      const rateCtx = rateContextMap[String(r.item_code || '').trim().toUpperCase()] || {};
       const linked = poLineMap[r.pr_no] || { orderedQty: 0, openPOQty: 0, shortClosedQty: 0, refs: [], latestRate: 0 };
       const requestedQty = Number(r.requested_qty || 0);
       const receivedQty = Number(r.received_qty || 0);
@@ -3569,6 +5382,11 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
       const shortClosedQty = Number(linked.shortClosedQty || 0);
       const rawStatus = String(r.status || 'OPEN').trim().toUpperCase() || 'OPEN';
       const availableToOrderQty = Math.max(0, pendingReceiptQty - openPOQty);
+      const stockQty = availableToOrderQty;
+      const conversionFactor = Number(rateCtx.conversionFactor || 1) || 1;
+      const purchaseQty = Number((stockQty * conversionFactor).toFixed(6));
+      const resolvedRate = Number(rateCtx.masterReady ? rateCtx.rate : linked.latestRate || 0);
+      const resolvedTaxPct = Number(rateCtx.masterReady ? rateCtx.taxPct : itemTaxMap[r.item_code] || 0);
       const lifecycleStatus = _purchasePRLifecycleStatus_({
         prStatus: rawStatus,
         requestedQty: requestedQty,
@@ -3591,8 +5409,20 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
         openPOQty: openPOQty,
         shortClosedQty: shortClosedQty,
         uom: String(itemUomMap[r.item_code] || '').trim(),
-        poRate: Number(linked.latestRate || 0),
-        taxPct: Number(itemTaxMap[r.item_code] || 0),
+        poRate: resolvedRate,
+        taxPct: resolvedTaxPct,
+        stockUom: rateCtx.stockUom || String(itemUomMap[r.item_code] || '').trim(),
+        purchaseUom: rateCtx.purchaseUom || rateCtx.stockUom || String(itemUomMap[r.item_code] || '').trim(),
+        purchaseQty: purchaseQty,
+        conversionFactor: conversionFactor,
+        conversionType: rateCtx.conversionType || 'SAME_AS_STOCK',
+        rateKey: rateCtx.rateKey || '',
+        ratePolicy: rateCtx.controlPolicy || '',
+        rateMasterId: rateCtx.rateMasterId || '',
+        masterRate: Number(rateCtx.rate || 0),
+        masterTaxPct: Number(rateCtx.taxPct || 0),
+        rateSetupStatus: rateCtx.setupStatus || '',
+        rateLocked: rateCtx.rateLocked === true,
         firstPoDate: linked.firstPoDate || '',
         latestPoDate: linked.latestPoDate || '',
         availableToOrderQty: availableToOrderQty,
@@ -3620,7 +5450,7 @@ function purchaseListPOsJSON(opts = {}) {
   const forceRefresh = opts.forceRefresh === true;
   const includeOpenOutsideDate = opts.includeOpenOutsideDate === true || opts.pendingOnly === true;
   const purchaseCacheVersion = PropertiesService.getScriptProperties().getProperty('PURCHASE_CACHE_VERSION') || '0';
-  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { v: purchaseCacheVersion, logic: 'supabase-po-read-model-v10-line-pending-status', opts: opts || {}, includeOpenOutsideDate: includeOpenOutsideDate ? 1 : 0 });
+  const cacheKey = _reportsCacheKey_('PURCHASE_LIST_POS', { v: purchaseCacheVersion, logic: 'supabase-po-read-model-v11-purchase-uom-balance', opts: opts || {}, includeOpenOutsideDate: includeOpenOutsideDate ? 1 : 0 });
   if (!forceRefresh) {
     const cached = _getCachedJson_(cacheKey);
     if (cached) return cached;
@@ -3635,10 +5465,17 @@ function purchaseListPOsJSON(opts = {}) {
       else if (opts.fromDate) viewFilters.order_date = 'gte.' + opts.fromDate;
       else if (opts.toDate) viewFilters.order_date = 'lte.' + opts.toDate;
     }
-    viewRows = _supabaseSelectAll_('v_purchase_orders_read_model_v2', {
-      filters: viewFilters,
-      order: 'order_date.desc,created_at.desc,line_no.asc'
-    }, 1000, 50000) || [];
+    try {
+      viewRows = _supabaseSelectAll_('v_purchase_orders_rate_control_v2', {
+        filters: viewFilters,
+        order: 'order_date.desc,created_at.desc,line_no.asc'
+      }, 1000, 50000) || [];
+    } catch (v2Err) {
+      viewRows = _supabaseSelectAll_('v_purchase_orders_rate_control_v1', {
+        filters: viewFilters,
+        order: 'order_date.desc,created_at.desc,line_no.asc'
+      }, 1000, 50000) || [];
+    }
   } catch (err) {
     viewRows = null;
   }
@@ -3688,12 +5525,19 @@ function purchaseListPOsJSON(opts = {}) {
           ? fallbackEntries
           : (linkedEntries.length ? linkedEntries : fallbackEntries);
         const liveReceived = lineReceiptEntries.reduce((sum, row) => sum + Number(row.qty || 0), 0);
+        const receivedPurchaseQty = lineReceiptEntries.reduce(function(sum, row) {
+          return sum + Number(row.purchaseQty == null
+            ? Number(row.qty || 0) * (Number(line.conversionFactor || 1) || 1)
+            : row.purchaseQty);
+        }, 0);
         const derivedReceived = liveReceived;
         const shortClosedQty = _purchasePOLineShortClosedQty_(line, derivedReceived);
         const pendingQty = Math.max(0, Number(line.qty || 0) - derivedReceived - shortClosedQty);
         return Object.assign({}, line, {
           receivedQty: derivedReceived,
           pendingQty: pendingQty,
+          receivedPurchaseQty: Number(receivedPurchaseQty.toFixed(6)),
+          pendingPurchaseQty: Math.max(0, Number(line.purchaseQty == null ? line.qty : line.purchaseQty) - receivedPurchaseQty),
           shortClosedQty: shortClosedQty,
           isShortClosed: shortClosedQty > 0,
           overReceivedQty: Math.max(0, derivedReceived - Number(line.qty || 0)),
@@ -3909,6 +5753,20 @@ function _purchaseBuildPOsFromReadModelRows_(viewRows, opts) {
       itemCode: row.item_code || '',
       itemName: row.item_name || '',
       qty: Number(row.qty || 0),
+      stockQty: row.stock_qty == null ? Number(row.qty || 0) : Number(row.stock_qty || 0),
+      stockUom: row.stock_uom || '',
+      purchaseQty: row.purchase_qty == null ? Number(row.qty || 0) : Number(row.purchase_qty || 0),
+      purchaseUom: row.purchase_uom || row.stock_uom || '',
+      conversionType: row.conversion_type || '',
+      conversionFactor: row.conversion_factor == null ? '' : Number(row.conversion_factor || 0),
+      rateKey: row.rate_key || '',
+      rateMasterId: row.rate_master_id || '',
+      ratePolicy: row.rate_policy || '',
+      rateOverrideApprovalId: row.rate_override_approval_id || '',
+      rateOverrideReason: row.rate_override_reason || '',
+      masterRateCeiling: Number(row.master_rate_ceiling || 0),
+      masterTaxPctSnapshot: Number(row.master_tax_pct_snapshot || 0),
+      rateControlStatus: row.rate_control_status || '',
       rate: Number(row.rate || 0),
       taxPct: Number(row.tax_pct || 0),
       amount: Number(row.amount || 0),
@@ -3920,6 +5778,13 @@ function _purchaseBuildPOsFromReadModelRows_(viewRows, opts) {
       createdAt: row.line_created_at || '',
       receivedQty: liveReceived,
       pendingQty: pendingQty,
+      receivedPurchaseQty: row.received_purchase_qty == null
+        ? Number((liveReceived * (Number(row.conversion_factor || 1) || 1)).toFixed(6))
+        : Number(row.received_purchase_qty || 0),
+      pendingPurchaseQty: row.pending_purchase_qty == null
+        ? Math.max(0, Number(row.purchase_qty == null ? row.qty || 0 : row.purchase_qty) -
+            Number((liveReceived * (Number(row.conversion_factor || 1) || 1)).toFixed(6)))
+        : Number(row.pending_purchase_qty || 0),
       shortClosedQty: shortClosedQty,
       isShortClosed: shortClosedQty > 0,
       lifecycleStatus: lineLifecycleStatus,
@@ -4070,7 +5935,7 @@ function purchaseGetPODetail(poNo, opts) {
     if (cached) return cached;
   }
   try {
-    const fastRows = supabaseSelect_('v_purchase_po_detail_fast', {
+    const fastRows = supabaseSelect_('v_purchase_po_detail_rate_control_v1', {
       filters: { po_no: 'eq.' + key },
       order: 'line_no.asc',
       limit: 5000
@@ -4084,7 +5949,7 @@ function purchaseGetPODetail(poNo, opts) {
       }
     }
   } catch (err) {
-    if (!_supabaseRelationMissing_(err, 'v_purchase_po_detail_fast')) {
+    if (!_supabaseRelationMissing_(err, 'v_purchase_po_detail_rate_control_v1')) {
       Logger.log('purchaseGetPODetail fast view fallback for ' + key + ': ' + (err.message || err));
     }
   }
@@ -4292,6 +6157,16 @@ function purchaseListPOsForPRJSON(prNo) {
 }
 
 function purchaseCreatePO(payload, token) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('Another purchase order is being processed. Please wait a few seconds and retry.');
+  try {
+    return _purchaseCreatePOUnlocked_(payload, token);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _purchaseCreatePOUnlocked_(payload, token) {
   const user = _requireModuleAccess_(_authTokenFromPayload_(payload, token), 'PURCHASE', 'can_create');
   const actor = _authActorName_(user);
   if (!payload || !payload.vendorId) {
@@ -4316,18 +6191,28 @@ function purchaseCreatePO(payload, token) {
     return String(line && (line.prNo || line.sourceRef) || '').trim();
   }).filter(Boolean))];
   const prMap = _purchaseGetInventoryPRValidationMap_(prNos);
+  const rateContextMap = _purchaseGetItemRateContextMap_(Object.keys(prMap).map(function(prNo) {
+    return prMap[prNo] && prMap[prNo].itemCode;
+  }), payload.orderDate || _purchaseIsoDate_(new Date()));
   const requestedQtyByPr = {};
   selectedRows.forEach(function(line) {
     const prNo = String(line && (line.prNo || line.sourceRef) || '').trim();
     if (!prNo) return;
-    requestedQtyByPr[prNo] = Number(requestedQtyByPr[prNo] || 0) + Number(line.qty || 0);
+    const pr = prMap[prNo];
+    if (!pr) throw new Error('PR not found: ' + prNo);
+    const rateCtx = rateContextMap[String(pr.itemCode || '').trim().toUpperCase()] || {};
+    const quantity = _purchaseResolveDualQuantity_(
+      line,
+      Number(rateCtx.conversionFactor || 1),
+      line.qty
+    );
+    requestedQtyByPr[prNo] = Number(requestedQtyByPr[prNo] || 0) + quantity.stockQty;
   });
   Object.keys(requestedQtyByPr).forEach(function(prNo) {
     const pr = prMap[prNo];
     if (!pr) throw new Error('PR not found: ' + prNo);
     _purchaseAssertPRCanGeneratePO_(pr, requestedQtyByPr[prNo], {});
   });
-
   const poNo = _purchaseNextPoNo_();
   const now = _purchaseNowIso_();
   const freightValue = Math.max(0, Number(payload.freightValue || 0));
@@ -4337,8 +6222,12 @@ function purchaseCreatePO(payload, token) {
       const prNo = String(line.prNo || line.sourceRef || '').trim();
       const pr = prMap[prNo];
       if (!pr) throw new Error('PR not found: ' + prNo);
-      return _purchaseNormalizeInventoryPRLine_(line, pr, idx + 1, poNo, now, {
-        createdAt: now
+      return _purchaseNormalizeInventoryPRLine_(Object.assign({}, line, {
+        vendorId: vendor.id,
+        vendorName: vendor.vendorName
+      }), pr, idx + 1, poNo, now, {
+        createdAt: now,
+        rateContextMap: rateContextMap
       });
     }
     throw new Error('Inventory purchase orders can only be created against purchase requests.');
@@ -4352,58 +6241,40 @@ function purchaseCreatePO(payload, token) {
   const totalQty = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
 
   const headerId = Utilities.getUuid();
+  _purchaseSavePOTransaction_('CREATE', {
+    id: headerId,
+    po_no: poNo,
+    order_date: payload.orderDate || _purchaseIsoDate_(new Date()),
+    vendor_id: vendor.id,
+    vendor_name: vendor.vendorName,
+    vendor_email: vendor.email || '',
+    vendor_phone: vendor.phone || '',
+    vendor_address: vendor.address || '',
+    payment_terms: String(payload.paymentTerms || '').trim(),
+    freight_terms: String(payload.freightTerms || '').trim(),
+    freight_value: freightValue,
+    delivery_terms: String(payload.deliveryTerms || '').trim(),
+    notes: String(payload.notes || '').trim(),
+    status: 'OPEN',
+    total_qty: totalQty,
+    basic_total: basicTotal,
+    tax_total: taxTotal,
+    total_value: totalValue,
+    created_by: actor,
+    created_at: now,
+    updated_at: now
+  }, lines.map(function(line) {
+    return _purchasePOLineDbPayload_(line, headerId, line.poNo);
+  }), [], []);
 
+  let postCommitWarning = '';
   try {
-    supabaseInsert_('purchase_orders', {
-      id: headerId,
-      po_no: poNo,
-      order_date: payload.orderDate || _purchaseIsoDate_(new Date()),
-      vendor_id: vendor.id,
-      vendor_name: vendor.vendorName,
-      vendor_email: vendor.email || '',
-      vendor_phone: vendor.phone || '',
-      vendor_address: vendor.address || '',
-      payment_terms: String(payload.paymentTerms || '').trim(),
-      freight_terms: String(payload.freightTerms || '').trim(),
-      freight_value: freightValue,
-      delivery_terms: String(payload.deliveryTerms || '').trim(),
-      notes: String(payload.notes || '').trim(),
-      status: 'OPEN',
-      total_qty: totalQty,
-      basic_total: basicTotal,
-      tax_total: taxTotal,
-      total_value: totalValue,
-      created_by: actor,
-      created_at: now,
-      updated_at: now
-    });
-  } catch (e) {
-    throw new Error('Run purchase_freight_value_schema.sql in Supabase before creating freight-valued purchase orders.');
+    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  } catch (cacheErr) {
+    postCommitWarning = 'PO created, but the purchase cache refresh marker needs retry.';
+    Logger.log('Post-PO-create cache refresh failed: ' + String(cacheErr && cacheErr.message || cacheErr));
   }
-
-  supabaseBulkInsert_('purchase_order_lines', lines.map(line => ({
-    id: line.id,
-    po_id: headerId,
-    po_no: line.poNo,
-    line_no: line.lineNo,
-    source_type: line.sourceType,
-    source_ref: line.sourceRef,
-    item_code: line.itemCode,
-    item_name: line.itemName,
-    qty: line.qty,
-    rate: line.rate,
-    tax_pct: line.taxPct,
-    amount: line.amount,
-    tax_amount: line.taxAmount,
-    total_amount: line.totalAmount,
-    department: line.department,
-    job_ref: line.jobRef,
-    remarks: line.remarks,
-    created_at: line.createdAt
-  })));
-
-  PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
-  return { ok: true, poNo: poNo };
+  return { ok: true, poNo: poNo, warning: postCommitWarning };
 }
 
 function purchaseCreateArtworkPO(payload, token) {
@@ -4585,6 +6456,19 @@ function _purchasePOLineAuditSnapshot_(row) {
     itemCode: String(row.itemCode || '').trim(),
     itemName: String(row.itemName || '').trim(),
     qty: _purchaseNormalizeAuditNumber_(row.qty, 3),
+    stockQty: _purchaseNormalizeAuditNumber_(row.stockQty == null ? row.qty : row.stockQty, 3),
+    stockUom: String(row.stockUom || '').trim(),
+    purchaseQty: _purchaseNormalizeAuditNumber_(row.purchaseQty == null ? row.qty : row.purchaseQty, 6),
+    purchaseUom: String(row.purchaseUom || '').trim(),
+    conversionType: String(row.conversionType || '').trim(),
+    conversionFactor: _purchaseNormalizeAuditNumber_(row.conversionFactor || 1, 8),
+    rateKey: String(row.rateKey || '').trim(),
+    rateMasterId: String(row.rateMasterId || '').trim(),
+    ratePolicy: String(row.ratePolicy || '').trim(),
+    masterRateCeiling: _purchaseNormalizeAuditNumber_(row.masterRateCeiling, 4),
+    masterTaxPctSnapshot: _purchaseNormalizeAuditNumber_(row.masterTaxPctSnapshot, 2),
+    rateControlStatus: String(row.rateControlStatus || '').trim(),
+    rateOverrideApprovalId: String(row.rateOverrideApprovalId || '').trim(),
     rate: _purchaseNormalizeAuditNumber_(row.rate, 2),
     taxPct: _purchaseNormalizeAuditNumber_(row.taxPct, 2),
     amount: _purchaseNormalizeAuditNumber_(row.amount, 2),
@@ -4627,6 +6511,16 @@ function _purchaseRecordPOAuditLogs_(entries) {
 }
 
 function purchaseUpdatePO(payload, token) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('Another purchase order is being processed. Please wait a few seconds and retry.');
+  try {
+    return _purchaseUpdatePOUnlocked_(payload, token);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _purchaseUpdatePOUnlocked_(payload, token) {
   const user = _requireModuleAccess_(_authTokenFromPayload_(payload, token), 'PURCHASE', 'can_edit');
   if (!payload || !payload.poNo) throw new Error('PO No is required');
 
@@ -4640,6 +6534,8 @@ function purchaseUpdatePO(payload, token) {
   const changedBy = _purchasePOAuditActor_(payload, user);
   const changedAt = _purchaseNowIso_();
   const auditEntries = [];
+  const deleteLineIds = [];
+  const writeLines = [];
   const livePO = ((purchaseListPOsJSON({ poNo: header.poNo, forceRefresh: true }).rows || [])[0]) || { lines: [] };
   const existingLines = _purchaseListPOLines_()
     .filter(line => line.poNo === header.poNo)
@@ -4662,6 +6558,9 @@ function purchaseUpdatePO(payload, token) {
     .filter(Boolean)
   )];
   const prMap = _purchaseGetInventoryPRValidationMap_(incomingPrNos);
+  const rateContextMap = _purchaseGetItemRateContextMap_(Object.keys(prMap).map(function(prNo) {
+    return prMap[prNo] && prMap[prNo].itemCode;
+  }), header.orderDate || _purchaseIsoDate_(new Date()));
 
   let totalQty = 0;
   let basicTotal = 0;
@@ -4703,7 +6602,7 @@ function purchaseUpdatePO(payload, token) {
       if (Number(live.receivedQty || 0) > 0) {
         throw new Error('Cannot delete line ' + line.lineNo + ' because receipts already exist.');
       }
-      supabaseDelete_('purchase_order_lines', { id: 'eq.' + line.id });
+      deleteLineIds.push(line.id);
       auditEntries.push({
         poId: header.id,
         poNo: header.poNo,
@@ -4728,12 +6627,51 @@ function purchaseUpdatePO(payload, token) {
       const prNo = String(incoming.prNo || incoming.sourceRef || line.sourceRef || '').trim();
       const prCtx = prMap[prNo];
       if (!prCtx) throw new Error('PR not found: ' + prNo);
-      next = _purchaseNormalizeInventoryPRLine_(Object.assign({}, line, incoming, { sourceType: sourceType, prNo: prNo }), prCtx, finalLines.length + 1, header.poNo, line.createdAt || _purchaseNowIso_(), {
-        keepId: true,
-        createdAt: line.createdAt || _purchaseNowIso_(),
-        currentAllocatedQty: Number(currentAllocatedByPr[prNo] || line.qty || 0),
-        allowExistingOnClosed: true
-      });
+      const requestedQuantity = _purchaseResolveDualQuantity_(
+        incoming.purchaseQty == null && incoming.qty == null
+          ? { purchaseQty: line.purchaseQty, qty: line.qty }
+          : incoming,
+        Number(line.conversionFactor || 1),
+        incoming.qty == null ? Number(line.qty || 0) : Number(incoming.qty || 0)
+      );
+      const requestedQty = requestedQuantity.stockQty;
+      const requestedPurchaseQty = requestedQuantity.purchaseQty;
+      const requestedRate = incoming.rate == null ? Number(line.rate || 0) : Number(incoming.rate || 0);
+      const requestedTaxPct = incoming.taxPct == null ? Number(line.taxPct || 0) : Number(incoming.taxPct || 0);
+      const requestedItemCode = String(incoming.itemCode || line.itemCode || '').trim().toUpperCase();
+      const commercialUnchanged =
+        sourceType === String(line.sourceType || '').trim().toUpperCase() &&
+        prNo === String(line.sourceRef || '').trim() &&
+        requestedItemCode === String(line.itemCode || '').trim().toUpperCase() &&
+        Math.abs(requestedQty - Number(line.qty || 0)) <= 0.0001 &&
+        Math.abs(requestedPurchaseQty - Number(line.purchaseQty == null ? line.qty : line.purchaseQty)) <= 0.0001 &&
+        Math.abs(requestedRate - Number(line.rate || 0)) <= 0.0001 &&
+        Math.abs(requestedTaxPct - Number(line.taxPct || 0)) <= 0.0001 &&
+        String(vendor.id || '').trim() === String(header.vendorId || '').trim();
+
+      if (commercialUnchanged) {
+        next = Object.assign({}, line, {
+          lineNo: finalLines.length + 1,
+          department: incoming.department == null ? line.department : String(incoming.department || '').trim(),
+          jobRef: incoming.jobRef == null ? line.jobRef : String(incoming.jobRef || '').trim(),
+          remarks: incoming.remarks == null ? line.remarks : String(incoming.remarks || '').trim(),
+          rateOverrideNeedsConsumption: false
+        });
+      } else {
+        next = _purchaseNormalizeInventoryPRLine_(Object.assign({}, line, incoming, {
+          sourceType: sourceType,
+          prNo: prNo,
+          vendorId: vendor.id,
+          vendorName: vendor.vendorName
+        }), prCtx, finalLines.length + 1, header.poNo, line.createdAt || _purchaseNowIso_(), {
+          keepId: true,
+          createdAt: line.createdAt || _purchaseNowIso_(),
+          currentAllocatedQty: Number(currentAllocatedByPr[prNo] || line.qty || 0),
+          allowExistingOnClosed: true,
+          preserveRateSnapshot: true,
+          rateContextMap: rateContextMap
+        });
+      }
     } else {
       next = _purchaseNormalizeDirectLine_(Object.assign({}, line, incoming, { sourceType: sourceType }), sourceType, finalLines.length + 1, header.poNo, line.createdAt || _purchaseNowIso_(), { keepId: true });
     }
@@ -4769,9 +6707,14 @@ function purchaseUpdatePO(payload, token) {
       const prNo = String(line.prNo || line.sourceRef || '').trim();
       const prCtx = prMap[prNo];
       if (!prCtx) throw new Error('PR not found: ' + prNo);
-      const next = _purchaseNormalizeInventoryPRLine_(Object.assign({}, line, { id: '' }), prCtx, finalLines.length + 1, header.poNo, _purchaseNowIso_(), {
+      const next = _purchaseNormalizeInventoryPRLine_(Object.assign({}, line, {
+        id: '',
+        vendorId: vendor.id,
+        vendorName: vendor.vendorName
+      }), prCtx, finalLines.length + 1, header.poNo, _purchaseNowIso_(), {
         currentAllocatedQty: Number(currentAllocatedByPr[prNo] || 0),
-        allowExistingOnClosed: true
+        allowExistingOnClosed: true,
+        rateContextMap: rateContextMap
       });
       next.poId = header.id;
       finalLines.push(next);
@@ -4821,22 +6764,8 @@ function purchaseUpdatePO(payload, token) {
       if (line.hasReceipts) {
         throw new Error('Received PO line ' + (beforeLine.lineNo || line.lineNo) + ' cannot be edited after GRN activity. Edit only lines with no received quantity.');
       }
-      supabaseUpdate_('purchase_order_lines', { id: 'eq.' + line.id }, {
-        line_no: line.lineNo,
-        source_type: line.sourceType,
-        source_ref: line.sourceRef,
-        item_code: line.itemCode,
-        item_name: line.itemName,
-        qty: line.qty,
-        rate: line.rate,
-        tax_pct: line.taxPct,
-        amount: line.amount,
-        tax_amount: line.taxAmount,
-        total_amount: line.totalAmount,
-        department: line.department,
-        job_ref: line.jobRef,
-        remarks: line.remarks
-      });
+      const updatePayload = _purchasePOLineDbPayload_(line, header.id, header.poNo);
+      writeLines.push(updatePayload);
       auditEntries.push({
         poId: header.id,
         poNo: header.poNo,
@@ -4850,110 +6779,83 @@ function purchaseUpdatePO(payload, token) {
         changedAt: changedAt
       });
     } else {
-      let inserted = false;
-      let lastInsertError = null;
-      for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
-        const insertId = Utilities.getUuid();
-        try {
-          supabaseInsert_('purchase_order_lines', {
-            id: insertId,
-            po_id: header.id,
-            po_no: header.poNo,
-            line_no: line.lineNo,
-            source_type: line.sourceType,
-            source_ref: line.sourceRef,
-            item_code: line.itemCode,
-            item_name: line.itemName,
-            qty: line.qty,
-            rate: line.rate,
-            tax_pct: line.taxPct,
-            amount: line.amount,
-            tax_amount: line.taxAmount,
-            total_amount: line.totalAmount,
-            department: line.department,
-            job_ref: line.jobRef,
-            remarks: line.remarks,
-            created_at: line.createdAt || _purchaseNowIso_()
-          });
-          line.id = insertId;
-          inserted = true;
-          auditEntries.push({
-            poId: header.id,
-            poNo: header.poNo,
-            poLineId: insertId,
-            lineNo: line.lineNo,
-            entityType: 'LINE',
-            action: 'INSERT',
-            beforeData: null,
-            afterData: _purchasePOLineAuditSnapshot_(line),
-            changedBy: changedBy,
-            changedAt: changedAt
-          });
-        } catch (err) {
-          lastInsertError = err;
-          if (String(err && err.message || '').indexOf('23505') === -1) throw err;
-        }
-      }
-      if (!inserted) throw lastInsertError || new Error('Unable to insert new PO line.');
-    }
-  });
-
-  try {
-    const freightTax = _purchaseFreightTaxBreakup_(vendor.state, freightValue);
-    const headerUpdate = {
-      vendor_id: vendor.id,
-      vendor_name: vendor.vendorName,
-      vendor_email: vendor.email || '',
-      vendor_phone: vendor.phone || '',
-      vendor_address: vendor.address || '',
-      payment_terms: String(payload.paymentTerms || '').trim(),
-      freight_terms: String(payload.freightTerms || '').trim(),
-      freight_value: freightValue,
-      delivery_terms: String(payload.deliveryTerms || '').trim(),
-      notes: String(payload.notes || '').trim(),
-      total_qty: Number(totalQty.toFixed(3)),
-      basic_total: Number(basicTotal.toFixed(2)),
-      tax_total: Number((taxTotal + freightTax.taxAmount).toFixed(2)),
-      total_value: Number((basicTotal + taxTotal + freightValue + freightTax.taxAmount).toFixed(2)),
-      updated_at: _purchaseNowIso_()
-    };
-    const beforeHeader = _purchasePOHeaderAuditSnapshot_(header);
-    const afterHeader = _purchasePOHeaderAuditSnapshot_({
-      vendorId: vendor.id,
-      vendorName: vendor.vendorName,
-      paymentTerms: headerUpdate.payment_terms,
-      freightTerms: headerUpdate.freight_terms,
-      freightValue: headerUpdate.freight_value,
-      deliveryTerms: headerUpdate.delivery_terms,
-      notes: headerUpdate.notes,
-      totalQty: headerUpdate.total_qty,
-      basicTotal: headerUpdate.basic_total,
-      taxTotal: headerUpdate.tax_total,
-      totalValue: headerUpdate.total_value
-    });
-    supabaseUpdate_('purchase_orders', { id: 'eq.' + header.id }, headerUpdate);
-    if (_purchaseAuditSnapshotsDiffer_(beforeHeader, afterHeader)) {
+      const insertId = Utilities.getUuid();
+      line.id = insertId;
+      writeLines.push(_purchasePOLineDbPayload_(line, header.id, header.poNo));
       auditEntries.push({
         poId: header.id,
         poNo: header.poNo,
-        poLineId: null,
-        lineNo: null,
-        entityType: 'HEADER',
-        action: 'UPDATE',
-        beforeData: beforeHeader,
-        afterData: afterHeader,
+        poLineId: insertId,
+        lineNo: line.lineNo,
+        entityType: 'LINE',
+        action: 'INSERT',
+        beforeData: null,
+        afterData: _purchasePOLineAuditSnapshot_(line),
         changedBy: changedBy,
         changedAt: changedAt
       });
     }
-  } catch (e) {
-    throw new Error('Run purchase_freight_value_schema.sql in Supabase before updating freight-valued purchase orders.');
+  });
+
+  const freightTax = _purchaseFreightTaxBreakup_(vendor.state, freightValue);
+  const headerUpdate = {
+    id: header.id,
+    po_no: header.poNo,
+    vendor_id: vendor.id,
+    vendor_name: vendor.vendorName,
+    vendor_email: vendor.email || '',
+    vendor_phone: vendor.phone || '',
+    vendor_address: vendor.address || '',
+    payment_terms: String(payload.paymentTerms || '').trim(),
+    freight_terms: String(payload.freightTerms || '').trim(),
+    freight_value: freightValue,
+    delivery_terms: String(payload.deliveryTerms || '').trim(),
+    notes: String(payload.notes || '').trim(),
+    total_qty: Number(totalQty.toFixed(3)),
+    basic_total: Number(basicTotal.toFixed(2)),
+    tax_total: Number((taxTotal + freightTax.taxAmount).toFixed(2)),
+    total_value: Number((basicTotal + taxTotal + freightValue + freightTax.taxAmount).toFixed(2)),
+    updated_at: _purchaseNowIso_()
+  };
+  const beforeHeader = _purchasePOHeaderAuditSnapshot_(header);
+  const afterHeader = _purchasePOHeaderAuditSnapshot_({
+    vendorId: vendor.id,
+    vendorName: vendor.vendorName,
+    paymentTerms: headerUpdate.payment_terms,
+    freightTerms: headerUpdate.freight_terms,
+    freightValue: headerUpdate.freight_value,
+    deliveryTerms: headerUpdate.delivery_terms,
+    notes: headerUpdate.notes,
+    totalQty: headerUpdate.total_qty,
+    basicTotal: headerUpdate.basic_total,
+    taxTotal: headerUpdate.tax_total,
+    totalValue: headerUpdate.total_value
+  });
+  if (_purchaseAuditSnapshotsDiffer_(beforeHeader, afterHeader)) {
+    auditEntries.push({
+      poId: header.id,
+      poNo: header.poNo,
+      poLineId: null,
+      lineNo: null,
+      entityType: 'HEADER',
+      action: 'UPDATE',
+      beforeData: beforeHeader,
+      afterData: afterHeader,
+      changedBy: changedBy,
+      changedAt: changedAt
+    });
   }
 
-  _purchaseUpdatePOStatus_(header.poNo);
-  _purchaseRecordPOAuditLogs_(auditEntries);
-  PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
-  return { ok: true, poNo: header.poNo };
+  _purchaseSavePOTransaction_('UPDATE', headerUpdate, writeLines, deleteLineIds, auditEntries);
+  let postCommitWarning = '';
+  try {
+    _purchaseUpdatePOStatus_(header.poNo);
+    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  } catch (postCommitErr) {
+    postCommitWarning = 'PO changes were saved, but the status/cache refresh needs retry.';
+    Logger.log('Post-PO-update refresh failed: ' + String(postCommitErr && postCommitErr.message || postCommitErr));
+  }
+  return { ok: true, poNo: header.poNo, warning: postCommitWarning };
 }
 
 function _purchaseUpdatePOStatus_(poNo) {
@@ -5281,7 +7183,7 @@ function purchaseUpdateArtworkPOReceipt(payload, token) {
   const lineId = String(payload.lineId || '').trim();
   const receiptId = String(payload.receiptId || '').trim();
   const qty = Number(payload.qty || 0);
-  const rate = Number(payload.rate || 0);
+  const rate = _purchaseRateRound_(payload.rate, 2);
   if (qty <= 0 || rate <= 0) throw new Error('Receive qty and rate are required');
 
   const header = _purchaseGetPOHeaderByNo_(poNo);
@@ -5425,7 +7327,7 @@ function purchaseReceiveArtworkPOBulk(payload, token) {
 function purchaseGetPOPrintData(poNo) {
   if (!poNo) throw new Error('PO number is required');
   try {
-    const rows = supabaseSelect_('v_purchase_po_print_lines', {
+    const rows = supabaseSelect_('v_purchase_po_print_lines_rate_control_v1', {
       filters: { po_no: 'eq.' + poNo },
       order: 'line_no.asc'
     }) || [];
@@ -5474,6 +7376,10 @@ function purchaseGetPOPrintData(poNo) {
           itemCode: row.item_code || '',
           itemName: row.item_name || '',
           qty: Number(row.qty || 0),
+          stockQty: row.stock_qty == null ? Number(row.qty || 0) : Number(row.stock_qty || 0),
+          stockUom: row.stock_uom || row.stock_unit || '',
+          purchaseQty: row.purchase_qty == null ? Number(row.qty || 0) : Number(row.purchase_qty || 0),
+          purchaseUom: row.purchase_uom || row.stock_uom || row.stock_unit || '',
           rate: Number(row.rate || 0),
           taxPct: gstPct,
           amount: basicAmount,
@@ -5483,7 +7389,7 @@ function purchaseGetPOPrintData(poNo) {
           jobRef: row.job_ref || '',
           remarks: row.remarks || '',
           hsnCode: row.hsn_code || '',
-          stockUnit: row.stock_unit || '',
+          stockUnit: row.purchase_uom || row.stock_uom || row.stock_unit || '',
           gstPct: gstPct,
           cgstPct: cgstPct,
           sgstPct: sgstPct,
@@ -5530,7 +7436,8 @@ function purchaseGetPOPrintData(poNo) {
         },
         lines: normalizedLines,
         totals: {
-          qty: normalizedLines.reduce(function(sum, row) { return sum + Number(row.qty || 0); }, 0),
+          qty: normalizedLines.reduce(function(sum, row) { return sum + Number(row.purchaseQty || row.qty || 0); }, 0),
+          stockQty: normalizedLines.reduce(function(sum, row) { return sum + Number(row.stockQty || row.qty || 0); }, 0),
           basicAmount: +subtotal.toFixed(2),
           cgstAmount: +(cgst + freightTax.cgstAmt).toFixed(2),
           sgstAmount: +(sgst + freightTax.sgstAmt).toFixed(2),
@@ -5549,9 +7456,7 @@ function purchaseGetPOPrintData(poNo) {
   if (!header) throw new Error('PO not found');
 
   const vendor = _purchaseListVendors_().find(v => v.id === header.vendorId) || {};
-  const poRows = purchaseListPOsJSON().rows || [];
-  const po = poRows.find(r => r.poNo === poNo) || {};
-  const lines = (po.lines || [])
+  const lines = _purchaseListPOLinesForPO_(poNo)
     .slice()
     .sort((a, b) => Number(a.lineNo || 0) - Number(b.lineNo || 0));
 
@@ -5588,9 +7493,17 @@ function purchaseGetPOPrintData(poNo) {
 
     return Object.assign({}, line, {
       hsnCode: item.hsn_group || (_purchaseIsPlateDieSource_(line.sourceType) ? '' : ''),
-      stockUnit: _purchaseIsPlateDieSource_(line.sourceType)
+      stockQty: line.stockQty == null ? Number(line.qty || 0) : Number(line.stockQty || 0),
+      stockUom: line.stockUom || (_purchaseIsPlateDieSource_(line.sourceType)
         ? 'PCS'
-        : (item.unit || item.uom || item.stock_unit || item.uom_name || ''),
+        : (item.unit || item.uom || item.stock_unit || item.uom_name || '')),
+      purchaseQty: line.purchaseQty == null ? Number(line.qty || 0) : Number(line.purchaseQty || 0),
+      purchaseUom: line.purchaseUom || line.stockUom || (_purchaseIsPlateDieSource_(line.sourceType)
+        ? 'PCS'
+        : (item.unit || item.uom || item.stock_unit || item.uom_name || '')),
+      stockUnit: line.purchaseUom || line.stockUom || (_purchaseIsPlateDieSource_(line.sourceType)
+        ? 'PCS'
+        : (item.unit || item.uom || item.stock_unit || item.uom_name || '')),
       gstPct: gstPct,
       cgstPct: cgstPct,
       sgstPct: sgstPct,
@@ -5637,7 +7550,8 @@ function purchaseGetPOPrintData(poNo) {
     },
     lines: normalizedLines,
     totals: {
-      qty: normalizedLines.reduce((sum, row) => sum + Number(row.qty || 0), 0),
+      qty: normalizedLines.reduce((sum, row) => sum + Number(row.purchaseQty || row.qty || 0), 0),
+      stockQty: normalizedLines.reduce((sum, row) => sum + Number(row.stockQty || row.qty || 0), 0),
       basicAmount: +subtotal.toFixed(2),
       cgstAmount: +(cgst + freightTax.cgstAmt).toFixed(2),
       sgstAmount: +(sgst + freightTax.sgstAmt).toFixed(2),
@@ -5745,6 +7659,7 @@ function purchaseBootstrapJSON(opts = {}) {
     orders: opts.orders || {},
     plateDieOrders: opts.plateDieOrders || {},
     leadTime: opts.leadTime || {},
+    rates: opts.rates || {},
     plateDie: opts.plateDie || {},
     include: Object.assign({
       vendors: true,
@@ -5753,6 +7668,7 @@ function purchaseBootstrapJSON(opts = {}) {
       orders: true,
       plateDieOrders: false,
       leadTime: false,
+      rates: false,
       plateDie: true
     }, opts.include || {})
   };
@@ -5775,6 +7691,7 @@ function purchaseBootstrapJSON(opts = {}) {
     workflow: 'ARTWORK_PROCUREMENT'
   })).rows;
   if (normalized.include.leadTime) payload.leadTimeItems = purchaseListLeadTimeItemsJSON().rows;
+  if (normalized.include.rates) payload.rateMasters = purchaseListRateMasterSetupJSON(normalized.rates).rows;
   if (normalized.include.plateDie) payload.plateDieJobs = getPlateDieJobs(normalized.plateDie);
   try { cache.put(cacheKey, JSON.stringify(payload), 180); } catch (e) {}
   return payload;
@@ -6253,6 +8170,248 @@ function _mapWOCandidateViewRow_(r) {
     artAlongGapMm: r.along_gap_mm == null ? '' : Number(r.along_gap_mm),
     artStatus: r.artwork_status || '',
     artApprovedAt: r.artwork_approved_at || null
+  };
+}
+
+function _isMissingWOStockReservationSchema_(err) {
+  const msg = String(err && err.message || err || '');
+  return msg.indexOf('inventory_reservations') !== -1 ||
+    msg.indexOf('sync_work_order_stock_reservations') !== -1 ||
+    msg.indexOf('wo_stock_allocation_summary') !== -1 ||
+    msg.indexOf('PGRST202') !== -1 ||
+    msg.indexOf('PGRST205') !== -1 ||
+    msg.indexOf('schema cache') !== -1 ||
+    msg.indexOf('does not exist') !== -1;
+}
+
+function _mapWOStockAllocationRows_(rows) {
+  return (Array.isArray(rows) ? rows : (rows && rows.rows || [])).map(function(row) {
+    return {
+      workOrderMaterialId: row.work_order_material_id || '',
+      materialKey: row.material_key || '',
+      itemCode: row.item_code || '',
+      itemName: row.item_name || '',
+      location: row.location || 'MAIN',
+      uom: row.uom || '',
+      requiredQty: Number(row.required_qty || 0),
+      issuedQty: Number(row.issued_qty || 0),
+      physicalStockQty: Number(row.physical_stock_qty || 0),
+      allocatedOtherQty: Number(row.allocated_other_qty || 0),
+      allocatedThisWoQty: Number(row.allocated_this_wo_qty || 0),
+      freeStockQty: Number(row.free_stock_qty || 0),
+      shortageQty: Number(row.shortage_qty || 0),
+      allocationStatus: String(row.allocation_status || 'NOT_ALLOCATED'),
+      releaseConfirmationRequired: row.release_confirmation_required === true
+    };
+  });
+}
+
+function _invStockAllocationTotalsMap_(opts) {
+  const map = {};
+  try {
+    const rows = supabaseRpc_('inv_stock_allocation_totals_ui', {
+      p_location: String(opts && opts.location || '').trim() || null,
+      p_search: String(opts && opts.q || '').trim() || null
+    }) || [];
+    (Array.isArray(rows) ? rows : (rows.rows || [])).forEach(function(row) {
+      const itemId = String(row.item_id || '').trim();
+      const itemCode = String(row.item_code || '').trim().toUpperCase();
+      const location = String(row.location || DEFAULT_LOCATION || 'MAIN').trim().toUpperCase() || 'MAIN';
+      const value = {
+        allocatedQty: Number(row.allocated_qty || 0),
+        allocationCount: Number(row.allocation_count || 0),
+        workOrders: String(row.work_orders || '')
+      };
+      if (itemId) map['ID|' + itemId + '|' + location] = value;
+      if (itemCode) map['CODE|' + itemCode + '|' + location] = value;
+    });
+  } catch (err) {
+    if (!_isMissingWOStockReservationSchema_(err)) {
+      Logger.log('Inventory allocation totals unavailable: ' + String(err && err.message || err || ''));
+    }
+  }
+  return map;
+}
+
+function _syncWOStockReservations_(woNo, actor, confirmRelease) {
+  try {
+    const rows = supabaseRpc_('sync_work_order_stock_reservations', {
+      p_wo_number: String(woNo || '').trim(),
+      p_actor: String(actor || '').trim(),
+      p_confirm_release: confirmRelease === true
+    }) || [];
+    _invBumpStockSnapshotVersion_();
+    return {
+      enabled: true,
+      rows: _mapWOStockAllocationRows_(rows),
+      releaseConfirmationRequired: (rows || []).some(function(row) {
+        return row.release_confirmation_required === true;
+      })
+    };
+  } catch (err) {
+    if (_isMissingWOStockReservationSchema_(err)) {
+      Logger.log('WO stock allocation migration is not applied; allocation skipped for ' + woNo);
+      return {
+        enabled: false,
+        rows: [],
+        migrationRequired: true,
+        message: 'Stock allocation database migration is pending.'
+      };
+    }
+    Logger.log('WO stock allocation failed after Work Order save ' + woNo + ': ' +
+      String(err && err.message || err || ''));
+    return {
+      enabled: false,
+      rows: [],
+      error: true,
+      message: 'Work Order saved, but automatic stock allocation needs review.'
+    };
+  }
+}
+
+function getWorkOrderStockAllocation(woNo, token) {
+  _requireAnyModuleAccess_(token, [
+    { module: 'WOW', action: 'can_create' },
+    { module: 'WOW', action: 'can_edit' },
+    { module: 'WOW', action: 'can_view' }
+  ]);
+  try {
+    const rows = supabaseRpc_('wo_stock_allocation_summary', {
+      p_wo_number: String(woNo || '').trim()
+    }) || [];
+    return { ok: true, enabled: true, rows: _mapWOStockAllocationRows_(rows) };
+  } catch (err) {
+    if (_isMissingWOStockReservationSchema_(err)) {
+      return { ok: true, enabled: false, migrationRequired: true, rows: [] };
+    }
+    throw err;
+  }
+}
+
+function previewWorkOrderStockAllocation(items, woNo, token) {
+  _requireAnyModuleAccess_(token, [
+    { module: 'WOW', action: 'can_create' },
+    { module: 'WOW', action: 'can_edit' },
+    { module: 'WOW', action: 'can_view' }
+  ]);
+  const requested = (Array.isArray(items) ? items : []).map(function(row) {
+    return {
+      item_code: String(row && (row.itemCode || row.item_code) || '').trim(),
+      required_qty: Math.max(0, Number(row && (row.requiredQty ?? row.required_qty) || 0))
+    };
+  }).filter(function(row) {
+    return !!row.item_code;
+  });
+  if (!requested.length) return { ok: true, enabled: true, preview: true, rows: [] };
+  const previewVersion = PropertiesService.getScriptProperties().getProperty('INV_STOCK_SNAPSHOT_VERSION') || '0';
+  const previewCacheKey = _cacheKeyHash_('WO_STOCK_PREVIEW', JSON.stringify({
+    v: previewVersion,
+    wo: String(woNo || '').trim(),
+    items: requested
+  }));
+  const cachedPreview = _getCachedJson_(previewCacheKey);
+  if (cachedPreview) return cachedPreview;
+  try {
+    const rows = supabaseRpc_('preview_work_order_stock_allocation', {
+      p_items: requested,
+      p_wo_number: String(woNo || '').trim() || null,
+      p_location: DEFAULT_LOCATION || 'MAIN'
+    }) || [];
+    const result = {
+      ok: true,
+      enabled: true,
+      preview: true,
+      rows: (Array.isArray(rows) ? rows : (rows.rows || [])).map(function(row) {
+        return {
+          itemId: row.item_id || '',
+          itemCode: row.item_code || '',
+          itemName: row.item_name || '',
+          location: row.location || 'MAIN',
+          uom: row.uom || '',
+          requiredQty: Number(row.required_qty || 0),
+          issuedQty: 0,
+          physicalStockQty: Number(row.physical_stock_qty || 0),
+          allocatedOtherQty: Number(row.allocated_other_qty || 0),
+          allocatedThisWoQty: Number(row.allocated_this_wo_qty || 0),
+          expectedThisWoQty: Number(row.expected_this_wo_qty || 0),
+          freeStockQty: Number(row.free_stock_qty || 0),
+          shortageQty: Number(row.shortage_qty || 0),
+          allocationStatus: String(row.allocation_status || 'NOT_ALLOCATED')
+        };
+      })
+    };
+    _putCachedJson_(previewCacheKey, result, 15);
+    return result;
+  } catch (err) {
+    if (_isMissingWOStockReservationSchema_(err)) {
+      return { ok: true, enabled: false, migrationRequired: true, preview: true, rows: [] };
+    }
+    throw err;
+  }
+}
+
+function confirmWorkOrderStockRelease(woNo, token) {
+  const sessionUser = _requireAnyModuleAccess_(token, [
+    { module: 'WOW', action: 'can_create' },
+    { module: 'WOW', action: 'can_edit' }
+  ]);
+  const actor = _authActorName_(sessionUser);
+  const allocation = _syncWOStockReservations_(woNo, actor, true);
+  return { ok: true, woNo: woNo, allocation: allocation };
+}
+
+function invGetStockAllocationDetail(itemId, location, token) {
+  _requireAnyModuleAccess_(token, [
+    { module: 'INVENTORY', action: 'can_view' },
+    { module: 'INVENTORY', action: 'can_create' },
+    { module: 'INVENTORY', action: 'can_edit' }
+  ]);
+  const rows = supabaseRpc_('inv_stock_allocation_detail_ui', {
+    p_item_id: String(itemId || '').trim(),
+    p_location: String(location || DEFAULT_LOCATION || 'MAIN').trim() || 'MAIN'
+  }) || [];
+  return {
+    ok: true,
+    rows: (Array.isArray(rows) ? rows : (rows.rows || [])).map(function(row) {
+      return {
+        reservationId: row.reservation_id || '',
+        woNo: row.wo_number || '',
+        materialKey: row.material_key || '',
+        itemCode: row.item_code || '',
+        itemName: row.item_name || '',
+        location: row.location || '',
+        uom: row.uom || '',
+        requiredQty: Number(row.required_qty || 0),
+        issuedQty: Number(row.issued_qty || 0),
+        allocatedQty: Number(row.allocated_qty || 0),
+        shortageQty: Number(row.shortage_qty || 0),
+        status: row.status || '',
+        createdBy: row.created_by || '',
+        createdAt: row.created_at || '',
+        updatedBy: row.updated_by || '',
+        updatedAt: row.updated_at || ''
+      };
+    })
+  };
+}
+
+function invReleaseStockAllocation(reservationId, releaseQty, reason, token) {
+  const sessionUser = _requireAnyModuleAccess_(token, [
+    { module: 'INVENTORY', action: 'can_edit' }
+  ]);
+  const cleanReason = String(reason || '').trim();
+  if (!cleanReason) throw new Error('Unallocation reason is required.');
+  const actor = _authActorName_(sessionUser);
+  const rows = supabaseRpc_('release_inventory_reservation', {
+    p_reservation_id: String(reservationId || '').trim(),
+    p_release_qty: Number(releaseQty || 0),
+    p_reason: cleanReason,
+    p_actor: actor
+  }) || [];
+  _invBumpStockSnapshotVersion_();
+  return {
+    ok: true,
+    result: Array.isArray(rows) ? (rows[0] || null) : rows
   };
 }
 
@@ -7260,9 +9419,16 @@ function _flexoWOViewColumnMissing_(err) {
 function _mapFlexoWOStatusViewRow_(r) {
   const orderQty = _flexoWOViewNumber_(r.order_qty == null ? r.qty : r.order_qty);
   const stockQtyToBill = Math.max(0, _flexoWOViewNumber_(r.stock_qty_to_bill));
-  const originalQty = _flexoWOViewNumber_(r.qty == null ? _workOrderProductionQty_(orderQty, stockQtyToBill) : r.qty);
+  const originalQty = r.order_qty == null
+    ? _flexoWOViewNumber_(r.qty)
+    : _workOrderProductionQty_(orderQty, stockQtyToBill);
   const processedQty = Math.max(0, _flexoWOViewNumber_(r.processed_qty));
-  const remainingQty = Math.max(0, _flexoWOViewNumber_(r.remaining_qty));
+  const lineStatus = String(r.line_status || '').trim().toUpperCase();
+  const isLineActive = r.is_line_active === false
+    ? false
+    : ['CLOSED','CANCELLED'].indexOf(lineStatus) === -1;
+  // Recalculate from canonical quantities so an outdated view value cannot keep a completed line pending.
+  const remainingQty = isLineActive ? Math.max(0, originalQty - processedQty) : 0;
   const accountsStatus = String(r.accounts_status || '').trim().toUpperCase() || 'PENDING';
   const businessStatus = String(r.business_status || '').trim().toUpperCase() || 'PENDING';
   const artworkStatus = String(r.artwork_status || r.status || '').trim().toUpperCase() || 'NO_ART';
@@ -7302,7 +9468,7 @@ function _mapFlexoWOStatusViewRow_(r) {
     woTime: r.wo_time || '',
     woDateTime: r.wo_date_time || r.wo_date || '',
     lineStatus: r.line_status || '',
-    isLineActive: r.is_line_active === false ? false : ['CLOSED','CANCELLED'].indexOf(String(r.line_status || '').trim().toUpperCase()) === -1,
+    isLineActive: isLineActive,
     artSheetLength: _flexoWOViewOptionalNumber_(r.sheet_length),
     artSheetWidth: _flexoWOViewOptionalNumber_(r.sheet_width),
     artSheetUps: _flexoWOViewOptionalNumber_(r.sheet_ups),
@@ -7383,7 +9549,8 @@ function listFlexoWOStatus(requestOrLimit, offset) {
   const request = _normalizeFlexoWOStatusRequest_(requestOrLimit, offset);
   const cache = CacheService.getScriptCache();
   const artworkVersion = PropertiesService.getScriptProperties().getProperty('ARTWORK_WORKBENCH_VERSION') || '0';
-  const cacheKey = 'FLEXO_WO_STATUS_' + artworkVersion;
+  const workOrderVersion = _workOrderDataVersion_();
+  const cacheKey = 'FLEXO_WO_STATUS_' + artworkVersion + '_' + workOrderVersion;
   if (!request.forceRefresh) {
     try {
       const cached = cache.get(cacheKey);
@@ -7846,6 +10013,18 @@ function _workOrderUsesRunningMeterWastage_(payload) {
   return wastageBasis === 'RUNNING_METER' || jobType === 'FLEXO' || !!(payload && payload.flexoDetails);
 }
 
+function _workOrderHasDigitalProductOrDivision_(payload) {
+  const jobs = Array.isArray(payload && payload.jobs) ? payload.jobs : [];
+  return jobs.some(function(job) {
+    const text = _normalizeWOWastageText_([
+      job && job.productType,
+      job && job.product_type,
+      job && job.division
+    ].join(' '));
+    return text.indexOf('digital') !== -1;
+  });
+}
+
 function _workOrderWastageSheetBasis_(payload) {
   // Flexo wastage is stored as running meters/percent and must never enter sheet-slab approval.
   if (_workOrderUsesRunningMeterWastage_(payload)) return 0;
@@ -7893,6 +10072,14 @@ function _workOrderIsDripOff_(payload) {
 
 function _getDefaultWorkOrderWastageRule_(payload) {
   if (_workOrderUsesRunningMeterWastage_(payload)) return null;
+  if (_workOrderHasDigitalProductOrDivision_(payload)) {
+    return {
+      value: 0,
+      sheets: _workOrderWastageSheetBasis_(payload),
+      label: 'Digital product/division: slab not applicable',
+      slabNotApplicable: true
+    };
+  }
   const sheets = _workOrderWastageSheetBasis_(payload);
   if (!(sheets > 0)) return null;
 
@@ -7981,6 +10168,9 @@ function _validateWorkOrderWastageApproval_(payload, context) {
   const rule = _getDefaultWorkOrderWastageRule_(payload);
   if (!rule) return;
   const requested = Number(payload && payload.wastage && payload.wastage.processSheets || 0) || 0;
+  if (rule.slabNotApplicable) {
+    return;
+  }
   if (requested === Number(rule.value || 0)) return;
 
   const ctx = context || {};
@@ -8028,6 +10218,9 @@ function submitWorkOrderWastageOverride(payload, reason, token) {
 
   const rule = _getDefaultWorkOrderWastageRule_(payload);
   if (!rule) throw new Error('Unable to calculate slab wastage for this request.');
+  if (rule.slabNotApplicable) {
+    throw new Error('Wastage approval is not required for digital product/division jobs. Enter digital wastage directly on the work order.');
+  }
   const requested = Number(payload && payload.wastage && payload.wastage.processSheets || 0) || 0;
   if (requested === Number(rule.value || 0)) {
     throw new Error('Requested wastage is same as the slab default. Approval is not required.');
@@ -8283,7 +10476,6 @@ function saveWorkOrder(payload, options, token) {
 
     previousSoNumbers = [...new Set(existingJobs.map(j => j.so_number).filter(Boolean))];
 
-    _deleteInventoryReservationsForWO_(woNo);
     supabaseDelete_('work_order_routing', { wo_id: 'eq.' + wo.id });
     supabaseDelete_('work_order_materials', { wo_id: 'eq.' + wo.id });
     supabaseDelete_('work_order_jobs', { wo_id: 'eq.' + wo.id });
@@ -8362,12 +10554,37 @@ function saveWorkOrder(payload, options, token) {
 
   // 🔥 Batch fetch item master once
   const allLabels = [
-    ...papers.map(p => p.stock || p.itemLabel || ''),
-    ...corrugation.map(c => c.itemDetails || '')
+    ...papers.map(p => p.itemName || p.stock || p.itemLabel || ''),
+    ...corrugation.map(c => c.itemName || c.itemDetails || ''),
+    ...extraMaterials.map(m => m.materialName || m.itemName || m.itemLabel || '')
+  ].filter(Boolean);
+
+  const allCodes = [
+    ...papers.map(p => p.itemCode || p.item_code || ''),
+    ...corrugation.map(c => c.itemCode || c.item_code || ''),
+    ...extraMaterials.map(m => m.materialItemCode || m.itemCode || m.item_code || '')
   ].filter(Boolean);
 
   const uniqueLabels = [...new Set(allLabels)];
-  let itemMap = {};
+  const uniqueCodes = [...new Set(allCodes)];
+  let itemMapByName = {};
+  let itemMapByCode = {};
+
+  if (uniqueCodes.length) {
+    const items = _supabaseSelectByKeyInBatches_(
+      'inv_items',
+      'id,item_code,item_name',
+      'item_code',
+      uniqueCodes,
+      undefined,
+      40
+    ) || [];
+
+    items.forEach(i => {
+      const code = String(i.item_code || '').trim().toUpperCase();
+      if (code) itemMapByCode[code] = i;
+    });
+  }
 
   if (uniqueLabels.length) {
     const items = _supabaseSelectByKeyInBatches_(
@@ -8380,7 +10597,7 @@ function saveWorkOrder(payload, options, token) {
     ) || [];
 
     items.forEach(i => {
-      itemMap[i.item_name] = i;
+      itemMapByName[i.item_name] = i;
     });
   }
 
@@ -8398,12 +10615,15 @@ function pushMaterial(m, type) {
 
   if (!requiredQty || requiredQty <= 0) return;
 
+  const explicitCode = String(m.itemCode || m.item_code || m.materialItemCode || '').trim();
+
   const label =
     type === 'CORRUGATION'
-      ? m.itemDetails || m.itemLabel || ''
-      : m.itemLabel || m.stock || '';
+      ? m.itemName || m.itemDetails || m.itemLabel || explicitCode || ''
+      : m.itemName || m.itemLabel || m.stock || explicitCode || '';
 
-  const item = itemMap[label] || null;
+  const item = (explicitCode && itemMapByCode[explicitCode.toUpperCase()]) || itemMapByName[label] || null;
+  const resolvedLabel = item?.item_name || label;
 
     materialRows.push({
       wo_id: wo.id,
@@ -8411,7 +10631,7 @@ function pushMaterial(m, type) {
       required_qty: requiredQty,
 
       material_key: normalizeWOMaterialKey_(
-        label,
+        resolvedLabel,
         m.gsm || '',
         m.deckle || 0,
         m.cut_size || m.cutSize || 0,
@@ -8426,8 +10646,8 @@ function pushMaterial(m, type) {
       sheets: m.sheets || 0,
 
     item_id: item?.id || null,
-    item_code: item?.item_code || '',
-    item_name: item?.item_name || label,
+    item_code: item?.item_code || explicitCode || '',
+    item_name: resolvedLabel,
 
     material_type: type
   });
@@ -8440,13 +10660,16 @@ function pushMaterial(m, type) {
     const requiredQty = Number(m.requiredQty || m.qtyPerUnit || 0);
     if (!requiredQty || requiredQty <= 0) return;
 
-    const label = String(m.materialName || m.itemLabel || m.materialItemCode || '').trim();
+    const explicitCode = String(m.materialItemCode || m.itemCode || m.item_code || '').trim();
+    const label = String(m.materialName || m.itemName || m.itemLabel || explicitCode || '').trim();
+    const item = (explicitCode && itemMapByCode[explicitCode.toUpperCase()]) || itemMapByName[label] || null;
+    const resolvedLabel = item?.item_name || label;
 
     materialRows.push({
       wo_id: wo.id,
       required_qty: requiredQty,
       material_key: normalizeWOMaterialKey_(
-        m.materialItemCode || label,
+        item?.item_code || explicitCode || resolvedLabel,
         m.gsm || '',
         0,
         0,
@@ -8457,9 +10680,9 @@ function pushMaterial(m, type) {
       deckle: 0,
       cut_size: 0,
       sheets: 0,
-      item_id: null,
-      item_code: m.materialItemCode || '',
-      item_name: label,
+      item_id: item?.id || null,
+      item_code: item?.item_code || explicitCode || '',
+      item_name: resolvedLabel,
       material_type: m.materialType || 'RAW_MATERIAL'
     });
   });
@@ -8488,7 +10711,6 @@ function pushMaterial(m, type) {
 
   if (mergedMaterialRows.length) {
     supabaseBulkInsertMinimal_('work_order_materials', mergedMaterialRows);
-    mergedMaterialRows.forEach(m => _insertInventoryReservationForWO_(woNo, m));
   }
 
   /* =========================
@@ -8555,7 +10777,8 @@ function pushMaterial(m, type) {
     }
   });
 
-  return { ok: true, woNo, soNumbers: touchedSoNumbers };
+  const allocation = _syncWOStockReservations_(woNo, user, false);
+  return { ok: true, woNo, soNumbers: touchedSoNumbers, allocation: allocation };
 }
 function getWorkOrder(woNo) {
   const normalizedWoNo = String(woNo || '').trim();
@@ -9181,6 +11404,7 @@ function saveFlexoWorkOrderV2(payload, token) {
       ok: true,
       woNo: savedWoNo,
       soNumbers: Array.isArray(saved.soNumbers) ? saved.soNumbers : [],
+      allocation: saved.allocation || null,
       requestId: requestId
     };
   } catch (err) {
@@ -9279,6 +11503,7 @@ function deleteWorkOrder(woNo, reason, token) {
   });
 
   _touchWorkOrderDataVersion_();
+  _invBumpStockSnapshotVersion_();
   return {
     ok: true,
     woNo: result.woNo || normalizedWoNo,
@@ -9292,7 +11517,8 @@ function saveAndExportWO(payload, token) {
 
   return {
     ok: true,
-    woNo: saved.woNo
+    woNo: saved.woNo,
+    allocation: saved.allocation || null
   };
 }
 
@@ -9936,25 +12162,31 @@ function _itemMasterPurchaseUomFactor_(value) {
   return Number(n.toFixed(6));
 }
 
-function _itemMasterNormalizePurchaseConversionType_(value) {
+function _itemMasterNormalizePurchaseConversionType_(value, stockUom) {
   const key = String(value || 'SAME_AS_STOCK').trim().toUpperCase();
-  return ['SAME_AS_STOCK', 'FIXED_FACTOR', 'AREA_WIDTH', 'SHEET_AREA', 'WEIGHT_GSM'].indexOf(key) !== -1
+  const stock = String(stockUom || '').trim().toUpperCase();
+  if (key === 'WEIGHT_GSM') {
+    return ['SHEET', 'SHEETS'].indexOf(stock) !== -1 ? 'WEIGHT_GSM_SHEET' : 'WEIGHT_GSM_RM';
+  }
+  return ['SAME_AS_STOCK', 'FIXED_FACTOR', 'AREA_WIDTH', 'SHEET_AREA', 'WEIGHT_GSM_RM', 'WEIGHT_GSM_SHEET'].indexOf(key) !== -1
     ? key
     : 'SAME_AS_STOCK';
 }
 
 function _itemMasterMapPurchaseUomSetupRow_(row) {
   const src = row || {};
+  const stockUom = src.stock_uom || src.stockUom || src.uom || '';
   return {
     itemId: src.item_id || src.itemId || '',
     itemCode: src.item_code || src.itemCode || '',
     itemName: src.item_name || src.itemName || '',
     category: src.category || '',
+    productCategory: src.product_category || src.productCategory || '',
     department: src.department || '',
     itemActive: src.item_active !== false && src.active !== false,
-    stockUom: src.stock_uom || src.stockUom || src.uom || '',
-    purchaseUom: src.purchase_uom || src.purchaseUom || src.stock_uom || src.stockUom || '',
-    conversionType: _itemMasterNormalizePurchaseConversionType_(src.conversion_type || src.conversionType),
+    stockUom: stockUom,
+    purchaseUom: src.purchase_uom || src.purchaseUom || stockUom || '',
+    conversionType: _itemMasterNormalizePurchaseConversionType_(src.conversion_type || src.conversionType, stockUom),
     fixedFactor: src.fixed_factor == null ? '' : Number(src.fixed_factor),
     sizeProfile: src.size_profile || src.sizeProfile || '',
     rmType: src.rm_type || src.rmType || '',
@@ -10000,13 +12232,28 @@ function _itemMasterPurchaseUomRulesByCode_(itemCodes) {
   }
 }
 
+function _itemMasterPurchaseUomSetupViewMissing_(err) {
+  const msg = String((err && err.message) || err || '').toLowerCase();
+  return _supabaseRelationMissing_(err, 'v_inv_item_purchase_uom_setup') ||
+    (msg.indexOf('product_category') !== -1 && (
+      msg.indexOf('does not exist') !== -1 ||
+      msg.indexOf('could not find') !== -1 ||
+      msg.indexOf('schema cache') !== -1
+    ));
+}
+
 function itemMasterListPurchaseUomSetup(params, token) {
   _requireAdmin_(token);
   const p = params || {};
   const q = String(p.q || '').trim();
   const status = String(p.status || 'active').trim().toLowerCase();
   const setupStatus = String(p.setupStatus || p.dimensionStatus || 'all').trim().toLowerCase();
-  const pageSize = Math.min(250, Math.max(25, Number(p.pageSize || p.limit || 100) || 100));
+  const departmentValue = String(p.department || '').trim();
+  const itemCategoryValue = String(p.itemCategory || p.item_category || p.category || '').trim();
+  const departmentFilter = departmentValue.toLowerCase();
+  const itemCategoryFilter = itemCategoryValue.toLowerCase();
+  const exportAll = p.exportAll === true;
+  const pageSize = exportAll ? 50000 : Math.min(250, Math.max(25, Number(p.pageSize || p.limit || 100) || 100));
   const page = Math.max(1, Number(p.page || 1) || 1);
   const offset = (page - 1) * pageSize;
   const version = PropertiesService.getScriptProperties().getProperty('ITEM_MASTER_PURCHASE_UOM_VERSION') || '0';
@@ -10015,6 +12262,9 @@ function itemMasterListPurchaseUomSetup(params, token) {
     q: q,
     status: status,
     setupStatus: setupStatus,
+    department: departmentFilter,
+    itemCategory: itemCategoryFilter,
+    exportAll: exportAll ? 1 : 0,
     page: page,
     pageSize: pageSize
   }));
@@ -10027,15 +12277,17 @@ function itemMasterListPurchaseUomSetup(params, token) {
   let allRows = null;
   try {
     const filters = {};
-    if (q) filters.or = '(item_code.ilike.*' + q + '*,item_name.ilike.*' + q + '*,category.ilike.*' + q + '*,department.ilike.*' + q + '*)';
+    if (q) filters.or = '(item_code.ilike.*' + q + '*,item_name.ilike.*' + q + '*,category.ilike.*' + q + '*,product_category.ilike.*' + q + '*,department.ilike.*' + q + '*)';
     if (setupStatus === 'missing') filters.setup_status = 'in.(MISSING,INCOMPLETE)';
     if (setupStatus === 'complete') filters.setup_status = 'eq.COMPLETE';
+    if (departmentValue) filters.department = 'ilike.' + departmentValue;
+    if (itemCategoryValue) filters.category = 'ilike.' + itemCategoryValue;
     allRows = _supabaseSelectAll_('v_inv_item_purchase_uom_setup', {
       filters: filters,
       order: 'item_name.asc,item_code.asc'
     }, 1000, 50000) || [];
   } catch (err) {
-    if (!_supabaseRelationMissing_(err, 'v_inv_item_purchase_uom_setup')) throw err;
+    if (!_itemMasterPurchaseUomSetupViewMissing_(err)) throw err;
   }
 
   if (allRows === null) {
@@ -10046,13 +12298,27 @@ function itemMasterListPurchaseUomSetup(params, token) {
       select: 'id,item_code,item_name,category,department,uom,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,active',
       filters: filters,
       order: 'item_name.asc,item_code.asc'
-    }, 1000, 50000) || []).map(function(item) {
+    }, 1000, 50000) || []);
+    const productCategoryByCode = {};
+    (_supabaseSelectByKeyInBatches_(
+      'items',
+      'item_code,product_category',
+      'item_code',
+      allRows.map(function(item) { return item.item_code; }),
+      null,
+      40
+    ) || []).forEach(function(row) {
+      const code = String(row.item_code || '').trim().toUpperCase();
+      if (code) productCategoryByCode[code] = row.product_category || '';
+    });
+    allRows = allRows.map(function(item) {
       const unit = _normalizeItemDimensionUnit_(item.length_unit || item.width_unit || item.height_unit || 'MM') || 'MM';
       return {
         item_id: item.id,
         item_code: item.item_code,
         item_name: item.item_name,
         category: item.category || '',
+        product_category: productCategoryByCode[String(item.item_code || '').trim().toUpperCase()] || '',
         department: item.department || '',
         item_active: item.active !== false,
         stock_uom: item.uom || '',
@@ -10092,9 +12358,11 @@ function itemMasterListPurchaseUomSetup(params, token) {
   if (status === 'inactive') normalized = normalized.filter(function(row) { return row.itemActive === false; });
   if (qLower) {
     normalized = normalized.filter(function(row) {
-      return [row.itemCode, row.itemName, row.category, row.department, row.stockUom, row.purchaseUom].join(' ').toLowerCase().indexOf(qLower) !== -1;
+      return [row.itemCode, row.itemName, row.category, row.department, row.productCategory, row.stockUom, row.purchaseUom].join(' ').toLowerCase().indexOf(qLower) !== -1;
     });
   }
+  if (departmentFilter) normalized = normalized.filter(function(row) { return String(row.department || '').trim().toLowerCase() === departmentFilter; });
+  if (itemCategoryFilter) normalized = normalized.filter(function(row) { return String(row.category || '').trim().toLowerCase() === itemCategoryFilter; });
   if (setupStatus === 'missing') normalized = normalized.filter(function(row) { return row.setupStatus !== 'COMPLETE'; });
   if (setupStatus === 'complete') normalized = normalized.filter(function(row) { return row.setupStatus === 'COMPLETE'; });
 
@@ -10118,13 +12386,13 @@ function itemMasterListPurchaseUomSetup(params, token) {
 }
 
 function _itemMasterPurchaseUomSetupStatus_(row) {
-  const conversionType = _itemMasterNormalizePurchaseConversionType_(row.conversion_type || row.conversionType);
+  const conversionType = _itemMasterNormalizePurchaseConversionType_(row.conversion_type || row.conversionType, row.stock_uom || row.stockUom);
   const purchaseUom = String(row.purchase_uom || row.purchaseUom || '').trim();
   if (!purchaseUom || !conversionType) return 'MISSING';
   if (conversionType === 'FIXED_FACTOR' && !(Number(row.fixed_factor || row.fixedFactor || 0) > 0)) return 'INCOMPLETE';
-  if (conversionType === 'AREA_WIDTH' && !(Number(row.rule_width_mm || row.width_mm || row.ruleWidthMm || row.widthMm || 0) > 0)) return 'INCOMPLETE';
-  if (conversionType === 'SHEET_AREA' && (!(Number(row.rule_width_mm || row.width_mm || row.ruleWidthMm || row.widthMm || 0) > 0) || !(Number(row.rule_length_mm || row.length_mm || row.ruleLengthMm || row.lengthMm || 0) > 0))) return 'INCOMPLETE';
-  if (conversionType === 'WEIGHT_GSM' && (!(Number(row.rule_width_mm || row.width_mm || row.ruleWidthMm || row.widthMm || 0) > 0) || !(Number(row.rule_gsm || row.gsm || row.ruleGsm || 0) > 0))) return 'INCOMPLETE';
+  if ((conversionType === 'AREA_WIDTH' || conversionType === 'WEIGHT_GSM_RM') && !(Number(row.rule_width_mm || row.width_mm || row.ruleWidthMm || row.widthMm || 0) > 0)) return 'INCOMPLETE';
+  if ((conversionType === 'SHEET_AREA' || conversionType === 'WEIGHT_GSM_SHEET') && (!(Number(row.rule_width_mm || row.width_mm || row.ruleWidthMm || row.widthMm || 0) > 0) || !(Number(row.rule_length_mm || row.length_mm || row.ruleLengthMm || row.lengthMm || 0) > 0))) return 'INCOMPLETE';
+  if ((conversionType === 'WEIGHT_GSM_RM' || conversionType === 'WEIGHT_GSM_SHEET') && !(Number(row.rule_gsm || row.gsm || row.ruleGsm || 0) > 0)) return 'INCOMPLETE';
   return 'COMPLETE';
 }
 
@@ -10149,9 +12417,13 @@ function itemMasterSavePurchaseUomSetup(payload, token) {
     const dimensionUnit = _normalizeItemDimensionUnit_(src?.dimensionUnit || src?.dimension_unit || item.length_unit || item.width_unit || item.height_unit || 'MM') || 'MM';
     const stockUom = String(src?.stockUom || src?.stock_uom || item.uom || '').trim().toUpperCase();
     const purchaseUom = String(src?.purchaseUom || src?.purchase_uom || stockUom || '').trim().toUpperCase();
-    const conversionType = _itemMasterNormalizePurchaseConversionType_(src?.conversionType || src?.conversion_type);
+    const conversionType = _itemMasterNormalizePurchaseConversionType_(src?.conversionType || src?.conversion_type, stockUom);
+    const requestedRmType = _purchaseNormalizeRmTypeCode_(src?.rmType || src?.rm_type || item.rm_type || '');
+    const rmTypeMaster = requestedRmType ? _purchaseFindRmTypeMaster_(requestedRmType, false) : null;
     if (!stockUom) throw new Error('Stock UOM is required for ' + itemCode);
     if (!purchaseUom) throw new Error('Purchase UOM is required for ' + itemCode);
+    if (requestedRmType && !rmTypeMaster) throw new Error('Select an active RM Type from the admin master for ' + itemCode);
+    const canonicalRmType = rmTypeMaster ? rmTypeMaster.rm_type_code : '';
 
     const lengthMm = _convertItemDimensionToMm_(src?.length, dimensionUnit);
     const widthMm = _convertItemDimensionToMm_(src?.width, dimensionUnit);
@@ -10167,8 +12439,11 @@ function itemMasterSavePurchaseUomSetup(payload, token) {
     if (conversionType === 'SHEET_AREA' && (!(Number(widthMm || 0) > 0) || !(Number(lengthMm || 0) > 0))) {
       throw new Error('Length and width are required for sheet area conversion on ' + itemCode);
     }
-    if (conversionType === 'WEIGHT_GSM' && (!(Number(widthMm || 0) > 0) || !(Number(gsm || 0) > 0))) {
-      throw new Error('Width and GSM are required for weight/GSM conversion on ' + itemCode);
+    if (conversionType === 'WEIGHT_GSM_RM' && (!(Number(widthMm || 0) > 0) || !(Number(gsm || 0) > 0))) {
+      throw new Error('Width and GSM are required for running-meter to kg conversion on ' + itemCode);
+    }
+    if (conversionType === 'WEIGHT_GSM_SHEET' && (!(Number(widthMm || 0) > 0) || !(Number(lengthMm || 0) > 0) || !(Number(gsm || 0) > 0))) {
+      throw new Error('Length, width and GSM are required for sheet to kg conversion on ' + itemCode);
     }
 
     let beforeRule = null;
@@ -10194,10 +12469,10 @@ function itemMasterSavePurchaseUomSetup(payload, token) {
       height_unit: heightMm == null ? null : dimensionUnit,
       gsm: gsm,
       size_profile: String(src?.sizeProfile || src?.size_profile || item.size_profile || '').trim() || null,
-      rm_type: _normalizePaperText_(src?.rmType || src?.rm_type || item.rm_type || '') || null,
+      rm_type: canonicalRmType || null,
       size_key: _buildPaperSizeKey_({ lengthMm: lengthMm, widthMm: widthMm, heightMm: heightMm }),
       material_key: _buildPaperMaterialKey_({
-        rmType: src?.rmType || src?.rm_type || item.rm_type || '',
+        rmType: canonicalRmType,
         gsm: gsm,
         specsText: item.specs_text || ''
       }) || null
@@ -10251,11 +12526,84 @@ function itemMasterSavePurchaseUomSetup(payload, token) {
   return { ok: true, updated: updated.length, itemCodes: updated };
 }
 
+function _itemMasterUniqueSorted_(values) {
+  const seen = {};
+  const out = [];
+  (values || []).forEach(function(value) {
+    const text = String(value == null ? '' : value).trim();
+    if (!text) return;
+    const key = text.toUpperCase();
+    if (seen[key]) return;
+    seen[key] = true;
+    out.push(text);
+  });
+  return out.sort(function(a, b) {
+    return String(a || '').localeCompare(String(b || ''), undefined, { sensitivity: 'base' });
+  });
+}
+
+function _itemMasterMergeReferenceList_(primary, fallback) {
+  return _itemMasterUniqueSorted_([].concat(primary || [], fallback || []));
+}
+
+function _itemMasterGetInventoryDepartments_() {
+  try {
+    const rows = _supabaseSelectAll_('inv_items', {
+      select: 'department',
+      order: 'department.asc'
+    }, 1000, 50000) || [];
+    return _itemMasterUniqueSorted_(rows.map(function(row) { return row.department; }));
+  } catch (err) {
+    Logger.log('Item Master inventory departments load failed: ' + (err && err.message ? err.message : err));
+    return [];
+  }
+}
+
+function _itemMasterGetInventoryCategories_() {
+  try {
+    const rows = _supabaseSelectAll_('inv_items', {
+      select: 'category',
+      order: 'category.asc'
+    }, 1000, 50000) || [];
+    return _itemMasterUniqueSorted_(rows.map(function(row) { return row.category; }));
+  } catch (err) {
+    Logger.log('Item Master inventory categories load failed: ' + (err && err.message ? err.message : err));
+    return [];
+  }
+}
+
+function _itemMasterGetProductCategories_() {
+  try {
+    const rows = _supabaseSelectAll_('items', {
+      select: 'product_category',
+      order: 'product_category.asc'
+    }, 1000, 50000) || [];
+    return _itemMasterUniqueSorted_(rows.map(function(row) { return row.product_category; }));
+  } catch (err) {
+    Logger.log('Item Master product categories load failed: ' + (err && err.message ? err.message : err));
+    return [];
+  }
+}
+
+function _itemMasterGetPurchaseRmTypes_() {
+  try {
+    return _purchaseListRmTypeMasterRows_(false).map(function(row) {
+      return {
+        value: row.rm_type_code || '',
+        label: row.rm_type_name || row.rm_type_code || ''
+      };
+    });
+  } catch (err) {
+    Logger.log('Item Master RM Types load failed: ' + (err && err.message ? err.message : err));
+    return [];
+  }
+}
+
 function itemMasterGetReferenceData(token) {
   _requireModuleAccess_(token, 'ITEMMASTER', 'can_view');
 
   const version = PropertiesService.getScriptProperties().getProperty('ITEM_MASTER_CACHE_VERSION') || '0';
-  const cacheKey = 'ITEM_MASTER_REFS_v2_' + version;
+  const cacheKey = 'ITEM_MASTER_REFS_v4_' + version;
   const cache = CacheService.getScriptCache();
   const cached = cache.get(cacheKey);
   if (cached) {
@@ -10264,11 +12612,15 @@ function itemMasterGetReferenceData(token) {
 
   const masters = getUnifiedMasters() || {};
   const flexoMasters = getFlexoWOMasters() || {};
+  const inventoryDepartments = _itemMasterGetInventoryDepartments_();
+  const inventoryCategories = _itemMasterGetInventoryCategories_();
+  const itemProductCategories = _itemMasterGetProductCategories_();
+  const fallbackProductCategories = ['Flat', 'Corrugated', 'Flexo'];
   const payload = {
     categories: masters.categories || [],
     units: masters.units || [],
     jobTypes: masters.jobTypes || [],
-    productCategories: ['Flat', 'Corrugated', 'Flexo'],
+    productCategories: _itemMasterMergeReferenceList_(itemProductCategories, fallbackProductCategories),
     grainOptions: masters.grainOptions || [],
     printStyles: masters.printStyles || [],
     coatingOptions: masters.coatingOptions || [],
@@ -10276,6 +12628,10 @@ function itemMasterGetReferenceData(token) {
     stocks: masters.stocks || [],
     fluteOptions: masters.fluteOptions || [],
     departments: masters.departments || [],
+    purchaseDepartments: inventoryDepartments.length ? inventoryDepartments : (masters.departments || []),
+    purchaseItemCategories: inventoryCategories.length ? inventoryCategories : (masters.categories || []),
+    purchaseProductCategories: itemProductCategories.length ? itemProductCategories : fallbackProductCategories,
+    purchaseRmTypes: _itemMasterGetPurchaseRmTypes_(),
     machinesByDept: masters.machinesByDept || {},
     routingMaterialTypes: ['RAW_MATERIAL', 'PAPER', 'BOARD', 'CORRUGATION', 'ADHESIVE', 'INK', 'FILM', 'OTHER'],
     uomOptions: ['NOS', 'PCS', 'SHEET', 'RM', 'MTR', 'METER', 'KG', 'GRAM', 'SQM'],
@@ -16040,6 +18396,7 @@ function doGet(e) {
   const woNo = e?.parameter?.woNo || '';
   const soNo = e?.parameter?.soNo || '';
   const invoiceId = e?.parameter?.invoiceId || '';
+  const noteId = e?.parameter?.noteId || '';
   const challanValueMode = e?.parameter?.valueMode || '';
 
   // 🔥 HANDLE PRINT ROUTE FIRST (NO TEMPLATE ROUTING)
@@ -16098,8 +18455,10 @@ const ROUTES = {
   dispatch: 'Dispatch',
 
   billing: 'Invoice',
+  adjustmentnotes: 'AdjustmentNote',
   printinvoice: 'InvoicePrint',
   printchallan: 'DeliveryChallanPrint',
+  printadjustment: 'AdjustmentNotePrint',
   planning: 'Planning',
   reports: 'Reports',
   salesdashboard: 'SalesDashboard',
@@ -16142,6 +18501,7 @@ const ROUTES = {
   tpl.CURRENT_USER = sessionUser;
   tpl.ERP_COMPANY_LOGO_DATA_URL = getCompanyLogoDataUrl_();
   tpl.invoiceId = invoiceId;
+  tpl.noteId = noteId;
   tpl.challanValueMode = challanValueMode;
 
   return tpl.evaluate()
@@ -17975,14 +20335,8 @@ function saveArtworkGroup(payload, token) {
   if (isReferenceReuse && !requestedArtworkNo) {
     throw new Error('Existing artwork number is required when using an old artwork not present in Artwork Approval.');
   }
-  const isNewArtwork = !requestedArtworkNo;
   let preserveExistingJobs = payload && payload.preserveExistingJobs === true && !isReferenceReuse;
   let lockHeld = false;
-
-  if (isNewArtwork) {
-    lock.waitLock(10000);
-    lockHeld = true;
-  }
 
   try {
     let sequenceCandidate = null;
@@ -18019,9 +20373,15 @@ function saveArtworkGroup(payload, token) {
       return !stockClosedIdSet[job.id];
     });
     const needsArtworkGroup = productionSelectedJobs.length > 0 || preserveExistingJobs === true;
-    const artworkNo = needsArtworkGroup
-      ? (requestedArtworkNo || (sequenceCandidate = _getNextArtworkNumberCandidate_(payload.productType)).artworkNo)
-      : '';
+    let artworkNo = needsArtworkGroup ? requestedArtworkNo : '';
+    if (needsArtworkGroup && !artworkNo) {
+      if (!lock.tryLock(30000)) {
+        throw new Error('Artwork number generation is busy because another artwork is being saved. Please wait a few seconds and retry.');
+      }
+      lockHeld = true;
+      sequenceCandidate = _getNextArtworkNumberCandidate_(payload.productType);
+      artworkNo = sequenceCandidate.artworkNo;
+    }
 
     const selectedIdSet = {};
     productionSelectedJobs.forEach(function(job) { selectedIdSet[job.id] = true; });
@@ -18370,7 +20730,7 @@ const paramsKey = JSON.stringify({
 });
 
 const cache = CacheService.getScriptCache();
-const cacheKey = _cacheKeyHash_('SO_APPROVAL_V5', paramsKey);
+const cacheKey = _cacheKeyHash_('SO_APPROVAL_V6', paramsKey);
 const cached = cache.get(cacheKey);
 if (cached) {
   try {
@@ -18381,6 +20741,7 @@ if (cached) {
 }
 
 let rows = [];
+let usedApprovalEnrichedView = false;
 let usedEnhancedView = false;
 const baseQuery = {
   select: `
@@ -18413,7 +20774,61 @@ if (!isPendingOnly && normalizedFrom && normalizedTo) {
 } else if (!isPendingOnly && normalizedTo) {
   baseQuery.filters.so_date = 'lte.' + normalizedTo;
 }
+if (isPendingOnly) {
+  // Keep the role-specific final filter in the browser, but avoid loading
+  // completed rows from Supabase when either approval queue is pending-only.
+  baseQuery.filters.or = '(accounts_status.eq.PENDING,business_status.eq.PENDING)';
+}
 try {
+  rows = _supabaseSelectAll_(
+    'v_sales_order_approval_enriched',
+    Object.assign({}, baseQuery, {
+      select: `
+        so_number,
+        so_date,
+        so_created_at,
+        so_id,
+        so_line_id,
+        line_no,
+        sales_rep,
+        client_code,
+        client_name,
+        division,
+        product_name,
+        category,
+        qty,
+        rate,
+        accounts_status,
+        accounts_at,
+        business_status,
+        business_at,
+        sales_type,
+        order_prefix,
+        header_status,
+        line_status,
+        is_line_active,
+        advance_payment_required,
+        advance_payment_received,
+        open_line_value,
+        credit_limit,
+        current_balance,
+        approved_pipeline_value,
+        total_exposure,
+        available_credit,
+        has_credit_snapshot,
+        credit_synced_at,
+        credit_synced_by,
+        has_approved_artwork,
+        approved_artwork_no
+      `
+    })
+  ) || [];
+  usedApprovalEnrichedView = true;
+} catch (err) {
+  if (!_supabaseRelationMissing_(err, 'v_sales_order_approval_enriched')) throw err;
+}
+
+if (!usedApprovalEnrichedView) try {
   rows = _supabaseSelectAll_(
     'v_sales_order_lines_for_approval',
     Object.assign({}, baseQuery, {
@@ -18488,42 +20903,43 @@ if (usedEnhancedView) {
   });
 }
 
-const clientCodes = [...new Set(rows.map(function(r) {
+const clientCodes = usedApprovalEnrichedView ? [] : [...new Set(rows.map(function(r) {
   return String(r.client_code || '').trim().toUpperCase();
 }).filter(Boolean))];
-const soNumbers = [...new Set(rows.map(function(r) {
+const soNumbers = usedApprovalEnrichedView ? [] : [...new Set(rows.map(function(r) {
   return String(r.so_number || '').trim();
 }).filter(Boolean))];
-const creditMap = _getApprovalClientCreditMap_(clientCodes);
-const lineExposureMap = _getApprovalLineExposureMap_(soNumbers);
-const soIdByNumberForArtwork = _getSalesOrderIdsByNumber_(soNumbers);
-const approvedArtworkMap = _getApprovedArtworkBySalesOrderLineMap_(rows.map(function(r) {
+const creditMap = usedApprovalEnrichedView ? {} : _getApprovalClientCreditMap_(clientCodes);
+const lineExposureMap = usedApprovalEnrichedView ? {} : _getApprovalLineExposureMap_(soNumbers);
+const soIdByNumberForArtwork = usedApprovalEnrichedView ? {} : _getSalesOrderIdsByNumber_(soNumbers);
+const approvedArtworkMap = usedApprovalEnrichedView ? {} : _getApprovedArtworkBySalesOrderLineMap_(rows.map(function(r) {
   return {
     soId: soIdByNumberForArtwork[String(r.so_number || '')],
     soNo: String(r.so_number || ''),
     lineNo: String(r.line_no || '')
   };
 }));
-const creditSyncedAt = Object.keys(creditMap).reduce(function(latest, key) {
+const creditSyncedAt = usedApprovalEnrichedView
+  ? (rows.reduce(function(latest, row) {
+      const value = String(row.credit_synced_at || '');
+      return value > latest ? value : latest;
+    }, '') || _getLatestApprovalCreditSyncAt_())
+  : Object.keys(creditMap).reduce(function(latest, key) {
   const value = String(creditMap[key].credit_synced_at || '');
   return value > latest ? value : latest;
 }, '') || _getLatestApprovalCreditSyncAt_();
 
-const result = {
-  ok: true,
-  meta: {
-    total: rows.length,
-    creditSyncedAt: creditSyncedAt || null
-  },
-  rows: rows.map(r => {
+const resultRows = rows.map(r => {
     const clientCode = String(r.client_code || '').trim().toUpperCase();
-    const credit = creditMap[clientCode] || {};
-    const lineExposure = lineExposureMap[
+    const credit = usedApprovalEnrichedView ? r : (creditMap[clientCode] || {});
+    const lineExposure = usedApprovalEnrichedView ? r : (lineExposureMap[
       String(r.so_number || '') + '||' + String(r.line_no || '')
-    ] || {};
-    const approvedArtwork = approvedArtworkMap[
-      _salesOrderWorkflowLineKey_(soIdByNumberForArtwork[String(r.so_number || '')], r.line_no)
-    ] || null;
+    ] || {});
+    const approvedArtwork = usedApprovalEnrichedView
+      ? (r.has_approved_artwork ? { artworkNo: r.approved_artwork_no || '' } : null)
+      : (approvedArtworkMap[
+        _salesOrderWorkflowLineKey_(soIdByNumberForArtwork[String(r.so_number || '')], r.line_no)
+      ] || null);
     return {
     soNo: String(r.so_number || ''),
     soDate: r.so_date || null,
@@ -18558,7 +20974,15 @@ const result = {
     advancePaymentRequired: r.advance_payment_required === true,
     advancePaymentReceived: r.advance_payment_received === true
     };
-  })
+  });
+
+const result = {
+  ok: true,
+  meta: {
+    total: rows.length,
+    creditSyncedAt: creditSyncedAt || null
+  },
+  rows: resultRows
 };
 
   if (!rows || !rows.length) {
@@ -19865,7 +22289,7 @@ function _opsLoadLifecycleRows_(params) {
   const q = String(p.q || '').trim().toLowerCase();
 
   const workOrderJobs = supabaseSelect_('work_order_jobs', {
-    select: 'wo_id,so_number,line_no,product_name,qty,category,artwork_no,client_name,job_priority,expected_delivery,product_remarks,so_remarks,job_reference'
+    select: 'wo_id,so_number,line_no,product_name,qty,category,artwork_no,client_name,job_priority,expected_delivery,product_remarks,so_remarks,job_reference,ups,group_ups'
   }) || [];
   const packingRows = supabaseSelect_('packing_records', {
     select: 'id,so_id,so_line_id,so_number,line_no,product_code,product_name,order_qty,produced_qty,packed_qty,ready_to_dispatch,packed_at,packed_by'
@@ -19878,10 +22302,16 @@ function _opsLoadLifecycleRows_(params) {
   const stockClosureByComposite = stockClosure.byComposite || {};
 
   const jobKeys = {};
+  const jobsByWoId = {};
   workOrderJobs.forEach(function(job) {
     const key = String(job.so_number || '') + '||' + String(job.line_no || '');
     if (!jobKeys[key]) jobKeys[key] = [];
     jobKeys[key].push(job);
+    const woKey = String(job.wo_id || '');
+    if (woKey) {
+      if (!jobsByWoId[woKey]) jobsByWoId[woKey] = [];
+      jobsByWoId[woKey].push(job);
+    }
   });
 
   const packByLineId = {};
@@ -19941,7 +22371,7 @@ function _opsLoadLifecycleRows_(params) {
   clients.forEach(function(row) { clientMap[String(row.client_code)] = row.client_name || row.client_code; });
 
   const woIds = [...new Set(workOrderJobs.map(function(job){ return job.wo_id; }).filter(Boolean))];
-  const workOrders = _supabaseSelectByKeyInBatches_('work_orders', 'id,wo_number,status', 'id', woIds);
+  const workOrders = _supabaseSelectByKeyInBatches_('work_orders', 'id,wo_number,status,snapshot_json', 'id', woIds);
   const woMap = {};
   workOrders.forEach(function(row) { woMap[String(row.id)] = row; });
   const routingRows = _supabaseSelectByKeyInBatches_(
@@ -19988,6 +22418,13 @@ function _opsLoadLifecycleRows_(params) {
       ? salesOrderByNo[String(soNumber)]
       : {};
     const routing = primaryJob.wo_id ? (routingByWoId[String(primaryJob.wo_id)] || []) : [];
+    const primaryWo = primaryJob.wo_id ? (woMap[String(primaryJob.wo_id)] || {}) : {};
+    const categoryForPacking = _prodNormalizeCategoryGroup_(
+      _prodExtractCategoryGroupFromSnapshot_(primaryWo.snapshot_json || {}) ||
+      primaryJob.category ||
+      line.category ||
+      ''
+    );
     const productionRouting = routing.filter(function(route) {
       return !_prodIsExcludedProcess_(route.process_name || route.department || '');
     });
@@ -19995,23 +22432,61 @@ function _opsLoadLifecycleRows_(params) {
       ? productionRouting[productionRouting.length - 1]
       : (routing.length ? routing[routing.length - 1] : null);
     const finalRoutingKey = String(finalRouting && finalRouting.id || '');
-    const jobKeysForLine = jobs.map(function(job) {
+    const jobKeysForLine = [...new Set(jobs.map(function(job) {
       return _prodRowJobKey_(job);
-    }).filter(Boolean);
+    }).filter(Boolean))];
+    let packingConversion = {
+      sourceQty: Number(packRow.produced_qty || 0),
+      sourceUom: 'PCS',
+      conversionType: 'DIRECT_PCS',
+      conversionFactor: 1,
+      conversionStatus: 'LEGACY_PACKING_RECORD',
+      finishedQty: _opsFloorFinishedQty_(packRow.produced_qty || 0),
+      sourceProcessName: ''
+    };
     const productionProducedQty = finalRouting
       ? (function() {
           const routingJobTotals = producedByRoutingJob[finalRoutingKey] || {};
           const hasLineSpecificTotals = jobKeysForLine.some(function(jobKey) {
             return Object.prototype.hasOwnProperty.call(routingJobTotals, jobKey);
           });
+          const hasAnyLineSpecificTotals = Object.keys(routingJobTotals).length > 0;
+          let sourceQty = 0;
           if (hasLineSpecificTotals) {
-            return jobKeysForLine.reduce(function(sum, jobKey) {
+            sourceQty = jobKeysForLine.reduce(function(sum, jobKey) {
               return sum + Number(routingJobTotals[jobKey] || 0);
             }, 0);
+          } else if (hasAnyLineSpecificTotals) {
+            sourceQty = 0;
+          } else {
+            sourceQty = Number(producedByRouting[finalRoutingKey] || 0);
+            const sourceUom = _opsPackingSourceUom_(categoryForPacking, finalRouting);
+            const woJobs = jobsByWoId[String(primaryJob.wo_id || '')] || [];
+            const distinctWoLines = [...new Set(woJobs.map(function(job) {
+              return String(job.so_number || '') + '||' + String(job.line_no || '');
+            }).filter(function(jobKey) {
+              return jobKey !== '||';
+            }))];
+            if ((sourceUom === 'PCS' || sourceUom === 'RM') && distinctWoLines.length > 1) {
+              const woOrderQty = woJobs.reduce(function(sum, job) {
+                return sum + Math.max(Number(job.qty || 0), 0);
+              }, 0);
+              const lineOrderQty = jobs.reduce(function(sum, job) {
+                return sum + Math.max(Number(job.qty || 0), 0);
+              }, 0);
+              sourceQty = woOrderQty > 0 ? sourceQty * lineOrderQty / woOrderQty : 0;
+            }
           }
-          return Number(producedByRouting[finalRoutingKey] || 0);
+          packingConversion = _opsResolveFinishedPackingQty_(
+            sourceQty,
+            categoryForPacking,
+            finalRouting,
+            primaryJob,
+            primaryWo.snapshot_json || {}
+          );
+          return Number(packingConversion.finishedQty || 0);
         })()
-      : Number(packRow.produced_qty || 0);
+      : Number(packingConversion.finishedQty || 0);
     const stockClosedQty = Math.max(0, Number(stockRow.stockClosedQty || 0) || 0);
     const producedQty = productionProducedQty + stockClosedQty;
     const productionActivityQty = routing.reduce(function(sum, row) {
@@ -20041,6 +22516,12 @@ function _opsLoadLifecycleRows_(params) {
       orderQty: Number(line.qty || primaryJob.qty || packRow.order_qty || 0),
       producedQty: producedQty,
       productionProducedQty: productionProducedQty,
+      sourceProducedQty: Number(packingConversion.sourceQty || 0),
+      sourceUom: packingConversion.sourceUom || 'PCS',
+      conversionType: packingConversion.conversionType || 'DIRECT_PCS',
+      conversionFactor: Number(packingConversion.conversionFactor || 0),
+      conversionStatus: packingConversion.conversionStatus || 'OK',
+      sourceProcessName: packingConversion.sourceProcessName || '',
       stockClosedQty: stockClosedQty,
       stockMarked: stockClosedQty > 0,
       packedQty: Number(packRow.packed_qty || 0),
@@ -20113,6 +22594,247 @@ function _packCorrectionSchemaError_() {
   return new Error('Packing correction schema is not applied. Run supabase_packing_entry_log.sql first.');
 }
 
+const PACKING_BOX_SETUP_CACHE_KEY_ = 'PACKING_BOX_SETUP_V1';
+
+function _packBoxSchemaMissing_(err) {
+  return _supabaseRelationMissing_(err, 'packing_box_master') ||
+    _supabaseRelationMissing_(err, 'packing_box_settings') ||
+    _supabaseRelationMissing_(err, 'packing_entry_box_usage') ||
+    _supabaseRelationMissing_(err, 'save_packing_entries_with_boxes');
+}
+
+function _packMapBoxMaster_(row) {
+  return {
+    id: row?.id || '',
+    boxCode: row?.box_code || '',
+    boxName: row?.box_name || '',
+    lengthMm: Number(row?.length_mm || 0),
+    widthMm: Number(row?.width_mm || 0),
+    heightMm: Number(row?.height_mm || 0),
+    material: row?.material || '',
+    ply: row?.ply || '',
+    ratePerBox: Number(row?.rate_per_box || 0),
+    active: row?.active !== false,
+    notes: row?.notes || '',
+    createdAt: row?.created_at || '',
+    createdBy: row?.created_by || '',
+    updatedAt: row?.updated_at || '',
+    updatedBy: row?.updated_by || ''
+  };
+}
+
+function _packGetBoxSetup_(includeInactive) {
+  const includeAll = includeInactive === true;
+  const cache = CacheService.getScriptCache();
+  if (!includeAll) {
+    const cached = cache.get(PACKING_BOX_SETUP_CACHE_KEY_);
+    if (cached) return JSON.parse(cached);
+  }
+  try {
+    const rows = supabaseSelect_('packing_box_master', {
+      select: 'id,box_code,box_name,length_mm,width_mm,height_mm,material,ply,rate_per_box,active,notes,created_at,created_by,updated_at,updated_by',
+      order: 'active.desc,box_code.asc',
+      limit: 5000
+    }) || [];
+    const settings = supabaseSelect_('packing_box_settings', {
+      select: 'setting_key,require_box_entry,updated_at,updated_by',
+      filters: { setting_key: 'eq.DEFAULT' },
+      limit: 1
+    }) || [];
+    const result = {
+      enabled: true,
+      requireBoxEntry: settings[0]?.require_box_entry === true,
+      boxes: rows.filter(function(row) { return includeAll || row.active !== false; }).map(_packMapBoxMaster_)
+    };
+    if (!includeAll) _prodCachePutJsonSafe_(cache, PACKING_BOX_SETUP_CACHE_KEY_, result, 300);
+    return result;
+  } catch (err) {
+    if (_packBoxSchemaMissing_(err)) {
+      return { enabled: false, requireBoxEntry: false, boxes: [] };
+    }
+    throw err;
+  }
+}
+
+function _packClearBoxSetupCache_() {
+  try { CacheService.getScriptCache().remove(PACKING_BOX_SETUP_CACHE_KEY_); } catch (e) {}
+  _opsBumpDatasetVersion_();
+}
+
+function _packGetBoxUsageByEntryIds_(entryIds) {
+  const ids = [...new Set((entryIds || []).map(function(id) {
+    return String(id || '').trim();
+  }).filter(Boolean))];
+  if (!ids.length) return {};
+  try {
+    const rows = _selectInBatches_(
+      'packing_entry_box_usage',
+      'id,packing_entry_id,box_master_id,box_code_snapshot,box_name_snapshot,length_mm_snapshot,width_mm_snapshot,height_mm_snapshot,material_snapshot,ply_snapshot,rate_per_box_snapshot,box_count,total_cost',
+      'packing_entry_id',
+      ids
+    ) || [];
+    const out = {};
+    rows.forEach(function(row) {
+      const key = String(row.packing_entry_id || '');
+      if (!out[key]) out[key] = [];
+      out[key].push({
+        id: row.id || '',
+        boxMasterId: row.box_master_id || '',
+        boxCode: row.box_code_snapshot || '',
+        boxName: row.box_name_snapshot || '',
+        lengthMm: Number(row.length_mm_snapshot || 0),
+        widthMm: Number(row.width_mm_snapshot || 0),
+        heightMm: Number(row.height_mm_snapshot || 0),
+        material: row.material_snapshot || '',
+        ply: row.ply_snapshot || '',
+        ratePerBox: Number(row.rate_per_box_snapshot || 0),
+        boxCount: Number(row.box_count || 0),
+        totalCost: Number(row.total_cost || 0)
+      });
+    });
+    return out;
+  } catch (err) {
+    if (_packBoxSchemaMissing_(err)) return {};
+    throw err;
+  }
+}
+
+function adminListPackingBoxes(token) {
+  _requireAdmin_(token);
+  return _packGetBoxSetup_(true);
+}
+
+function adminSavePackingBox(payload, token) {
+  const admin = _requireAdmin_(token);
+  const p = payload || {};
+  const id = String(p.id || '').trim();
+  const boxCode = String(p.boxCode || p.box_code || '').trim().toUpperCase();
+  const boxName = String(p.boxName || p.box_name || '').trim();
+  const lengthMm = Number(p.lengthMm || p.length_mm || 0);
+  const widthMm = Number(p.widthMm || p.width_mm || 0);
+  const heightMm = Number(p.heightMm || p.height_mm || 0);
+  const ratePerBox = Number(p.ratePerBox ?? p.rate_per_box);
+  const active = p.active !== false;
+  const changedBy = String(admin.userId || admin.displayName || 'ADMIN');
+  const changeReason = String(p.changeReason || '').trim();
+
+  if (!boxCode) throw new Error('Box code is required');
+  if (!boxName) throw new Error('Box name is required');
+  if (!(lengthMm > 0) || !(widthMm > 0) || !(heightMm > 0)) {
+    throw new Error('Length, width and height must be greater than zero');
+  }
+  if (!isFinite(ratePerBox) || ratePerBox < 0) throw new Error('Rate per box must be zero or higher');
+
+  let allRows = [];
+  try {
+    allRows = supabaseSelect_('packing_box_master', {
+      select: 'id,box_code,box_name,length_mm,width_mm,height_mm,material,ply,rate_per_box,active,notes,created_at,created_by,updated_at,updated_by',
+      order: 'box_code.asc',
+      limit: 5000
+    }) || [];
+  } catch (err) {
+    if (_packBoxSchemaMissing_(err)) throw new Error('Packing box schema is not applied. Run supabase_packing_box_cost.sql first.');
+    throw err;
+  }
+  const duplicate = allRows.find(function(row) {
+    return String(row.box_code || '').trim().toUpperCase() === boxCode && String(row.id || '') !== id;
+  });
+  if (duplicate) throw new Error('Box code already exists');
+
+  const before = id ? allRows.find(function(row) { return String(row.id || '') === id; }) : null;
+  if (id && !before) throw new Error('Packing box master not found');
+  if (before && Math.abs(Number(before.rate_per_box || 0) - ratePerBox) > 0.000001 && !changeReason) {
+    throw new Error('Rate change reason is required');
+  }
+  const now = new Date().toISOString();
+  const row = {
+    box_code: boxCode,
+    box_name: boxName,
+    length_mm: Math.round(lengthMm * 100) / 100,
+    width_mm: Math.round(widthMm * 100) / 100,
+    height_mm: Math.round(heightMm * 100) / 100,
+    material: String(p.material || '').trim(),
+    ply: String(p.ply || '').trim(),
+    rate_per_box: Math.round(ratePerBox * 10000) / 10000,
+    active: active,
+    notes: String(p.notes || '').trim(),
+    updated_at: now,
+    updated_by: changedBy
+  };
+
+  let masterId = id;
+  if (id) {
+    supabaseUpdateMinimal_('packing_box_master', { id: 'eq.' + id }, row);
+  } else {
+    const inserted = supabaseInsert_('packing_box_master', Object.assign({}, row, {
+      created_at: now,
+      created_by: changedBy
+    })) || [];
+    masterId = inserted[0]?.id || '';
+    if (!masterId) throw new Error('Unable to create packing box master');
+  }
+
+  const oldRate = before ? Number(before.rate_per_box || 0) : null;
+  if (!before || Math.abs(oldRate - row.rate_per_box) > 0.000001) {
+    supabaseInsertMinimal_('packing_box_rate_audit', {
+      box_master_id: masterId,
+      old_rate: oldRate,
+      new_rate: row.rate_per_box,
+      change_reason: changeReason || (before ? 'Rate updated from Packing Box Master' : 'Initial box rate'),
+      changed_at: now,
+      changed_by: changedBy
+    });
+  }
+
+  _packClearBoxSetupCache_();
+  return { ok: true, id: masterId };
+}
+
+function adminSetPackingBoxActive(id, active, token) {
+  const admin = _requireAdmin_(token);
+  const masterId = String(id || '').trim();
+  if (!masterId) throw new Error('Packing box master is required');
+  try {
+    supabaseUpdateMinimal_('packing_box_master', { id: 'eq.' + masterId }, {
+      active: active === true,
+      updated_at: new Date().toISOString(),
+      updated_by: String(admin.userId || admin.displayName || 'ADMIN')
+    });
+  } catch (err) {
+    if (_packBoxSchemaMissing_(err)) throw new Error('Packing box schema is not applied. Run supabase_packing_box_cost.sql first.');
+    throw err;
+  }
+  _packClearBoxSetupCache_();
+  return { ok: true };
+}
+
+function adminSavePackingBoxSettings(payload, token) {
+  const admin = _requireAdmin_(token);
+  const requireBoxEntry = payload?.requireBoxEntry === true;
+  if (requireBoxEntry) {
+    const activeBoxes = supabaseSelect_('packing_box_master', {
+      select: 'id',
+      filters: { active: 'eq.true' },
+      limit: 1
+    }) || [];
+    if (!activeBoxes.length) throw new Error('Create at least one active packing box before making box entry required');
+  }
+  const row = {
+    setting_key: 'DEFAULT',
+    require_box_entry: requireBoxEntry,
+    updated_at: new Date().toISOString(),
+    updated_by: String(admin.userId || admin.displayName || 'ADMIN')
+  };
+  try {
+    supabaseUpsertMinimal_('packing_box_settings', [row], { onConflict: 'setting_key' });
+  } catch (err) {
+    if (_packBoxSchemaMissing_(err)) throw new Error('Packing box schema is not applied. Run supabase_packing_box_cost.sql first.');
+    throw err;
+  }
+  _packClearBoxSetupCache_();
+  return { ok: true };
+}
+
 function _packGetRecordById_(packId) {
   const id = String(packId || '').trim();
   if (!id) return null;
@@ -20152,6 +22874,7 @@ function _packEffectiveEntryUser_(row) {
 }
 
 function _packBuildEntryAuditPayload_(row) {
+  const boxUsage = row?.id ? (_packGetBoxUsageByEntryIds_([row.id])[String(row.id)] || []) : [];
   return {
     id: row?.id || '',
     pack_id: row?.pack_id || '',
@@ -20172,7 +22895,11 @@ function _packBuildEntryAuditPayload_(row) {
     posted_by: row?.posted_by || '',
     updated_at: row?.updated_at || '',
     updated_by: row?.updated_by || '',
-    change_reason: row?.change_reason || ''
+    change_reason: row?.change_reason || '',
+    box_usage: boxUsage,
+    packing_box_cost: boxUsage.reduce(function(sum, item) {
+      return sum + Number(item.totalCost || 0);
+    }, 0)
   };
 }
 
@@ -20310,6 +23037,76 @@ function _packGetMutationBlockReason_(entryRow) {
   return '';
 }
 
+function _opsLoadCanonicalPackingCapacityByLineIds_(soLineIds) {
+  const ids = [...new Set((soLineIds || []).map(function(id) {
+    return String(id || '').trim();
+  }).filter(Boolean))];
+  if (!ids.length) return {};
+  try {
+    const rows = _selectInBatches_(
+      'v_packing_queue_finished_v2',
+      'so_line_id,produced_qty,source_produced_qty,source_uom,conversion_type,conversion_factor,conversion_status,source_process_name',
+      'so_line_id',
+      ids
+    ) || [];
+    const out = {};
+    rows.forEach(function(row) {
+      if (!row || !row.so_line_id) return;
+      const key = String(row.so_line_id);
+      if (!out[key]) {
+        out[key] = Object.assign({}, row);
+        return;
+      }
+      out[key].produced_qty = Number(out[key].produced_qty || 0) + Number(row.produced_qty || 0);
+      out[key].source_produced_qty = Number(out[key].source_produced_qty || 0) + Number(row.source_produced_qty || 0);
+      if (String(out[key].conversion_status || 'OK') === 'OK' && String(row.conversion_status || 'OK') !== 'OK') {
+        out[key].conversion_status = row.conversion_status;
+      }
+      if (String(out[key].source_uom || '') !== String(row.source_uom || '')) {
+        out[key].source_uom = 'MIXED';
+        out[key].conversion_type = 'MULTIPLE_WORK_ORDERS';
+        out[key].conversion_factor = 0;
+      }
+    });
+    return out;
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'v_packing_queue_finished_v2')) return {};
+    throw err;
+  }
+}
+
+function _packNormalizeBoxAllocations_(entry, boxSetup, packedQty) {
+  const setup = boxSetup || { enabled: false, requireBoxEntry: false, boxes: [] };
+  const raw = Array.isArray(entry?.boxAllocations) ? entry.boxAllocations : [];
+  if (!setup.enabled) {
+    if (raw.length) throw new Error('Packing box schema is not applied. Run supabase_packing_box_cost.sql first.');
+    return [];
+  }
+  const masterById = {};
+  (setup.boxes || []).forEach(function(box) {
+    if (box?.id && box.active !== false) masterById[String(box.id)] = box;
+  });
+  const grouped = {};
+  raw.forEach(function(item) {
+    const masterId = String(item?.boxMasterId || item?.box_master_id || '').trim();
+    const count = Number(item?.boxCount || item?.box_count || 0);
+    if (!masterId && !count) return;
+    if (!masterById[masterId]) throw new Error('Selected packing box is inactive or unavailable');
+    if (!Number.isInteger(count) || count <= 0) throw new Error('Number of boxes must be a whole number greater than zero');
+    grouped[masterId] = (grouped[masterId] || 0) + count;
+  });
+  const out = Object.keys(grouped).map(function(masterId) {
+    return { boxMasterId: masterId, boxCount: grouped[masterId] };
+  });
+  if (Number(packedQty || 0) > 0 && setup.requireBoxEntry === true && !out.length) {
+    throw new Error(
+      'Select packing box and number of boxes for SO ' +
+      String(entry?.soNumber || '') + ' line ' + String(entry?.lineNo || '')
+    );
+  }
+  return out;
+}
+
 function _opsPersistPackingEntries_(entries) {
   const payloadRows = Array.isArray(entries) ? entries : [];
   if (!payloadRows.length) throw new Error('No packing entries');
@@ -20317,7 +23114,12 @@ function _opsPersistPackingEntries_(entries) {
   const packedBy = Session.getActiveUser()?.getEmail?.() || 'user';
   const grouped = {};
   const logRows = [];
+  const boxUsageRows = [];
   const rejectionRows = [];
+  const boxSetup = _packGetBoxSetup_(false);
+  const canonicalCapacityByLineId = _opsLoadCanonicalPackingCapacityByLineIds_(payloadRows.map(function(entry) {
+    return entry && entry.soLineId;
+  }));
 
   payloadRows.forEach(function(entry) {
     const qty = Number(entry.qty != null ? entry.qty : entry.packedQty || 0);
@@ -20329,7 +23131,24 @@ function _opsPersistPackingEntries_(entries) {
     _packBackfillSummaryIfNeeded_(pack);
     const currentPacked = Number(pack.packed_qty || 0);
     const currentWeightKg = Number(pack.packed_weight_kg || 0);
-    const producedQty = Number(entry.producedQty || 0);
+    const canonicalCapacity = canonicalCapacityByLineId[String(entry.soLineId || '')] || null;
+    if (canonicalCapacity && String(canonicalCapacity.conversion_status || 'OK') !== 'OK') {
+      throw new Error(
+        'Packing conversion is incomplete for SO ' + String(entry.soNumber || '') +
+        ' line ' + String(entry.lineNo || '') + ': ' +
+        String(canonicalCapacity.conversion_status || 'UNKNOWN_CONVERSION_ERROR')
+      );
+    }
+    const producedQty = Number(canonicalCapacity ? canonicalCapacity.produced_qty : entry.producedQty || 0);
+    const conversionAuditNote = canonicalCapacity
+      ? [
+          'Packing capacity',
+          Number(canonicalCapacity.source_produced_qty || 0) + ' ' + String(canonicalCapacity.source_uom || 'PCS'),
+          String(canonicalCapacity.conversion_type || 'DIRECT_PCS'),
+          producedQty + ' PCS',
+          String(canonicalCapacity.source_process_name || '')
+        ].filter(Boolean).join(' | ')
+      : '';
     const weightKg = Number(entry.weightKg || 0);
     const rejectedWeightKg = Number(entry.rejectedWeightKg || entry.rejectWeightKg || 0);
     const rejectionReason = String(entry.rejectionReason || entry.rejectReason || '').trim();
@@ -20366,24 +23185,41 @@ function _opsPersistPackingEntries_(entries) {
     grouped[key].rejectedQty += rejectedQty;
     if (requiresWeight) grouped[key].addedWeightKg += weightKg;
     grouped[key].rejectedWeightKg += rejectedWeightKg;
-    if (qty > 0) logRows.push({
-      pack_id: pack.id,
-      so_id: entry.soId || pack.so_id || null,
-      so_line_id: entry.soLineId || pack.so_line_id || null,
-      so_number: entry.soNumber || pack.so_number || '',
-      line_no: entry.lineNo || pack.line_no || '',
-      product_code: entry.productCode || pack.product_code || '',
-      product_name: entry.product || pack.product_name || '',
-      category: entry.category || '',
-      department_category: entry.departmentCategory || entry.categoryGroup || '',
-      packed_qty: qty,
-      packed_weight_kg: requiresWeight ? weightKg : 0,
-      ready_to_dispatch: entry.readyToDispatch !== false && entry.ready !== false,
-      source_stage: 'PACKING',
-      remarks: entry.remarks || '',
-      posted_at: packedAt,
-      posted_by: packedBy
-    });
+    if (qty > 0) {
+      const packingEntryId = Utilities.getUuid();
+      const normalizedBoxes = _packNormalizeBoxAllocations_(entry, boxSetup, qty);
+      logRows.push({
+        id: packingEntryId,
+        pack_id: pack.id,
+        so_id: entry.soId || pack.so_id || null,
+        so_line_id: entry.soLineId || pack.so_line_id || null,
+        so_number: entry.soNumber || pack.so_number || '',
+        line_no: entry.lineNo || pack.line_no || '',
+        product_code: entry.productCode || pack.product_code || '',
+        product_name: entry.product || pack.product_name || '',
+        category: entry.category || '',
+        department_category: entry.departmentCategory || entry.categoryGroup || '',
+        packed_qty: qty,
+        packed_weight_kg: requiresWeight ? weightKg : 0,
+        ready_to_dispatch: entry.readyToDispatch !== false && entry.ready !== false,
+        source_stage: 'PACKING',
+        remarks: [String(entry.remarks || '').trim(), conversionAuditNote].filter(Boolean).join(' | '),
+        posted_at: packedAt,
+        posted_by: packedBy
+      });
+      normalizedBoxes.forEach(function(box) {
+        boxUsageRows.push({
+          id: Utilities.getUuid(),
+          packing_entry_id: packingEntryId,
+          pack_id: pack.id,
+          so_line_id: entry.soLineId || pack.so_line_id || null,
+          box_master_id: box.boxMasterId,
+          box_count: box.boxCount,
+          posted_at: packedAt,
+          posted_by: packedBy
+        });
+      });
+    }
     if (rejectedQty > 0) {
       rejectionRows.push({
         pack_id: pack.id,
@@ -20398,7 +23234,7 @@ function _opsPersistPackingEntries_(entries) {
         rejected_qty: rejectedQty,
         rejected_weight_kg: rejectedWeightKg,
         reason: rejectionReason,
-        remarks: entry.remarks || '',
+        remarks: [String(entry.remarks || '').trim(), conversionAuditNote].filter(Boolean).join(' | '),
         posted_at: packedAt,
         posted_by: packedBy
       });
@@ -20419,16 +23255,32 @@ function _opsPersistPackingEntries_(entries) {
   });
 
   if (updates.length) {
-    supabaseUpsertMinimal_('packing_records', updates, { onConflict: 'id' });
-    _packInsertEntryLogsSafe_(logRows);
-    if (rejectionRows.length) {
+    if (boxSetup.enabled) {
       try {
-        supabaseBulkInsertMinimal_('packing_rejection_log', rejectionRows);
+        supabaseRpc_('save_packing_entries_with_boxes', {
+          p_updates: updates,
+          p_packing_logs: logRows,
+          p_box_usage: boxUsageRows,
+          p_rejections: rejectionRows
+        });
       } catch (err) {
-        if (_supabaseRelationMissing_(err, 'packing_rejection_log')) {
-          throw new Error('Packing rejection schema is not applied. Run supabase_packing_queue_dataset_rpc.sql first.');
+        if (_packBoxSchemaMissing_(err)) {
+          throw new Error('Packing box schema is incomplete. Run supabase_packing_box_cost.sql again before using box costing.');
         }
         throw err;
+      }
+    } else {
+      supabaseUpsertMinimal_('packing_records', updates, { onConflict: 'id' });
+      _packInsertEntryLogsSafe_(logRows);
+      if (rejectionRows.length) {
+        try {
+          supabaseBulkInsertMinimal_('packing_rejection_log', rejectionRows);
+        } catch (err) {
+          if (_supabaseRelationMissing_(err, 'packing_rejection_log')) {
+            throw new Error('Packing rejection schema is not applied. Run supabase_packing_queue_dataset_rpc.sql first.');
+          }
+          throw err;
+        }
       }
     }
     _opsBumpDatasetVersion_();
@@ -20460,7 +23312,7 @@ function _opsEnrichChunkRows_(rows) {
   const chunkRows = Array.isArray(rows) ? rows.map(function(row){ return Object.assign({}, row); }) : [];
   if (!chunkRows.length) return chunkRows;
   const soNumbers = [...new Set(chunkRows.map(function(row){ return row.soNumber; }).filter(Boolean))];
-  const workOrderJobs = _supabaseSelectByKeyInBatches_('work_order_jobs', 'wo_id,so_number,line_no,artwork_no,client_name,job_priority,expected_delivery,product_remarks,so_remarks', 'so_number', soNumbers);
+  const workOrderJobs = _supabaseSelectByKeyInBatches_('work_order_jobs', 'wo_id,so_number,line_no,artwork_no,client_name,job_priority,expected_delivery,product_remarks,so_remarks,category,ups,group_ups', 'so_number', soNumbers);
   const jobsByKey = {};
   workOrderJobs.forEach(function(job) {
     const key = String(job.so_number || '') + '||' + String(job.line_no || '');
@@ -20488,7 +23340,10 @@ function _opsEnrichChunkRows_(rows) {
       const status = String(rt.status || '').toUpperCase();
       return status !== 'COMPLETED' && status !== 'SHORT_CLOSED';
     }) || null;
-    const categoryRaw = primaryJob.category || row.category || primaryWo?.snapshot_json?.jobDetails?.type || '';
+    const categoryRaw = _prodExtractCategoryGroupFromSnapshot_(primaryWo?.snapshot_json || {}) ||
+      primaryJob.category ||
+      row.category ||
+      '';
     row.artworkNo = primaryJob.artwork_no || row.artworkNo || '';
     row.woNumber = primaryWo?.wo_number || (Number(row.stockClosedQty || 0) > 0 ? 'Stock' : '');
     row.woStatus = primaryWo?.status || '';
@@ -20501,7 +23356,11 @@ function _opsEnrichChunkRows_(rows) {
     row.categoryGroup = _prodFormatCategoryGroupLabel_(categoryRaw || _prodExtractCategoryGroupFromSnapshot_(primaryWo?.snapshot_json));
     row.transportMode = primaryWo?.snapshot_json?.modeOfTransport || primaryWo?.snapshot_json?.dispatch?.modeOfTransport || '';
     row.canEditProduction = !!row.activeRoutingId && row.productionStatus !== 'COMPLETED' && row.productionStatus !== 'HOLD';
-    row.canEditPacking = !!row.soLineId && Number(row.producedQty || 0) > Number(row.packedQty || 0) && row.packingStatus !== 'HOLD';
+    const packingConversionStatus = String(row.conversionStatus || 'OK');
+    row.canEditPacking = !!row.soLineId &&
+      (packingConversionStatus === 'OK' || packingConversionStatus === 'LEGACY_PACKING_RECORD') &&
+      Number(row.producedQty || 0) > Number(row.packedQty || 0) &&
+      row.packingStatus !== 'HOLD';
     row.canEditDispatch = (!!row.packId || !!row.soLineId) && Number(row.packedQty || 0) > Number(row.dispatchedQty || 0) && row.dispatchStatus !== 'HOLD';
   });
   return chunkRows;
@@ -20547,6 +23406,78 @@ function _opsIsCorrugationRow_(row) {
   return text.indexOf('CORR') !== -1;
 }
 
+function _opsFloorFinishedQty_(value) {
+  const qty = Number(value || 0);
+  if (!Number.isFinite(qty) || qty <= 0) return 0;
+  return Math.floor(qty + 1e-9);
+}
+
+function _opsPackingSourceUom_(categoryGroup, routingRow) {
+  const category = _prodNormalizeCategoryGroup_(categoryGroup || '');
+  if (category === 'FLEXO') return 'RM';
+  return _isSheetBasedProductionStage_(routingRow || {}) ? 'SHEETS' : 'PCS';
+}
+
+function _opsFlexoRepeatMmFromSnapshot_(snapshot) {
+  const snap = snapshot || {};
+  const flexo = _safeJsonObject_(snap.flexoDetails);
+  const direct = Number(flexo.repeatMm || 0);
+  if (direct > 0) return direct;
+  const teeth = Number(flexo.cylinderTeeth || snap?.artworkRef?.teeth || 0);
+  return teeth > 0 ? teeth * 3.175 : 0;
+}
+
+function _opsResolveFinishedPackingQty_(sourceQty, categoryGroup, routingRow, job, snapshot) {
+  const source = Math.max(Number(sourceQty || 0), 0);
+  const category = _prodNormalizeCategoryGroup_(categoryGroup || '');
+  const sourceUom = _opsPackingSourceUom_(category, routingRow);
+  const snap = snapshot || {};
+  const flexo = _safeJsonObject_(snap.flexoDetails);
+  const jobDetails = _safeJsonObject_(snap.jobDetails);
+  const artworkRef = _safeJsonObject_(snap.artworkRef);
+  const ups = Number(
+    job?.ups ||
+    flexo.totalUps ||
+    jobDetails.totalUps ||
+    artworkRef.totalUps ||
+    0
+  );
+  let conversionType = 'DIRECT_PCS';
+  let conversionFactor = 1;
+  let conversionStatus = 'OK';
+
+  if (sourceUom === 'RM') {
+    const repeatMm = _opsFlexoRepeatMmFromSnapshot_(snap);
+    conversionType = 'RM_TO_PCS';
+    if (!(ups > 0) || !(repeatMm > 0)) {
+      conversionFactor = 0;
+      conversionStatus = 'MISSING_FLEXO_UPS_OR_REPEAT';
+    } else {
+      conversionFactor = ups * 1000 / repeatMm;
+    }
+  } else if (sourceUom === 'SHEETS') {
+    conversionType = 'SHEETS_TO_PCS';
+    if (!(ups > 0)) {
+      conversionFactor = 0;
+      conversionStatus = 'MISSING_JOB_UPS';
+    } else {
+      conversionFactor = ups;
+    }
+  }
+
+  return {
+    sourceQty: source,
+    sourceUom: sourceUom,
+    conversionType: conversionType,
+    conversionFactor: conversionFactor,
+    conversionStatus: conversionStatus,
+    finishedQty: conversionStatus === 'OK'
+      ? _opsFloorFinishedQty_(source * conversionFactor)
+      : 0,
+    sourceProcessName: String(routingRow?.process_name || routingRow?.department || '').trim()
+  };
+}
+
 function _opsResolveDatasetRows_(stage, fastRows, params, token) {
   const fallbackRows = _opsFilterStageRows_(_opsBuildStageDataset_(stage, token), stage, params || {});
   if (!(fastRows || []).length) return fallbackRows;
@@ -20586,6 +23517,7 @@ function _opsStageDatasetSummary_(rows, stage) {
 
 function _opsFastDatasetCacheKey_(stage, params) {
   return _cacheKeyHash_('OPS_FAST_DATASET', JSON.stringify({
+    model: 'quantity-flow-v2',
     v: _opsDatasetVersion_(),
     stage: stage,
     params: params || {}
@@ -20652,6 +23584,12 @@ function _opsMapPackingFastRows_(rows) {
       orderQty: Number(row.order_qty || 0),
       producedQty: Number(row.produced_qty || 0),
       productionProducedQty: Number(row.produced_qty || 0),
+      sourceProducedQty: Number(row.source_produced_qty == null ? row.produced_qty : row.source_produced_qty),
+      sourceUom: row.source_uom || 'PCS',
+      conversionType: row.conversion_type || 'DIRECT_PCS',
+      conversionFactor: Number(row.conversion_factor == null ? 1 : row.conversion_factor),
+      conversionStatus: row.conversion_status || 'OK',
+      sourceProcessName: row.source_process_name || '',
       stockClosedQty: Number(row.stock_closed_qty || 0),
       stockMarked: Number(row.stock_closed_qty || 0) > 0,
       sourceMode: Number(row.stock_closed_qty || 0) > 0 ? 'STOCK' : 'PRODUCTION',
@@ -20763,15 +23701,24 @@ function _opsFilterStageRows_(rows, stage, params) {
   });
 }
 
+function _packAttachBoxSetup_(result) {
+  const out = Object.assign({}, result || {});
+  const setup = _packGetBoxSetup_(false);
+  out.boxCostEnabled = setup.enabled === true;
+  out.requireBoxEntry = setup.requireBoxEntry === true;
+  out.boxMasters = setup.boxes || [];
+  return out;
+}
+
 function packGetDataset(params, token) {
   _opsRequireSession_(token);
   const p = params || {};
   const cache = CacheService.getScriptCache();
   const cacheKey = _opsFastDatasetCacheKey_('PACKING', p);
   const cached = cache.get(cacheKey);
-  if (cached) return JSON.parse(cached);
+  if (cached) return _packAttachBoxSetup_(JSON.parse(cached));
   try {
-    const rpcRows = supabaseRpc_('packing_queue_dataset', {
+    const rpcRows = supabaseRpc_('packing_queue_dataset_v2', {
       p_show_pending_all: p.showPendingAll === true,
       p_include_completed: p.includeCompleted === true,
       p_date_from: _prodToDateKey_(p.dateFrom) || null,
@@ -20780,12 +23727,20 @@ function packGetDataset(params, token) {
       p_offset: Math.max(0, Number(p.offset || 0) || 0)
     }) || [];
     const rows = _opsFilterStageRows_(_opsMapPackingFastRows_(rpcRows), 'PACKING', p);
-    const result = { ok: true, rows: rows, summary: _opsStageDatasetSummary_(rows, 'PACKING') };
+    const result = _packAttachBoxSetup_({ ok: true, rows: rows, summary: _opsStageDatasetSummary_(rows, 'PACKING') });
     _prodCachePutJsonSafe_(cache, cacheKey, result, 60);
     return result;
   } catch (err) {
-    if (_supabaseRelationMissing_(err, 'packing_queue_dataset')) {
-      throw new Error('Packing queue RPC is missing. Apply supabase_packing_queue_dataset_rpc.sql so Flexo RM is converted to PCS using the saved work-order reverse formula.');
+    if (_supabaseRelationMissing_(err, 'packing_queue_dataset_v2')) {
+      const fallbackRows = _opsFilterStageRows_(_opsBuildStageDataset_('PACKING', token), 'PACKING', p);
+      const fallbackResult = _packAttachBoxSetup_({
+        ok: true,
+        rows: fallbackRows,
+        summary: _opsStageDatasetSummary_(fallbackRows, 'PACKING'),
+        compatibilityMode: true
+      });
+      _prodCachePutJsonSafe_(cache, cacheKey, fallbackResult, 30);
+      return fallbackResult;
     }
     throw err;
   }
@@ -21036,6 +23991,7 @@ function packAdminListEntries(payload, token) {
   if (!pack?.id) return { ok: true, lockedReason: '', pack: null, entries: [] };
   _packBackfillSummaryIfNeeded_(pack);
   const rows = _packSelectEntryLogRowsByPackIds_([pack.id], true) || [];
+  const boxUsageByEntryId = _packGetBoxUsageByEntryIds_(rows.map(function(row) { return row.id; }));
   return {
     ok: true,
     lockedReason: _packGetMutationBlockReason_({ pack_id: pack.id, so_line_id: pack.so_line_id }),
@@ -21048,6 +24004,7 @@ function packAdminListEntries(payload, token) {
       readyToDispatch: pack.ready_to_dispatch === true
     },
     entries: rows.map(function(row) {
+      const boxUsage = boxUsageByEntryId[String(row.id || '')] || [];
       return {
         id: row.id || '',
         packId: row.pack_id || '',
@@ -21065,7 +24022,10 @@ function packAdminListEntries(payload, token) {
         updatedBy: row.updated_by || '',
         changeReason: row.change_reason || '',
         sourceStage: row.source_stage || '',
-        remarks: row.remarks || ''
+        remarks: row.remarks || '',
+        boxUsage: boxUsage,
+        boxCount: boxUsage.reduce(function(sum, item) { return sum + Number(item.boxCount || 0); }, 0),
+        packingBoxCost: boxUsage.reduce(function(sum, item) { return sum + Number(item.totalCost || 0); }, 0)
       };
     })
   };
@@ -21205,14 +24165,32 @@ function syncItemToInventory_(itemCode, itemHeader, active) {
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0];
+  const category = String(header.category || existing?.category || '').trim();
+  const uom = String(header.unit || existing?.uom || 'NOS').trim() || 'NOS';
+  let reelTrackingEnabled = _invItemRequiresReelTracking_({
+    category: category,
+    uom: uom
+  });
+  if (!reelTrackingEnabled && existing?.reel_tracking_enabled === true) {
+    const existingReel = (supabaseSelect_('inv_lots', {
+      select: 'id',
+      filters: {
+        item_id: 'eq.' + existing.id,
+        is_reel: 'eq.true'
+      },
+      limit: 1
+    }) || [])[0];
+    if (existingReel) reelTrackingEnabled = true;
+  }
 
   supabaseUpsert_('inv_items', {
     item_code: code,
     item_name: String(header.itemName || existing?.item_name || '').trim() || code,
-    category: String(header.category || existing?.category || '').trim() || '',
+    category: category,
     department: String(existing?.department || '').trim(),
-    uom: String(header.unit || existing?.uom || 'NOS').trim() || 'NOS',
+    uom: uom,
     is_consumable: existing?.is_consumable === true,
+    reel_tracking_enabled: reelTrackingEnabled,
     active: active !== false
   }, { onConflict: 'item_code' });
   PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
@@ -21301,6 +24279,12 @@ function buildWOMaterialRequirementRows_(materials, issuedRows, returnedRows) {
     const requiredQty = Number(m.required_qty || 0);
     const consumeFromPools = (pools, capQty) => {
       let totalQty = 0;
+      // A current material key is stored on every new Issue and WO Return. Once
+      // such a key exists, do not add looser label-only matches as well: that can
+      // pull another movement on the same WO into this material line.
+      const hasExactMovement = pools.some(function(pool) {
+        return pool.remainingQty > 0 && pool.exactKey === materialKey;
+      });
       const consume = (predicate, allowExcess) => {
         pools.forEach(pool => {
           if (pool.remainingQty <= 0) return;
@@ -21315,6 +24299,10 @@ function buildWOMaterialRequirementRows_(materials, issuedRows, returnedRows) {
       };
 
       consume(pool => pool.exactKey === materialKey, false);
+      if (hasExactMovement) {
+        consume(pool => pool.exactKey === materialKey, true);
+        return totalQty;
+      }
       consume(pool =>
         aliases[pool.labelKey] &&
         (!pool.parsed.gsm || pool.parsed.gsm === String(m.gsm || '').trim()) &&
@@ -21477,7 +24465,7 @@ function applyWOMaterialFallbacks_(materials, snapshotJson) {
 }
 
 function invSaveItem(payload, token) {
-  _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
+  const sessionUser = _requireAnyModuleAccess_(_authTokenFromPayload_(payload, token), [
     { module: 'INVENTORY', action: 'can_create' },
     { module: 'INVENTORY', action: 'can_edit' }
   ]);
@@ -21491,11 +24479,36 @@ function invSaveItem(payload, token) {
   if (!payload?.uom)
     throw new Error('UOM required');
 
-  const itemCode =
-    payload.itemCode ||
-    generateInvItemCode_();
+  if (!payload?.category)
+    throw new Error('Item Category required');
 
-  const rmType = _normalizePaperText_(payload.rmType);
+  const requestedItemCode = String(payload.itemCode || '').trim();
+  const existingItem = requestedItemCode ? (supabaseSelect_('inv_items', {
+    select: '*',
+    filters: { item_code: 'eq.' + requestedItemCode },
+    limit: 1
+  }) || [])[0] || null : null;
+  const itemCode = requestedItemCode || generateInvItemCode_();
+
+  let rmType = _normalizePaperText_(payload.rmType);
+  if (!rmType) {
+    throw new Error('RM Type is required. Maintain it in Inventory > RM Setup first.');
+  }
+  if (rmType) {
+    const rmTypeMaster = _purchaseFindRmTypeMaster_(rmType, true);
+    if (!rmTypeMaster) {
+      throw new Error('Select an RM Type maintained in Inventory > RM Setup.');
+    }
+    if (rmTypeMaster.active === false) {
+      const unchangedInactiveType = existingItem &&
+        String(existingItem.rm_type || '').trim().toUpperCase() ===
+        String(rmTypeMaster.rm_type_code || '').trim().toUpperCase();
+      if (!unchangedInactiveType) {
+        throw new Error('The selected RM Type is inactive. Select an active RM Type maintained in Inventory > RM Setup.');
+      }
+    }
+    rmType = _normalizePaperText_(rmTypeMaster.rm_type_code);
+  }
   const sizeProfile = _normalizeItemSizeProfile_(payload.sizeProfile || _inferItemSizeProfileFromCategory_(payload.category));
   const dimensionUnit = _normalizeItemDimensionUnit_(
     payload.dimensionUnit ||
@@ -21511,6 +24524,61 @@ function invSaveItem(payload, token) {
   const widthMm = _normalizePaperNumber_(payload.widthMm);
   const heightMm = _normalizePaperNumber_(payload.heightMm);
   const gsm = _normalizePaperNumber_(payload.gsm);
+  let beforeRule = null;
+  try {
+    beforeRule = (supabaseSelect_('inv_item_purchase_uom_rules', {
+      select: '*',
+      filters: { item_code: 'eq.' + itemCode },
+      limit: 1
+    }) || [])[0] || null;
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'inv_item_purchase_uom_rules')) {
+      throw new Error('Run supabase_inventory_purchase_uom_rules.sql in Supabase before creating inventory items.');
+    }
+    throw err;
+  }
+  const hasOwn = function(key) { return Object.prototype.hasOwnProperty.call(payload, key); };
+  const purchaseUomSource = hasOwn('purchaseUom')
+    ? payload.purchaseUom
+    : (hasOwn('purchase_uom') ? payload.purchase_uom : beforeRule?.purchase_uom);
+  const conversionTypeSource = hasOwn('conversionType')
+    ? payload.conversionType
+    : (hasOwn('conversion_type') ? payload.conversion_type : beforeRule?.conversion_type);
+  const fixedFactorSource = hasOwn('fixedFactor')
+    ? payload.fixedFactor
+    : (hasOwn('fixed_factor') ? payload.fixed_factor : beforeRule?.fixed_factor);
+  const purchaseUom = String(purchaseUomSource || '').trim().toUpperCase();
+  const requestedConversionType = String(conversionTypeSource || '').trim();
+  if (!purchaseUom) throw new Error('Purchase UOM is required');
+  if (!requestedConversionType) throw new Error('Conversion Formula is required');
+  if (['SAME_AS_STOCK','FIXED_FACTOR','AREA_WIDTH','SHEET_AREA','WEIGHT_GSM_RM','WEIGHT_GSM_SHEET','WEIGHT_GSM']
+      .indexOf(requestedConversionType.toUpperCase()) === -1) {
+    throw new Error('Select a valid Conversion Formula');
+  }
+  const conversionType = _itemMasterNormalizePurchaseConversionType_(requestedConversionType, payload.uom);
+  const fixedFactor = _itemMasterPurchaseUomFactor_(fixedFactorSource);
+  if (['AREA_WIDTH','SHEET_AREA','WEIGHT_GSM_RM','WEIGHT_GSM_SHEET'].indexOf(conversionType) !== -1 && !dimensionUnit) {
+    throw new Error('Dimension Unit is required for the selected conversion formula');
+  }
+  if (conversionType === 'FIXED_FACTOR' && !(Number(fixedFactor || 0) > 0)) {
+    throw new Error('A positive Fixed Factor is required for the selected conversion formula');
+  }
+  if (conversionType === 'AREA_WIDTH' && !(Number(widthMm || 0) > 0)) {
+    throw new Error('Width is required for running-meter to square-meter conversion');
+  }
+  if (conversionType === 'SHEET_AREA' && (!(Number(lengthMm || 0) > 0) || !(Number(widthMm || 0) > 0))) {
+    throw new Error('Length and Width are required for sheet-to-square-meter conversion');
+  }
+  if (conversionType === 'WEIGHT_GSM_RM' && (!(Number(widthMm || 0) > 0) || !(Number(gsm || 0) > 0))) {
+    throw new Error('Width and GSM are required for running-meter to KG conversion');
+  }
+  if (conversionType === 'WEIGHT_GSM_SHEET' &&
+      (!(Number(lengthMm || 0) > 0) || !(Number(widthMm || 0) > 0) || !(Number(gsm || 0) > 0))) {
+    throw new Error('Length, Width and GSM are required for sheet-to-KG conversion');
+  }
+  if (String(payload.category || '').trim().toUpperCase() === 'CORRUGATED BOX' && !(Number(heightMm || 0) > 0)) {
+    throw new Error('Height is required for Corrugated Box items');
+  }
   const specsText = String(payload.specsText || '').trim();
   const additionalInfo = String(payload.additionalInfo || '').trim();
   const grainDirection = String(payload.grainDirection || '').trim();
@@ -21524,6 +24592,34 @@ function invSaveItem(payload, token) {
     widthMm: widthMm,
     heightMm: heightMm
   });
+  const reelTrackingEnabled = _invItemRequiresReelTracking_({
+    uom: payload.uom,
+    category: payload.category
+  });
+  if (reelTrackingEnabled) {
+    if (String(payload.uom || '').trim().toUpperCase() !== 'KG') {
+      throw new Error('Reel-tracked kraft paper must use KG as its stock UOM');
+    }
+    if (!(Number(widthMm || 0) > 0) || !(Number(gsm || 0) > 0)) {
+      throw new Error('Width and GSM are mandatory for a reel-tracked kraft paper item');
+    }
+  }
+  if (existingItem?.reel_tracking_enabled === true && reelTrackingEnabled === false) {
+    const existingReel = (supabaseSelect_('inv_lots', {
+      select: 'id,batch_no,reel_status',
+      filters: {
+        item_id: 'eq.' + existingItem.id,
+        is_reel: 'eq.true'
+      },
+      limit: 1
+    }) || [])[0];
+    if (existingReel) {
+      throw new Error(
+        'Reel tracking cannot be disabled after reel stock or history exists. ' +
+        'Keep the item enabled and close any remaining reel balance through Kraft Reel Control.'
+      );
+    }
+  }
 
   const rec = {
     item_code: itemCode,
@@ -21546,15 +24642,68 @@ function invSaveItem(payload, token) {
     additional_info: additionalInfo || null,
     grain_direction: grainDirection || null,
     material_key: materialKey || null,
-    size_key: sizeKey || null
+    size_key: sizeKey || null,
+    reel_tracking_enabled: reelTrackingEnabled
   };
 
-  supabaseUpsert_(
+  const savedRows = supabaseUpsert_(
     'inv_items',
     rec,
     { onConflict: 'item_code' }
   );
-  PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
+  const savedItem = Array.isArray(savedRows) && savedRows.length ? savedRows[0] : existingItem;
+  const itemId = savedItem && savedItem.id
+    ? savedItem.id
+    : ((supabaseSelect_('inv_items', {
+        select: 'id',
+        filters: { item_code: 'eq.' + itemCode },
+        limit: 1
+      }) || [])[0] || {}).id;
+  if (!itemId) throw new Error('Item was saved but its purchase setup could not resolve the item id');
+
+  const actor = _authActorName_(sessionUser);
+  const now = new Date().toISOString();
+  const purchaseRule = {
+    item_id: itemId,
+    item_code: itemCode,
+    stock_uom: rec.uom.toUpperCase(),
+    purchase_uom: purchaseUom,
+    conversion_type: conversionType,
+    fixed_factor: conversionType === 'FIXED_FACTOR' ? fixedFactor : null,
+    width_mm: widthMm,
+    length_mm: lengthMm,
+    height_mm: heightMm,
+    gsm: gsm,
+    notes: String(payload.purchaseRuleNotes || payload.ruleNotes || '').trim() || null,
+    active: true,
+    updated_at: now,
+    updated_by: actor
+  };
+  try {
+    supabaseUpsertMinimal_('inv_item_purchase_uom_rules', purchaseRule, { onConflict: 'item_code' });
+    supabaseInsertMinimal_('inv_item_purchase_uom_rule_audit', {
+      rule_id: beforeRule && beforeRule.id || null,
+      item_id: itemId,
+      item_code: itemCode,
+      action: beforeRule ? 'UPDATE' : 'INSERT',
+      before_data: beforeRule,
+      after_data: purchaseRule,
+      changed_by: actor,
+      changed_at: now
+    });
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'inv_item_purchase_uom_rules')) {
+      throw new Error('Run supabase_inventory_purchase_uom_rules.sql in Supabase before creating inventory items.');
+    }
+    if (!_supabaseRelationMissing_(err, 'inv_item_purchase_uom_rule_audit')) throw err;
+  }
+  try {
+    PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
+    PropertiesService.getScriptProperties().setProperty('ITEM_MASTER_PURCHASE_UOM_VERSION', String(Date.now()));
+    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  } catch (cacheErr) {
+    console.warn('Item master cache versions were not refreshed: ' + String(cacheErr && cacheErr.message || cacheErr));
+  }
 
   return {
     ok: true,
@@ -21566,6 +24715,7 @@ function invSaveItem(payload, token) {
       department: rec.department,
       uom: rec.uom,
       isConsumable: rec.is_consumable,
+      reelTrackingEnabled: rec.reel_tracking_enabled === true,
       active: rec.active,
       sizeProfile: rec.size_profile || '',
       rmType: rec.rm_type || '',
@@ -21577,12 +24727,77 @@ function invSaveItem(payload, token) {
       widthUnit: rec.width_unit || '',
       heightUnit: rec.height_unit || '',
       gsm: rec.gsm == null ? '' : Number(rec.gsm),
+      purchaseUom: purchaseRule.purchase_uom,
+      conversionType: purchaseRule.conversion_type,
+      fixedFactor: purchaseRule.fixed_factor == null ? '' : Number(purchaseRule.fixed_factor),
+      purchaseRuleNotes: purchaseRule.notes || '',
+      purchaseRuleActive: true,
+      purchaseRuleExists: true,
       specsText: rec.specs_text || '',
       additionalInfo: rec.additional_info || '',
       grainDirection: rec.grain_direction || '',
       materialKey: rec.material_key || '',
       sizeKey: rec.size_key || ''
     }
+  };
+}
+
+function invListPurchaseRmTypesJSON(token) {
+  _requireAnyModuleAccess_(token, [
+    { module: 'INVENTORY', action: 'can_view' },
+    { module: 'INVENTORY', action: 'can_create' },
+    { module: 'INVENTORY', action: 'can_edit' }
+  ]);
+  const setupGroups = {};
+  try {
+    (_supabaseSelectAll_('v_inv_item_purchase_uom_setup', {
+      select: 'rm_type,stock_uom,purchase_uom,conversion_type',
+      filters: {
+        setup_status: 'eq.COMPLETE',
+        rule_active: 'eq.true'
+      }
+    }, 1000, 50000) || []).forEach(function(row) {
+      const rmType = String(row.rm_type || '').trim();
+      const stockUom = String(row.stock_uom || '').trim().toUpperCase();
+      const purchaseUom = String(row.purchase_uom || '').trim().toUpperCase();
+      const conversionType = _itemMasterNormalizePurchaseConversionType_(row.conversion_type, stockUom);
+      if (!rmType || !stockUom || !purchaseUom || !conversionType) return;
+      const groupKey = rmType.toUpperCase() + '|' + stockUom;
+      const signature = purchaseUom + '|' + conversionType;
+      setupGroups[groupKey] = setupGroups[groupKey] || {
+        rmType: rmType,
+        stockUom: stockUom,
+        signatures: {}
+      };
+      setupGroups[groupKey].signatures[signature] = {
+        purchaseUom: purchaseUom,
+        conversionType: conversionType
+      };
+    });
+  } catch (err) {
+    if (!_itemMasterPurchaseUomSetupViewMissing_(err)) throw err;
+  }
+  const setupDefaults = Object.keys(setupGroups).map(function(key) {
+    const group = setupGroups[key];
+    const signatures = Object.keys(group.signatures);
+    if (signatures.length !== 1) return null;
+    const setup = group.signatures[signatures[0]];
+    return {
+      rmType: group.rmType,
+      stockUom: group.stockUom,
+      purchaseUom: setup.purchaseUom,
+      conversionType: setup.conversionType
+    };
+  }).filter(Boolean);
+  return {
+    ok: true,
+    rows: _purchaseListRmTypeMasterRows_(false).map(function(row) {
+      return {
+        value: row.rm_type_code || '',
+        label: row.rm_type_name || row.rm_type_code || ''
+      };
+    }),
+    setupDefaults: setupDefaults
   };
 }
 
@@ -21701,6 +24916,7 @@ function _mapInventoryItemRow_(row, source) {
     department: String(src.department || '').trim(),
     uom: String(src.uom || src.unit || '').trim(),
     isConsumable: src.is_consumable === true || src.isConsumable === true,
+    reelTrackingEnabled: src.reel_tracking_enabled === true || src.reelTrackingEnabled === true,
     active: src.active !== false,
     rmType: String(src.rm_type || src.rmType || '').trim(),
     sizeProfile: sizeProfile,
@@ -21739,7 +24955,7 @@ function _getUnifiedInventoryItems_(opts) {
   const requestLimit = 1000000;
 
   const invRows = (_supabaseSelectAll_('inv_items', {
-    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key',
+    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key,reel_tracking_enabled',
     order: 'item_name.asc'
   }, 1000, requestLimit) || []).map(function(row) {
     return _mapInventoryItemRow_(row, 'inventory');
@@ -21859,6 +25075,100 @@ function ensureInventoryItemExists_(itemCode, opts) {
   return item;
 }
 
+function _invItemRequiresReelTracking_(item) {
+  const row = item || {};
+  const uom = String(row.uom || row.stock_uom || row.stockUom || '').trim().toUpperCase();
+  const category = String(row.category || row.item_category || row.itemCategory || '').trim().toUpperCase();
+  if (category) return uom === 'KG' && category === 'KRAFT PAPER';
+
+  // Compatibility only for old payloads that did not include category.
+  if (Object.prototype.hasOwnProperty.call(row, 'reel_tracking_enabled')) {
+    return row.reel_tracking_enabled === true && (!uom || uom === 'KG');
+  }
+  if (Object.prototype.hasOwnProperty.call(row, 'reelTrackingEnabled')) {
+    return row.reelTrackingEnabled === true && (!uom || uom === 'KG');
+  }
+  return false;
+}
+
+function _invReconcileItemReelTracking_(item) {
+  const row = item || {};
+  if (!row.id) return _invItemRequiresReelTracking_(row);
+
+  const required = _invItemRequiresReelTracking_({
+    category: row.category,
+    uom: row.uom || row.stock_uom || row.stockUom
+  });
+  const current = row.reel_tracking_enabled === true;
+  if (current === required) return required;
+
+  if (!required && current) {
+    const reelHistory = (supabaseSelect_('inv_lots', {
+      select: 'id,batch_no,reel_status',
+      filters: {
+        item_id: 'eq.' + row.id,
+        is_reel: 'eq.true'
+      },
+      limit: 1
+    }) || [])[0];
+    if (reelHistory) {
+      throw new Error(
+        'Item ' + String(row.item_code || '') +
+        ' is not in category Kraft Paper but already has reel history. Correct its category or close the reel history before GRN.'
+      );
+    }
+  }
+
+  supabaseUpdate_('inv_items', { id: 'eq.' + row.id }, {
+    reel_tracking_enabled: required
+  });
+  row.reel_tracking_enabled = required;
+  _invBumpStockSnapshotVersion_();
+  return required;
+}
+
+function _invNormalizeGRNReels_(line, item) {
+  const source = Array.isArray(line && line.reels) ? line.reels : [];
+  const required = _invItemRequiresReelTracking_(item);
+  if (!required && source.length) {
+    throw new Error('Reel details are allowed only for reel-tracked kraft items');
+  }
+  if (!required) return [];
+  if (!(Number(item && (item.width_mm ?? item.widthMm) || 0) > 0)) {
+    throw new Error('Kraft reel item master must have Width before GRN');
+  }
+  if (!(Number(item && item.gsm || 0) > 0)) {
+    throw new Error('Kraft reel item master must have GSM before GRN');
+  }
+  if (!source.length) {
+    throw new Error('Enter each received reel and its gross weight before posting this kraft line');
+  }
+
+  const rows = source.map(function(reel, index) {
+    if (String(reel && (reel.internalReelNo || reel.internal_reel_no) || '').trim()) {
+      throw new Error('Internal reel numbers are generated automatically; do not enter supplier reel numbers');
+    }
+    const grossWeightKg = Number(reel && (
+      reel.grossWeightKg ?? reel.gross_weight_kg ?? reel.weightKg ?? reel.weight
+    ) || 0);
+    if (!(grossWeightKg > 0)) {
+      throw new Error('Reel ' + (index + 1) + ' gross weight must be greater than zero');
+    }
+    return { gross_weight_kg: Number(grossWeightKg.toFixed(6)) };
+  });
+  const total = rows.reduce(function(sum, reel) {
+    return sum + Number(reel.gross_weight_kg || 0);
+  }, 0);
+  const receiptQty = Number(line && line.qty || 0);
+  if (Math.abs(total - receiptQty) > 0.0001) {
+    throw new Error(
+      'Reel gross-weight total (' + total.toFixed(3) +
+      ' KG) must equal received stock quantity (' + receiptQty.toFixed(3) + ' KG)'
+    );
+  }
+  return rows;
+}
+
 function resolveInventoryItemForEntry_(itemCode, itemName) {
   const code = String(itemCode || '').trim();
   const name = String(itemName || '').trim();
@@ -21925,10 +25235,29 @@ function generateInvItemCode_() {
 function invListItemsJSON(opts = {}) {
   const requestLimit = 1000000;
   let rows = (_supabaseSelectAll_('inv_items', {
-    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key',
+    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key,reel_tracking_enabled',
     order: 'item_name.asc'
   }, 1000, requestLimit) || []).map(function(row) {
     return _mapInventoryItemRow_(row, 'inventory');
+  });
+  const purchaseRuleByItem = {};
+  try {
+    (_supabaseSelectAll_('inv_item_purchase_uom_rules', {
+      select: 'item_code,purchase_uom,conversion_type,fixed_factor,notes,active'
+    }, 1000, requestLimit) || []).forEach(function(rule) {
+      purchaseRuleByItem[String(rule.item_code || '').trim().toUpperCase()] = rule;
+    });
+  } catch (err) {
+    if (!_supabaseRelationMissing_(err, 'inv_item_purchase_uom_rules')) throw err;
+  }
+  rows.forEach(function(row) {
+    const rule = purchaseRuleByItem[String(row.itemCode || '').trim().toUpperCase()] || {};
+    row.purchaseUom = String(rule.purchase_uom || row.uom || '').trim();
+    row.conversionType = String(rule.conversion_type || '').trim().toUpperCase();
+    row.fixedFactor = rule.fixed_factor == null ? '' : Number(rule.fixed_factor);
+    row.purchaseRuleNotes = String(rule.notes || '').trim();
+    row.purchaseRuleActive = rule.active !== false;
+    row.purchaseRuleExists = !!rule.item_code;
   });
 
   const q = String(opts?.q || '').trim().toLowerCase();
@@ -21978,9 +25307,18 @@ function invListItemsJSON(opts = {}) {
       rmType: r.rmType || '',
       lengthMm: r.lengthMm === '' ? '' : Number(r.lengthMm || 0),
       widthMm: r.widthMm === '' ? '' : Number(r.widthMm || 0),
+      heightMm: r.heightMm === '' ? '' : Number(r.heightMm || 0),
+      dimensionUnit: r.dimensionUnit || '',
       lengthUnit: r.lengthUnit || '',
       widthUnit: r.widthUnit || '',
+      heightUnit: r.heightUnit || '',
       gsm: r.gsm === '' ? '' : Number(r.gsm || 0),
+      purchaseUom: r.purchaseUom || r.uom || '',
+      conversionType: r.conversionType || '',
+      fixedFactor: r.fixedFactor === '' ? '' : Number(r.fixedFactor || 0),
+      purchaseRuleNotes: r.purchaseRuleNotes || '',
+      purchaseRuleActive: r.purchaseRuleActive !== false,
+      purchaseRuleExists: r.purchaseRuleExists === true,
       specsText: r.specsText || '',
       additionalInfo: r.additionalInfo || '',
       grainDirection: r.grainDirection || '',
@@ -22011,7 +25349,12 @@ function invListIssueJSON(opts = {}) {
     `, filters, requestLimit);
 
   const issueRows = rows.filter(function(row) {
-    return ['ISSUE', 'WO-RETURN'].indexOf(String(row.ref_type || '').trim().toUpperCase()) !== -1;
+    const type = String(row.ref_type || '').trim().toUpperCase();
+    const qtyIn = Number(row.qty_in || 0);
+    const qtyOut = Number(row.qty_out || 0);
+    if (type === 'ISSUE') return qtyOut > 0 && qtyIn === 0;
+    if (type === 'WO-RETURN') return qtyIn > 0 && qtyOut === 0;
+    return false;
   });
   const allocationMap = invGetAllocationSummaryMap_(issueRows.map(r => r.id));
   const reversalMap = invGetReversalSummaryMap_(issueRows.map(r => r.id));
@@ -22031,7 +25374,9 @@ function invListIssueJSON(opts = {}) {
       transactionType: String(r.ref_type || '').trim().toUpperCase(),
       batchNo: allocationMap[r.id]?.batchNo || r.batch_no || '',
       batchDisplay: allocationMap[r.id]?.batchDisplay || r.batch_no || '',
-      qty: Number(r.qty_out || r.qty_in || 0),
+      qty: String(r.ref_type || '').trim().toUpperCase() === 'WO-RETURN'
+        ? Number(r.qty_in || 0)
+        : Number(r.qty_out || 0),
       qtyIn: Number(r.qty_in || 0),
       qtyOut: Number(r.qty_out || 0),
       rate: Number(r.rate || 0),
@@ -22799,25 +26144,47 @@ function _purchaseNormalizeInventoryPRLine_(line, prCtx, lineNo, poNo, now, opts
   const ctx = prCtx || null;
   if (!ctx || !ctx.prNo) throw new Error('PR not found');
 
-  const qty = Number(line.qty || 0);
-  const rate = Number(line.rate || 0);
-  const taxPct = Number(line.taxPct || 0);
-  if (!(qty > 0)) throw new Error('Invalid PO qty for ' + ctx.prNo);
-  if (!(rate > 0)) throw new Error('Invalid PO rate for ' + ctx.prNo);
-  if (taxPct < 0) throw new Error('Invalid tax % for ' + ctx.prNo);
+  const rateMap = opts && opts.rateContextMap
+    ? opts.rateContextMap
+    : _purchaseTryGetItemRateContextMap_([ctx.itemCode]);
+  let rateCtx = rateMap[String(ctx.itemCode || '').trim().toUpperCase()] || {};
+  if (opts && opts.preserveRateSnapshot === true && Number(line.masterRateCeiling || 0) > 0) {
+    rateCtx = Object.assign({}, rateCtx, {
+      controlPolicy: line.ratePolicy || rateCtx.controlPolicy,
+      rate: Number(line.masterRateCeiling || 0),
+      taxPct: Number(line.masterTaxPctSnapshot ?? line.taxPct ?? 0),
+      rateMasterId: line.rateMasterId || rateCtx.rateMasterId || '',
+      rateKey: line.rateKey || rateCtx.rateKey || '',
+      stockUom: line.stockUom || rateCtx.stockUom || ctx.uom || '',
+      purchaseUom: line.purchaseUom || rateCtx.purchaseUom || line.stockUom || ctx.uom || '',
+      conversionType: line.conversionType || rateCtx.conversionType || 'SAME_AS_STOCK',
+      conversionFactor: Number(line.conversionFactor || rateCtx.conversionFactor || 1),
+      conversionSetupStatus: 'COMPLETE',
+      conversionRuleActive: true,
+      masterReady: true
+    });
+  }
+  const quantity = _purchaseResolveDualQuantity_(
+    line,
+    Number(rateCtx.conversionFactor || 1),
+    line.qty
+  );
+  const qty = quantity.stockQty;
+  if (!(qty > 0) || !(quantity.purchaseQty > 0)) {
+    throw new Error('Invalid purchase quantity for ' + ctx.prNo);
+  }
 
   _purchaseAssertPRCanGeneratePO_(ctx, qty, {
     currentAllocatedQty: opts && opts.currentAllocatedQty,
     allowExistingOnClosed: opts && opts.allowExistingOnClosed === true
   });
-
-  const basicAmount = Number((qty * rate).toFixed(2));
-  const taxAmount = Number((basicAmount * taxPct / 100).toFixed(2));
-  const totalAmount = Number((basicAmount + taxAmount).toFixed(2));
+  const rate = Number(line.rate || 0);
+  const taxPct = Number(line.taxPct || 0);
+  if (taxPct < 0) throw new Error('Invalid tax % for ' + ctx.prNo);
   const userRemarks = String(line.remarks || ctx.remarks || '').trim();
   const mergedRemarks = userRemarks;
 
-  return {
+  const base = {
     id: opts && opts.keepId ? String(line.id || '').trim() : (String(line.id || '').trim() || Utilities.getUuid()),
     poNo: poNo,
     lineNo: lineNo,
@@ -22826,11 +26193,10 @@ function _purchaseNormalizeInventoryPRLine_(line, prCtx, lineNo, poNo, now, opts
     itemCode: ctx.itemCode,
     itemName: ctx.itemName,
     qty: qty,
+    stockQty: qty,
+    purchaseQty: quantity.purchaseQty,
     rate: rate,
     taxPct: taxPct,
-    amount: basicAmount,
-    taxAmount: taxAmount,
-    totalAmount: totalAmount,
     department: ctx.department || '',
     jobRef: ctx.jobRef || '',
     remarks: mergedRemarks,
@@ -22838,6 +26204,12 @@ function _purchaseNormalizeInventoryPRLine_(line, prCtx, lineNo, poNo, now, opts
     pendingQty: qty,
     createdAt: opts && opts.createdAt ? opts.createdAt : now
   };
+  return _purchaseApplyRateControlToLine_(line, Object.assign({}, ctx, { uom: ctx.uom || rateCtx.stockUom || '' }), Object.assign({}, rateCtx, base, {
+    qty: qty,
+    itemCode: ctx.itemCode,
+    stockUom: rateCtx.stockUom || ctx.uom || '',
+    purchaseUom: rateCtx.purchaseUom || rateCtx.stockUom || ctx.uom || ''
+  }));
 }
 
 function invAppendLedger_(p) {
@@ -22995,11 +26367,341 @@ function invEnsureLegacyLotCoverage_(itemCode, location, existingItem) {
   };
 }
 
+function _invRequireReelAccess_(token, write) {
+  const actions = write
+    ? [
+        { module: 'INVENTORY', action: 'can_create' },
+        { module: 'INVENTORY', action: 'can_edit' }
+      ]
+    : [
+        { module: 'INVENTORY', action: 'can_view' },
+        { module: 'INVENTORY', action: 'can_create' },
+        { module: 'INVENTORY', action: 'can_edit' }
+      ];
+  return _requireAnyModuleAccess_(token, actions);
+}
+
+function _invRequireMaterialIssueAccess_(payload, token) {
+  const authToken = _authTokenFromPayload_(payload, token);
+  if (!authToken) {
+    throw new Error('Your ERP session is missing. Sign in again before posting a material issue.');
+  }
+
+  const user = getSessionUser(authToken);
+  if (!user) {
+    throw new Error('Your ERP session has expired or was refreshed after a permission change. Sign in again and retry the material issue.');
+  }
+  if (String(user.role || '').trim().toUpperCase() === 'ADMIN') return user;
+
+  const canPost =
+    _userHasPermission_(user, 'INVENTORY', 'can_create') ||
+    _userHasPermission_(user, 'INVENTORY', 'can_edit');
+  if (canPost) return user;
+
+  // Inventory historically exposed material issue operations to module users
+  // before create/edit permissions were enforced. Keep those live Stores roles
+  // working while new roles can use the explicit create/edit flags.
+  if (_userHasPermission_(user, 'INVENTORY', 'can_view')) return user;
+
+  throw new Error(
+    'Inventory material issue access is required. Ask an administrator to enable Inventory access for your role.'
+  );
+}
+
+function invListKraftReelsJSON(params, token) {
+  _invRequireReelAccess_(_authTokenFromPayload_(params, token), false);
+  const input = params || {};
+  const filters = {};
+  const status = String(input.status || '').trim().toUpperCase();
+  const woNo = String(input.woNo || '').trim();
+  if (status && status !== 'ALL') filters.reel_status = 'eq.' + status;
+  if (woNo) filters.assigned_wo_no = 'eq.' + woNo;
+
+  let rows;
+  try {
+    rows = supabaseSelect_('v_kraft_reel_register', {
+      select: '*',
+      filters: filters,
+      order: 'created_at.desc',
+      limit: Math.min(Math.max(Number(input.limit || 1500), 1), 5000)
+    }) || [];
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'v_kraft_reel_register')) {
+      throw new Error('Run supabase/kraft_reel_tracking_20260724.sql before opening Kraft Reel Control.');
+    }
+    throw err;
+  }
+
+  const q = String(input.q || '').trim().toLowerCase();
+  if (q) {
+    rows = rows.filter(function(row) {
+      return [
+        row.internal_reel_no,
+        row.item_code,
+        row.item_name,
+        row.rm_type,
+        row.assigned_wo_no,
+        row.grn_no,
+        row.po_no,
+        row.invoice_no,
+        row.vendor_name
+      ].join(' ').toLowerCase().indexOf(q) !== -1;
+    });
+  }
+
+  const mapped = rows.map(function(row) {
+    return {
+      lotId: row.lot_id,
+      reelNo: row.internal_reel_no || '',
+      itemCode: row.item_code || '',
+      itemName: row.item_name || '',
+      rmType: row.rm_type || '',
+      category: row.category || '',
+      department: row.department || '',
+      uom: row.uom || 'KG',
+      grossWeightKg: Number(row.gross_weight_kg || row.qty_received || 0),
+      receivedQty: Number(row.qty_received || 0),
+      availableQty: Number(row.qty_available || 0),
+      issuedGrossQty: Number(row.issued_gross_qty || 0),
+      lastConsumptionKg: Number(row.last_calculated_consumption_kg || 0),
+      productionConsumedKg: Number(row.production_consumed_kg || 0),
+      currentWoProductionConsumedKg: Number(row.current_wo_production_consumed_kg || 0),
+      widthMm: row.master_width_mm == null ? '' : Number(row.master_width_mm),
+      gsm: row.master_gsm == null ? '' : Number(row.master_gsm),
+      status: row.reel_status || '',
+      assignedWoNo: row.assigned_wo_no || '',
+      location: row.location || '',
+      rate: Number(row.rate || 0),
+      poNo: row.po_no || '',
+      grnNo: row.grn_no || '',
+      invoiceNo: row.invoice_no || '',
+      vendorName: row.vendor_name || '',
+      receiptDate: row.receipt_date || '',
+      issuedAt: row.issued_at || '',
+      returnedAt: row.returned_at || '',
+      closedAt: row.closed_at || '',
+      closedReason: row.closed_reason || '',
+      currentIssueCycleId: row.current_issue_cycle_id || '',
+      cycleIssuedQtyKg: Number(row.cycle_issued_qty_kg || 0),
+      cycleProductionConsumedKg: Number(row.cycle_production_consumed_kg || 0),
+      cycleProcessWasteKg: Number(row.cycle_process_waste_kg || 0),
+      cycleExpectedReturnQtyKg: row.cycle_expected_return_qty_kg == null
+        ? ''
+        : Number(row.cycle_expected_return_qty_kg),
+      cycleActualReturnQtyKg: row.cycle_actual_return_qty_kg == null
+        ? ''
+        : Number(row.cycle_actual_return_qty_kg),
+      cycleReturnVarianceKg: row.cycle_return_variance_kg == null
+        ? ''
+        : Number(row.cycle_return_variance_kg),
+      cycleMaterialKey: row.cycle_material_key || '',
+      cycleStatus: row.cycle_status || ''
+    };
+  });
+
+  return {
+    ok: true,
+    rows: mapped,
+    summary: mapped.reduce(function(out, row) {
+      out.count += 1;
+      out.balanceKg += Number(row.availableQty || 0);
+      if (row.status === 'ISSUED') {
+        out.issuedCount += 1;
+        out.issuedKg += Number(row.issuedGrossQty || 0);
+      }
+      if (row.status === 'SCRAPPED') out.scrappedCount += 1;
+      return out;
+    }, { count: 0, balanceKg: 0, issuedCount: 0, issuedKg: 0, scrappedCount: 0 })
+  };
+}
+
+function invListKraftReelEventsJSON(lotId, token) {
+  _invRequireReelAccess_(token, false);
+  const id = String(lotId || '').trim();
+  if (!id) throw new Error('Reel lot id required');
+  const rows = supabaseSelect_('inv_reel_events', {
+    select: '*',
+    filters: { lot_id: 'eq.' + id },
+    order: 'created_at.desc',
+    limit: 500
+  }) || [];
+  return {
+    ok: true,
+    rows: rows.map(function(row) {
+      return {
+        id: row.id,
+        reelNo: row.internal_reel_no || '',
+        eventType: row.event_type || '',
+        woNo: row.wo_no || '',
+        qty: Number(row.qty || 0),
+        balanceAfter: Number(row.balance_after || 0),
+        location: row.location || '',
+        materialKey: row.material_key || '',
+        reason: row.reason || '',
+        actor: row.actor || '',
+        metadata: row.metadata || {},
+        createdAt: row.created_at || ''
+      };
+    })
+  };
+}
+
+function invListKraftReelOpeningSourcesJSON(params, token) {
+  const p = params || {};
+  _invRequireReelAccess_(_authTokenFromPayload_(p, token), false);
+  const itemCode = String(p.itemCode || '').trim();
+
+  if (itemCode && p.ensureCoverage === true) {
+    const item = ensureInventoryItemExists_(itemCode, {
+      requireActive: true,
+      allowAutoCreate: false
+    });
+    if (!_invItemRequiresReelTracking_(item)) {
+      throw new Error('Selected item is not enabled for kraft reel tracking');
+    }
+    invEnsureLegacyLotCoverage_(item.item_code || itemCode, DEFAULT_LOCATION, item);
+  }
+
+  const itemFilters = { reel_tracking_enabled: 'eq.true', active: 'eq.true' };
+  if (itemCode) itemFilters.item_code = 'eq.' + itemCode;
+  const items = supabaseSelect_('inv_items', {
+    select: 'id,item_code,item_name,rm_type,category,department,uom,width_mm,gsm',
+    filters: itemFilters,
+    order: 'item_name.asc',
+    limit: 1000
+  }) || [];
+
+  const sourceFilters = {};
+  if (itemCode) sourceFilters.item_code = 'eq.' + itemCode;
+  let sources;
+  try {
+    sources = supabaseSelect_('v_kraft_reel_opening_sources', {
+      select: '*',
+      filters: sourceFilters,
+      order: 'receipt_date.asc,created_at.asc',
+      limit: 2000
+    }) || [];
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'v_kraft_reel_opening_sources')) {
+      throw new Error('Run supabase/kraft_reel_hardening_20260725.sql before registering existing reels.');
+    }
+    throw err;
+  }
+
+  return {
+    ok: true,
+    items: items.map(function(row) {
+      return {
+        id: row.id,
+        itemCode: row.item_code || '',
+        itemName: row.item_name || '',
+        rmType: row.rm_type || '',
+        category: row.category || '',
+        department: row.department || '',
+        uom: row.uom || '',
+        widthMm: row.width_mm == null ? '' : Number(row.width_mm),
+        gsm: row.gsm == null ? '' : Number(row.gsm)
+      };
+    }),
+    sources: sources.map(function(row) {
+      return {
+        sourceLotId: row.source_lot_id,
+        itemId: row.item_id,
+        itemCode: row.item_code || '',
+        itemName: row.item_name || '',
+        rmType: row.rm_type || '',
+        widthMm: row.width_mm == null ? '' : Number(row.width_mm),
+        gsm: row.gsm == null ? '' : Number(row.gsm),
+        sourceBatchNo: row.source_batch_no || '',
+        receiptDate: row.receipt_date || '',
+        qtyReceived: Number(row.qty_received || 0),
+        qtyAvailable: Number(row.qty_available || 0),
+        rate: Number(row.rate || 0),
+        sourceType: row.source_type || '',
+        sourceRef: row.source_ref || ''
+      };
+    })
+  };
+}
+
+function invRegisterOpeningKraftReels(payload, token) {
+  const p = payload || {};
+  const user = _invRequireReelAccess_(_authTokenFromPayload_(p, token), true);
+  const sourceLotId = String(p.sourceLotId || '').trim();
+  const reels = (Array.isArray(p.reels) ? p.reels : []).map(function(row) {
+    return {
+      internal_reel_no: String(row.internalReelNo || '').trim().toUpperCase(),
+      gross_weight_kg: Number(row.grossWeightKg || 0)
+    };
+  });
+  if (!sourceLotId) throw new Error('Select the existing stock lot to split');
+  if (!reels.length) throw new Error('Enter at least one existing reel');
+  reels.forEach(function(row, idx) {
+    if (!(row.gross_weight_kg > 0)) {
+      throw new Error('Reel ' + (idx + 1) + ' must have a positive gross weight');
+    }
+  });
+
+  const result = supabaseRpc_('register_opening_kraft_reels', {
+    p_source_lot_id: sourceLotId,
+    p_reels: reels,
+    p_actor: _authActorName_(user),
+    p_note: String(p.note || '').trim()
+  });
+  _invBumpStockSnapshotVersion_();
+  return result || { ok: true };
+}
+
+function invReturnKraftReel(payload, token) {
+  const p = payload || {};
+  const user = _invRequireReelAccess_(_authTokenFromPayload_(p, token), true);
+  if (!String(p.lotId || '').trim()) throw new Error('Select a reel to return');
+  if (!String(p.woNo || '').trim()) throw new Error('Work order is required');
+  if (!(Number(p.returnQty || 0) > 0)) throw new Error('Return weight must be greater than zero');
+  if (!String(p.reason || '').trim()) throw new Error('Return basis or production note is required');
+
+  const result = supabaseRpc_('return_kraft_reel_v2', {
+    p_lot_id: String(p.lotId).trim(),
+    p_wo_no: String(p.woNo).trim(),
+    p_return_qty: Number(p.returnQty),
+    p_process_waste_qty: Math.max(Number(p.processWasteQty || 0), 0),
+    p_reason: String(p.reason).trim(),
+    p_actor: _authActorName_(user)
+  });
+  _invBumpStockSnapshotVersion_();
+  return result || { ok: true };
+}
+
+function invScrapKraftReel(payload, token) {
+  const p = payload || {};
+  const user = _invRequireReelAccess_(_authTokenFromPayload_(p, token), true);
+  if (!String(p.lotId || '').trim()) throw new Error('Select a reel to scrap');
+  if (!String(p.reasonCode || '').trim()) throw new Error('Scrap reason is required');
+
+  const result = supabaseRpc_('scrap_kraft_reel', {
+    p_lot_id: String(p.lotId).trim(),
+    p_reason_code: String(p.reasonCode).trim(),
+    p_remarks: String(p.remarks || '').trim(),
+    p_actor: _authActorName_(user)
+  });
+  _invBumpStockSnapshotVersion_();
+  return result || { ok: true };
+}
+
+function invListIssuedKraftReelsForWOJSON(woNo, token) {
+  const result = invListKraftReelsJSON({
+    woNo: String(woNo || '').trim(),
+    status: 'ISSUED',
+    limit: 500
+  }, token);
+  return { ok: true, rows: result.rows || [] };
+}
+
 function invListAvailableLotsJSON(itemCode, location) {
   const code = String(itemCode || '').trim();
   if (!code) throw new Error('Item code required');
   const item = (supabaseSelect_('inv_items', {
-    select: 'id,item_code,item_name,department',
+    select: 'id,item_code,item_name,department,category,uom,rm_type,reel_tracking_enabled',
     filters: { item_code: 'eq.' + code },
     limit: 1
   }) || [])[0] || (supabaseSelect_('items', {
@@ -23014,7 +26716,7 @@ function invListAvailableLotsJSON(itemCode, location) {
   const itemCodeNorm = String(item.item_code || code).trim();
   const itemDepartment = String(item.department || '').trim();
   const rows = supabaseSelect_('inv_lots', {
-    select: 'id,batch_no,receipt_date,qty_received,qty_available,rate,location,department',
+    select: 'id,batch_no,receipt_date,qty_received,qty_available,rate,location,department,is_reel,reel_status,assigned_wo_no,gross_weight_kg,master_width_mm,master_gsm',
     filters: {
       ...(itemId ? { item_id: 'eq.' + itemId } : { item_code: 'eq.' + itemCodeNorm }),
       location: 'eq.' + (location || DEFAULT_LOCATION),
@@ -23041,6 +26743,12 @@ function invListAvailableLotsJSON(itemCode, location) {
           rate: Number(row.rate || 0),
           location: row.location || '',
           department: row.department || '',
+          isReel: row.is_reel === true,
+          reelStatus: row.reel_status || '',
+          assignedWoNo: row.assigned_wo_no || '',
+          grossWeightKg: Number(row.gross_weight_kg || 0),
+          masterWidthMm: row.master_width_mm == null ? '' : Number(row.master_width_mm),
+          masterGsm: row.master_gsm == null ? '' : Number(row.master_gsm),
           ageingDays: ageingDays
         };
       })
@@ -23081,7 +26789,7 @@ function invSelectOpenLotsForAllocation_(item, payload) {
   }
 
   return supabaseSelect_('inv_lots', {
-    select: 'id,batch_no,qty_available,rate,receipt_date',
+    select: 'id,batch_no,qty_available,rate,receipt_date,is_reel,reel_status,assigned_wo_no,location',
     filters: filters,
     order: 'receipt_date.asc,created_at.asc',
     limit: 200
@@ -23102,7 +26810,11 @@ function invBuildLotAllocations_(lots, qty) {
       batchNo: lot.batch_no || '',
       availableQty: available,
       qty: take,
-      rate: Number(lot.rate || 0)
+      rate: Number(lot.rate || 0),
+      isReel: lot.is_reel === true,
+      reelStatus: lot.reel_status || '',
+      assignedWoNo: lot.assigned_wo_no || '',
+      location: lot.location || ''
     });
     balance = Number((balance - take).toFixed(6));
   });
@@ -23269,6 +26981,7 @@ function invBuildGRNIdempotencyKey_(header, lines) {
       String(line.prNo || '').trim(),
       String(line.itemCode || '').trim().toUpperCase(),
       Number(line.qty || 0).toFixed(6),
+      Number(line.purchaseQty == null ? line.qty || 0 : line.purchaseQty).toFixed(6),
       Number(line.rate || 0).toFixed(6),
       Number(line.taxPct || 0).toFixed(4)
     ].join('~');
@@ -23569,7 +27282,8 @@ function invReverseInboundLot_(ledgerRow) {
   return batchNo;
 }
 
-function invReverseLedgerTransaction(ledgerId, reason) {
+function invReverseLedgerTransaction(ledgerId, reason, token) {
+  _invRequireReelAccess_(token, true);
   const id = String(ledgerId || '').trim();
   const reversalReason = String(reason || '').trim();
   if (!id) throw new Error('Transaction id required');
@@ -23618,6 +27332,19 @@ function invReverseLedgerTransaction(ledgerId, reason) {
   }) || [])[0] : null) || {};
   const itemCode = itemMeta.item_code || '';
   if (!itemCode) throw new Error('Item details not found for transaction');
+  const reelLot = String(ledger.batch_no || '').trim()
+    ? (supabaseSelect_('inv_lots', {
+        select: 'id,is_reel,reel_status,assigned_wo_no',
+        filters: { batch_no: 'eq.' + String(ledger.batch_no).trim() },
+        limit: 1
+      }) || [])[0]
+    : null;
+  if (reelLot?.is_reel === true) {
+    throw new Error(
+      'Reel-tracked movements cannot be reversed as a single ledger row. ' +
+      'Use Kraft Reels > WO Return for issued reels; GRN reel reversal must be handled as the complete GRN.'
+    );
+  }
 
   const location = ledger.location || DEFAULT_LOCATION;
   const qtyIn = Number(ledger.qty_in || 0);
@@ -23724,6 +27451,29 @@ function invReverseLedgerTransaction(ledgerId, reason) {
     batchNo: batchNo,
     purchaseSync: purchaseSync
   };
+}
+
+function invReverseKraftGRN(grnNo, reason, token) {
+  const user = getSessionUser(String(token || '').trim());
+  if (!user) throw new Error('Unauthorized');
+  if (String(user.role || '').trim().toUpperCase() !== 'ADMIN') {
+    throw new Error('Only an administrator can reverse a complete kraft GRN');
+  }
+  const key = String(grnNo || '').trim();
+  const reversalReason = String(reason || '').trim();
+  if (!key) throw new Error('GRN number is required');
+  if (!reversalReason) throw new Error('GRN reversal reason is required');
+
+  const result = supabaseRpc_('reverse_kraft_grn', {
+    p_grn_no: key,
+    p_reason: reversalReason,
+    p_actor: _authActorName_(user)
+  }) || { ok: true, grnNo: key };
+  if (result.poNo) _purchaseUpdatePOStatus_(String(result.poNo));
+  PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+  _invBumpStockSnapshotVersion_();
+  refreshStockMV_(true);
+  return result;
 }
 
 function invGetPurchaseAvgRateMap_(itemIds, location) {
@@ -24439,6 +28189,12 @@ function invRegularizePRReceiptToPO(payload, token) {
     challanNo: String(note.CHALLANNO || '').trim(),
     qty: qty,
     rate: Number(ledger.rate || 0),
+    taxPct: Number(line.taxPct || 0),
+    stockUom: line.stockUom || '',
+    purchaseUom: line.purchaseUom || line.stockUom || '',
+    purchaseQty: Number((qty * (Number(line.conversionFactor || 1) || 1)).toFixed(6)),
+    rateCeilingSnapshot: _purchaseEffectiveGRNCeiling_(line) || null,
+    rateControlStatus: 'LEGACY_REGULARIZED',
     remarks: 'Regularized from legacy PR receipt ' + ledger.id,
     createdAt: ledger.created_at || stamp,
     updatedAt: stamp
@@ -24477,22 +28233,30 @@ function invRegularizePRReceiptToPO(payload, token) {
   };
 }
 
-function invPostPOReceiptLine_(payload) {
+function _invPreparePOReceiptLine_(payload) {
   if (!payload || !payload.poNo || !payload.poLineId) {
     throw new Error('PO line reference is required');
   }
 
   _invAssertReceiptHeaderMetadata_(payload);
-  const qty = Number(payload.qty || 0);
   const rate = Number(payload.rate || 0);
-  if (qty <= 0 || rate <= 0) throw new Error('Invalid qty or rate');
+  if (rate <= 0) throw new Error('Invalid purchase rate');
 
-  const line = payload.lineRow || _purchaseListPOLines_().find(function(row) {
+  const persistedLine = _purchaseGetPOLineById_(payload.poNo, payload.poLineId);
+  const line = persistedLine || payload.lineRow || _purchaseListPOLines_().find(function(row) {
     return String(row.poNo || '') === String(payload.poNo || '') &&
       String(row.id || '') === String(payload.poLineId || '');
   });
   if (!line) throw new Error('PO line not found');
-  ensureInventoryItemExists_(line.itemCode, { requireActive: true, allowAutoCreate: false });
+  const receiptQuantity = _purchaseResolveDualQuantity_(
+    payload,
+    Number(line.conversionFactor || 1),
+    payload.qty
+  );
+  let qty = receiptQuantity.stockQty;
+  const purchaseQty = receiptQuantity.purchaseQty;
+  if (qty <= 0 || purchaseQty <= 0) throw new Error('Invalid receipt quantity');
+  const item = ensureInventoryItemExists_(line.itemCode, { requireActive: true, allowAutoCreate: false });
 
   const sourceType = String(line.sourceType || '').toUpperCase();
   if (_purchaseIsPlateDieSource_(sourceType)) {
@@ -24509,6 +28273,12 @@ function invPostPOReceiptLine_(payload) {
     return String(r.id || '') === String(payload.poLineId || '');
   }) || line);
   const pendingQty = Number(liveLine.pendingQty || 0);
+  const pendingPurchaseQty = liveLine.pendingPurchaseQty == null
+    ? Number((pendingQty * (Number(line.conversionFactor || 1) || 1)).toFixed(6))
+    : Number(liveLine.pendingPurchaseQty || 0);
+  if (Math.abs(purchaseQty - pendingPurchaseQty) <= 0.0001) {
+    qty = pendingQty;
+  }
   if (liveLine.isShortClosed === true || Number(liveLine.shortClosedQty || 0) > 0) {
     throw new Error('This PO line is short closed and cannot be received.');
   }
@@ -24516,16 +28286,50 @@ function invPostPOReceiptLine_(payload) {
   if (!payload.allowOverReceipt && overByQty > 0.0001) {
     throw new Error('Over receipt blocked. Pending=' + pendingQty + ', Receive=' + qty);
   }
-  if (payload.allowOverReceipt === true && overByQty > 0.0001 && !String(payload.overReceiptReason || '').trim()) {
+  const overByPurchaseQty = Number((purchaseQty - pendingPurchaseQty).toFixed(6));
+  if (!payload.allowOverReceipt && overByPurchaseQty > 0.0001) {
+    throw new Error('Over receipt blocked. Pending purchase=' + pendingPurchaseQty +
+      ' ' + (line.purchaseUom || '') + ', Receive=' + purchaseQty);
+  }
+  if (payload.allowOverReceipt === true &&
+      (overByQty > 0.0001 || overByPurchaseQty > 0.0001) &&
+      !String(payload.overReceiptReason || '').trim()) {
     throw new Error('Over receipt reason required');
   }
-  if (_invReceiptCommercialMismatch_(payload, liveLine)) {
-    if (payload.allowCommercialOverride !== true) {
-      throw new Error('GRN commercial mismatch. Rate/GST differs from PO line; confirmation required.');
+  let matchedRateOverride = null;
+  const commercialControl = _invReceiptCommercialControl_(Object.assign({}, payload, { rate: rate }), liveLine);
+  if (commercialControl.taxMismatch) {
+    throw new Error('GRN GST % must match the PO GST of ' + commercialControl.governedTaxPct + '%.');
+  }
+  if (commercialControl.overrideRequired) {
+    const approval = _purchaseSelectApprovedRateOverride_(Object.assign({}, payload, {
+      itemCode: line.itemCode,
+      poNo: payload.poNo,
+      poLineId: line.id,
+      qty: qty,
+      purchaseUom: line.purchaseUom || '',
+      rateKey: line.rateKey || '',
+      rate: rate,
+      taxPct: Number(payload.taxPct || 0),
+      masterRateCeiling: commercialControl.ceilingRate,
+      masterTaxPctSnapshot: commercialControl.governedTaxPct,
+      vendorId: payload.vendorId || po && po.vendorId || '',
+      vendorName: payload.vendorName || po && po.vendorName || ''
+    }), 'GRN_RATE');
+    if (String(approval.po_no || '').trim() && String(approval.po_no || '').trim() !== String(payload.poNo || '').trim()) {
+      throw new Error('GRN rate override PO number does not match.');
     }
-    if (!String(payload.commercialOverrideReason || '').trim()) {
-      throw new Error('Commercial override reason required');
+    if (approval.po_line_id && String(approval.po_line_id || '') !== String(line.id || '')) {
+      throw new Error('GRN rate override PO line does not match.');
     }
+    if (String(approval.item_code || '').trim().toUpperCase() !== String(line.itemCode || '').trim().toUpperCase()) {
+      throw new Error('GRN rate override item does not match.');
+    }
+    if (Math.abs(Number(approval.requested_rate || 0) - rate) > 0.0001 ||
+        Math.abs(Number(approval.requested_tax_pct || 0) - Number(payload.taxPct || 0)) > 0.0001) {
+      throw new Error('Approved GRN rate override does not match receipt rate/GST.');
+    }
+    matchedRateOverride = approval;
   }
 
   const receiptNote = [
@@ -24540,6 +28344,9 @@ function invPostPOReceiptLine_(payload) {
     payload.taxPct !== undefined && payload.taxPct !== null
       ? 'TaxPct:' + String(payload.taxPct).trim()
       : '',
+    line.purchaseUom ? 'PurchaseUOM:' + String(line.purchaseUom || '').trim() : '',
+    line.conversionFactor ? 'PurchasePerStock:' + String(line.conversionFactor || '').trim() : '',
+    'PurchaseQty:' + String(purchaseQty),
     payload.vendorName ? 'Vendor:' + String(payload.vendorName).trim() : '',
     payload.challanNo ? 'ChallanNo:' + String(payload.challanNo).trim() : '',
     payload.challanDate ? 'ChallanDate:' + String(payload.challanDate).trim() : '',
@@ -24551,94 +28358,52 @@ function invPostPOReceiptLine_(payload) {
     payload.freightGstPct !== undefined && payload.freightGstPct !== null
       ? 'FreightGST:' + String(payload.freightGstPct).trim()
       : '',
-    overByQty > 0.0001 ? 'OverReceiptReason:' + String(payload.overReceiptReason || '').trim() : '',
+    (overByQty > 0.0001 || overByPurchaseQty > 0.0001)
+      ? 'OverReceiptReason:' + String(payload.overReceiptReason || '').trim()
+      : '',
     payload.allowCommercialOverride === true ? 'CommercialOverride:' + String(payload.commercialOverrideReason || '').trim() : '',
     payload.deliveryTerms ? 'Delivery:' + String(payload.deliveryTerms).trim() : '',
     payload.remarks ? 'Remarks:' + String(payload.remarks).trim() : ''
   ].filter(Boolean).join(' | ');
+  const stockRate = Number((rate * (Number(line.conversionFactor || 1) || 1)).toFixed(6));
+  const receiptAt = _purchaseNowIso_();
+  const batchNo = String(payload.batchNo || '').trim() || invGenerateBatchNo_(line.itemCode, receiptAt);
+  const conversionFactor = Number(line.conversionFactor || 1) || 1;
+  const ratePolicy = _purchaseNormalizeRatePolicy_(line.ratePolicy);
+  const overrideApprovalId = matchedRateOverride && matchedRateOverride.id ||
+    payload.rateOverrideApprovalId || payload.rate_override_approval_id || '';
+  const rateControlStatus = ratePolicy !== 'RATE_CONTROLLED'
+    ? 'MANUAL_ALLOWED'
+    : (commercialControl.overrideRequired ? 'OVERRIDE_APPROVED' : 'WITHIN_CEILING');
+  const reels = _invNormalizeGRNReels_(payload, item);
 
-  const lot = invCreateLot_({
-    itemCode: line.itemCode,
+  return {
+    receipt_id: Utilities.getUuid(),
+    lot_id: Utilities.getUuid(),
+    ledger_id: Utilities.getUuid(),
+    po_line_id: line.id,
+    item_id: item.id,
+    item_code: line.itemCode,
+    batch_no: batchNo,
+    location: payload.location || DEFAULT_LOCATION,
+    receipt_at: receiptAt,
+    receipt_date: _purchaseIsoDate_(new Date()),
     qty: qty,
     rate: rate,
-    batchNo: payload.batchNo,
-    sourceType: 'PO-RECEIPT',
-    sourceRef: payload.poNo,
-    receiptDate: new Date().toISOString(),
-    location: payload.location || DEFAULT_LOCATION,
-    department: line.department || '',
-    remarks: receiptNote
-  });
-
-  const ledger = invAppendLedger_({
-    refType: 'PO-RECEIPT',
-    refNo: payload.poNo,
-    itemCode: line.itemCode,
-    qtyIn: qty,
-    rate: rate,
-    batchNo: lot.batchNo,
-    location: payload.location || DEFAULT_LOCATION,
-    department: line.department || '',
-    remarks: receiptNote
-  });
-
-  if (payload.skipStockRefresh !== true) {
-    refreshStockMV_();
-  }
-
-  _purchaseInsertPOReceipt_({
-    id: Utilities.getUuid(),
-    poId: line.poId || null,
-    poNo: payload.poNo,
-    poLineId: line.id,
-    lineNo: line.lineNo,
-    sourceType: line.sourceType,
-    sourceRef: line.sourceRef || '',
-    itemCode: line.itemCode || '',
-    jobRef: line.jobRef || '',
-    soRefs: line.jobRef || '',
-    receiptDate: _purchaseIsoDate_(new Date()),
-    challanNo: String(payload.challanNo || '').trim(),
-    qty: qty,
-    rate: rate,
-    remarks: String(payload.remarks || '').trim(),
-    createdAt: _purchaseNowIso_(),
-    updatedAt: _purchaseNowIso_()
-  });
-
-  const linkedPrNo = String(line.sourceRef || '').trim();
-  if (linkedPrNo) {
-    try {
-      const pr = supabaseSelect_('inv_purchase_requests', {
-        select: 'pr_no,requested_qty,received_qty,status',
-        filters: { pr_no: 'eq.' + linkedPrNo },
-        limit: 1
-      })[0];
-      if (pr) {
-        const nextReceived = Number(pr.received_qty || 0) + qty;
-        const requestedQty = Number(pr.requested_qty || 0);
-        supabaseUpdate_(
-          'inv_purchase_requests',
-          { pr_no: 'eq.' + linkedPrNo },
-          {
-            received_qty: nextReceived,
-            status: nextReceived >= requestedQty ? 'CLOSED' : 'OPEN'
-          }
-        );
-      }
-    } catch (e) {
-      Logger.log('Linked PR receipt update failed for ' + linkedPrNo + ': ' + e.message);
-    }
-  }
-
-  if (payload.skipPOStatusRefresh !== true) {
-    _purchaseUpdatePOStatus_(payload.poNo);
-  }
-  if (payload.skipPurchaseCacheVersion !== true) {
-    PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
-  }
-
-  return { ok: true, receiptNo: ledger?.id || '', batchNo: lot.batchNo || '' };
+    stock_rate: stockRate,
+    tax_pct: Number(payload.taxPct || 0),
+    stock_uom: line.stockUom || '',
+    purchase_uom: line.purchaseUom || line.stockUom || '',
+    purchase_qty: purchaseQty,
+    rate_ceiling_snapshot: commercialControl.ceilingRate || null,
+    rate_control_status: rateControlStatus,
+    rate_override_approval_id: overrideApprovalId || null,
+    allow_over_receipt: payload.allowOverReceipt === true,
+    artwork_no: line.itemCode || '',
+    receipt_remarks: String(payload.remarks || '').trim(),
+    remarks: receiptNote,
+    reels: reels
+  };
 }
 
 function invPostPurchaseReceipt(payload) {
@@ -24803,7 +28568,10 @@ function invGetItemPurchaseRateHistoryJSON(itemCodes, opts) {
   }
   const limitPerItem = Math.max(1, Math.min(20, Number(opts.limitPerItem || 10) || 10));
   try {
-    const rows = _supabaseSelectByKeyInBatches_('v_inventory_item_purchase_rate_history', `
+    let historyView = 'v_inventory_item_purchase_rate_history_purchase_v2';
+    let rows;
+    try {
+      rows = _supabaseSelectByKeyInBatches_(historyView, `
       receipt_id,
       receipt_at,
       receipt_date,
@@ -24820,7 +28588,24 @@ function invGetItemPurchaseRateHistoryJSON(itemCodes, opts) {
       challan_no,
       location,
       department
-    `, 'item_code', codes, null, 25) || [];
+      `, 'item_code', codes, null, 25) || [];
+    } catch (viewErr) {
+      if (!_supabaseRelationMissing_(viewErr, historyView)) throw viewErr;
+      historyView = 'v_inventory_item_purchase_rate_history_purchase_v1';
+      try {
+        rows = _supabaseSelectByKeyInBatches_(historyView, `
+          receipt_id,receipt_at,receipt_date,grn_no,po_no,po_line_id,item_code,item_name,
+          qty,rate,value,vendor_name,invoice_no,challan_no,location,department
+        `, 'item_code', codes, null, 25) || [];
+      } catch (legacyViewErr) {
+        if (!_supabaseRelationMissing_(legacyViewErr, historyView)) throw legacyViewErr;
+        historyView = 'v_inventory_item_purchase_rate_history';
+        rows = _supabaseSelectByKeyInBatches_(historyView, `
+          receipt_id,receipt_at,receipt_date,grn_no,po_no,po_line_id,item_code,item_name,
+          qty,rate,value,vendor_name,invoice_no,challan_no,location,department
+        `, 'item_code', codes, null, 25) || [];
+      }
+    }
     const normalized = _invNormalizeRateHistoryRows_(rows, limitPerItem);
     return {
       ok: true,
@@ -24835,7 +28620,7 @@ function invGetItemPurchaseRateHistoryJSON(itemCodes, opts) {
   }
 }
 
-function _invValidateGRNRateHistory_(receiptLines, reasonText) {
+function _invValidateGRNRateHistory_(receiptLines) {
   const codes = [...new Set((receiptLines || []).map(function(line) {
     return String(line.itemCode || '').trim();
   }).filter(Boolean))];
@@ -24862,30 +28647,288 @@ function _invValidateGRNRateHistory_(receiptLines, reasonText) {
       lastGrnNo: latest.grnNo || ''
     });
   });
-  const blocked = warnings.filter(function(row) {
-    return Number(row.increasePct || 0) >= GRN_RATE_BLOCK_PCT;
-  });
-  if (blocked.length && !String(reasonText || '').trim()) {
-    throw new Error('Rate increase reason required. ' + blocked.map(function(row) {
-      return row.itemCode + ' increased ' + row.increasePct + '% from ' + row.previousRate + ' to ' + row.currentRate;
-    }).join('; '));
-  }
   return warnings;
 }
 
-function invPostPurchaseReceiptBulk(payload) {
+function _invRequireGRNWrite_(payload, token) {
+  const authToken = _authTokenFromPayload_(payload, token);
+  if (!authToken) {
+    throw new Error('Your ERP session is missing. Sign in again before posting or checking a GRN.');
+  }
+
+  const user = getSessionUser(authToken);
+  if (!user) {
+    throw new Error('Your ERP session has expired or was refreshed after a permission change. Sign in again and retry the GRN.');
+  }
+  if (String(user.role || '').trim().toUpperCase() === 'ADMIN') return user;
+
+  const allowed = [
+    { module: 'INVENTORY', action: 'can_create' },
+    { module: 'INVENTORY', action: 'can_edit' },
+    { module: 'PURCHASE', action: 'can_create' },
+    { module: 'PURCHASE', action: 'can_edit' }
+  ].some(function(pair) {
+    return _userHasPermission_(user, pair.module, pair.action);
+  });
+  if (!allowed) {
+    throw new Error('Inventory GRN create/edit permission is required. Ask an administrator to enable Inventory or Purchase create/edit access for your role.');
+  }
+  return user;
+}
+
+function _invFindGRNOverrideRequest_(line, poRow, liveLine) {
+  const approvalId = String(line.rateOverrideApprovalId || line.rate_override_approval_id || '').trim();
+  let rows = [];
+  if (approvalId) {
+    rows = supabaseSelect_('purchase_rate_override_approvals', {
+      select: '*',
+      filters: { id: 'eq.' + approvalId },
+      limit: 1
+    }) || [];
+  } else {
+    rows = supabaseSelect_('purchase_rate_override_approvals', {
+      select: '*',
+      filters: {
+        context_type: 'eq.GRN_RATE',
+        po_no: 'eq.' + String(poRow && poRow.poNo || line.poNo || '').trim(),
+        po_line_id: 'eq.' + String(liveLine && liveLine.id || line.poLineId || '').trim(),
+        status: _supabaseInFilter_(['PENDING','APPROVED'])
+      },
+      order: 'requested_at.desc',
+      limit: 20
+    }) || [];
+  }
+  const expected = {
+    itemCode: liveLine.itemCode,
+    poNo: poRow.poNo,
+    poLineId: liveLine.id,
+    qty: Number(line.qty || 0),
+    purchaseQty: Number(line.purchaseQty == null
+      ? Number(line.qty || 0) * (Number(liveLine.conversionFactor || 1) || 1)
+      : line.purchaseQty),
+    purchaseUom: liveLine.purchaseUom || '',
+    rateKey: liveLine.rateKey || '',
+    rate: Number(line.rate || 0),
+    taxPct: Number(line.taxPct || 0),
+    masterRateCeiling: _purchaseEffectiveGRNCeiling_(liveLine),
+    masterTaxPctSnapshot: Number(liveLine.taxPct || 0),
+    vendorId: poRow.vendorId || '',
+    vendorName: poRow.vendorName || ''
+  };
+  return rows.find(function(row) {
+    const comparable = Object.assign({}, row, {
+      status: 'APPROVED',
+      consumed_at: null,
+      expires_at: null
+    });
+    return _purchaseRateOverrideMatches_(comparable, expected, 'GRN_RATE');
+  }) || null;
+}
+
+function _invPreflightPurchaseReceipt_(payload) {
+  const header = payload || {};
+  const lines = Array.isArray(header.lines) ? header.lines : [];
+  _invAssertReceiptHeaderMetadata_(header);
+  if (!String(header.poNo || '').trim()) throw new Error('PO No is required');
+  if (!lines.length) throw new Error('Select at least one GRN line');
+
+  const poNo = String(header.poNo || '').trim();
+  const poRow = (purchaseListPOsJSON({ poNo: poNo, forceRefresh: true }).rows || []).find(function(row) {
+    return String(row.poNo || '').trim() === poNo;
+  }) || null;
+  if (!poRow) throw new Error('Purchase order not found');
+  if (_purchaseIsCancelledStatus_(poRow.status)) throw new Error('Cancelled purchase orders cannot be received');
+  const lineMap = {};
+  (poRow.lines || []).forEach(function(row) {
+    const key = String(row.id || '').trim();
+    if (key) lineMap[key] = row;
+  });
+
+  const resultRows = lines.map(function(source, index) {
+    const line = Object.assign({}, source, {
+      qty: Number(source.qty || 0),
+      purchaseQty: source.purchaseQty == null ? null : Number(source.purchaseQty || 0),
+      rate: Number(source.rate || 0),
+      taxPct: Number(source.taxPct || 0)
+    });
+    const poLineId = String(line.poLineId || '').trim();
+    const liveLine = lineMap[poLineId] || null;
+    const result = {
+      index: index,
+      poLineId: poLineId,
+      lineNo: liveLine && liveLine.lineNo || line.lineNo || index + 1,
+      itemCode: liveLine && liveLine.itemCode || line.itemCode || '',
+      itemName: liveLine && liveLine.itemName || line.itemName || '',
+      enteredRate: line.rate,
+      poRate: Number(liveLine && liveLine.rate || line.poRate || 0),
+      masterCeiling: Number(liveLine && _purchaseEffectiveGRNCeiling_(liveLine) || 0),
+      status: 'BLOCKED',
+      message: '',
+      rateOverrideApprovalId: ''
+    };
+    try {
+      if (!poLineId || !liveLine) throw new Error('PO line is missing or no longer available');
+      const receiptQuantity = _purchaseResolveDualQuantity_(
+        line,
+        Number(liveLine.conversionFactor || 1),
+        line.qty
+      );
+      line.qty = receiptQuantity.stockQty;
+      line.purchaseQty = receiptQuantity.purchaseQty;
+      if (!(line.qty > 0)) throw new Error('Receipt quantity must be greater than zero');
+      if (!(line.rate > 0)) throw new Error('Entered purchase rate must be greater than zero');
+      if (liveLine.isShortClosed === true || Number(liveLine.shortClosedQty || 0) > 0) {
+        throw new Error('PO line is short closed');
+      }
+      const pendingPurchaseQty = liveLine.pendingPurchaseQty == null
+        ? Number((Number(liveLine.pendingQty || 0) * (Number(liveLine.conversionFactor || 1) || 1)).toFixed(6))
+        : Number(liveLine.pendingPurchaseQty || 0);
+      if (Math.abs(line.purchaseQty - pendingPurchaseQty) <= 0.0001) {
+        line.qty = Number(liveLine.pendingQty || 0);
+      }
+      if (header.allowOverReceipt !== true && line.qty - Number(liveLine.pendingQty || 0) > 0.0001) {
+        throw new Error('Receipt quantity exceeds pending quantity of ' + Number(liveLine.pendingQty || 0));
+      }
+      if (header.allowOverReceipt !== true && line.purchaseQty - pendingPurchaseQty > 0.0001) {
+        throw new Error('Receipt purchase quantity exceeds pending quantity of ' +
+          pendingPurchaseQty + ' ' + (liveLine.purchaseUom || ''));
+      }
+      if (header.allowOverReceipt === true &&
+          (line.qty - Number(liveLine.pendingQty || 0) > 0.0001 ||
+            line.purchaseQty - pendingPurchaseQty > 0.0001) &&
+          !String(header.overReceiptReason || '').trim()) {
+        throw new Error('Over receipt reason is required');
+      }
+
+      const inventoryItem = ensureInventoryItemExists_(liveLine.itemCode, {
+        requireActive: true,
+        allowAutoCreate: false
+      });
+      result.reelTrackingRequired = _invReconcileItemReelTracking_(inventoryItem);
+      const normalizedReels = _invNormalizeGRNReels_(line, inventoryItem);
+      result.reelCount = normalizedReels.length;
+      result.reelWeightKg = normalizedReels.reduce(function(sum, reel) {
+        return sum + Number(reel.gross_weight_kg || 0);
+      }, 0);
+      result.stockQty = line.qty;
+      result.purchaseQty = line.purchaseQty;
+
+      const commercial = _invReceiptCommercialControl_(line, liveLine);
+      result.masterCeiling = commercial.ceilingRate;
+      if (commercial.taxMismatch) {
+        throw new Error('GST must match PO GST of ' + commercial.governedTaxPct + '%');
+      }
+      if (commercial.overrideRequired) {
+        const request = _invFindGRNOverrideRequest_(line, poRow, liveLine);
+        const requestStatus = String(request && request.status || '').trim().toUpperCase();
+        if (requestStatus === 'APPROVED' && !request.consumed_at &&
+            (!request.expires_at || new Date(request.expires_at).getTime() > Date.now())) {
+          result.status = 'OVERRIDE_APPROVED';
+          result.message = 'Approved override ' + (request.request_ref || '');
+          result.rateOverrideApprovalId = request.id || '';
+          return result;
+        }
+        if (requestStatus === 'PENDING') {
+          result.status = 'OVERRIDE_PENDING';
+          result.message = 'Override ' + (request.request_ref || '') + ' is awaiting approval';
+          result.rateOverrideApprovalId = request.id || '';
+          return result;
+        }
+        result.status = 'OVERRIDE_REQUIRED';
+        result.message = 'Entered rate exceeds master ceiling';
+        return result;
+      }
+
+      result.status = 'READY';
+      result.message = line.rate === result.poRate ? 'PO rate retained' : 'Entered GRN rate accepted';
+      return result;
+    } catch (err) {
+      result.status = 'BLOCKED';
+      result.message = String(err && err.message || err);
+      return result;
+    }
+  });
+
+  return {
+    ok: true,
+    allReady: resultRows.every(function(row) {
+      return row.status === 'READY' || row.status === 'OVERRIDE_APPROVED';
+    }),
+    rows: resultRows
+  };
+}
+
+function invPreflightPurchaseReceipt(payload, token) {
+  _invRequireGRNWrite_(payload, token);
+  return _invPreflightPurchaseReceipt_(payload);
+}
+
+function purchaseSubmitGRNRateOverrideBatch(payload, token) {
+  _invRequireGRNWrite_(payload, token);
+  const header = payload || {};
+  const lines = Array.isArray(header.lines) ? header.lines : [];
+  if (!lines.length) throw new Error('Select at least one GRN line for override request');
+  const results = [];
+  const errors = [];
+  lines.forEach(function(line, index) {
+    try {
+      const ceiling = Number(line.masterRateCeiling || line.master_rate_ceiling || 0);
+      const rate = Number(line.requestedRate || line.rate || 0);
+      if (!(rate > ceiling + 0.0001)) return;
+      const response = purchaseSubmitRateOverrideRequest({
+        contextType: 'GRN_RATE',
+        poNo: header.poNo,
+        poLineId: line.poLineId,
+        prNo: line.prNo || '',
+        itemCode: line.itemCode || '',
+        itemName: line.itemName || '',
+        rateKey: line.rateKey || '',
+        purchaseUom: line.purchaseUom || line.stockUom || '',
+        requestedRate: rate,
+        requestedTaxPct: Number(line.taxPct || 0),
+        requestedQty: Number(line.qty || 0),
+        requestedPurchaseQty: Number(line.purchaseQty == null
+          ? Number(line.qty || 0) * (Number(line.conversionFactor || 1) || 1)
+          : line.purchaseQty),
+        vendorId: header.vendorId || '',
+        vendorName: header.vendorName || '',
+        reason: String(header.reason || '').trim()
+      }, token);
+      results.push({
+        index: index,
+        poLineId: line.poLineId || '',
+        itemCode: line.itemCode || '',
+        response: response
+      });
+    } catch (err) {
+      errors.push({
+        index: index,
+        poLineId: line.poLineId || '',
+        itemCode: line.itemCode || '',
+        message: String(err && err.message || err)
+      });
+    }
+  });
+  if (!results.length && errors.length) {
+    throw new Error(errors.map(function(row) {
+      return (row.itemCode || 'Line ' + (row.index + 1)) + ': ' + row.message;
+    }).join('\n'));
+  }
+  return { ok: errors.length === 0, results: results, errors: errors };
+}
+
+function invPostPurchaseReceiptBulk(payload, token) {
+  const user = _invRequireGRNWrite_(payload, token);
   const header = payload || {};
   const lines = Array.isArray(header.lines) ? header.lines : [];
   const receiptLines = lines
     .map(function(line) {
       return Object.assign({}, line, {
         qty: Number(line.qty || 0),
+        purchaseQty: line.purchaseQty == null ? null : Number(line.purchaseQty || 0),
         rate: Number(line.rate || 0),
         taxPct: Number(line.taxPct || 0)
       });
-    })
-    .filter(function(line) {
-      return Number(line.qty || 0) > 0 && Number(line.rate || 0) > 0;
     });
 
   if (!lines.length) throw new Error('At least one receipt line is required');
@@ -24894,6 +28937,21 @@ function invPostPurchaseReceiptBulk(payload) {
     throw new Error('Freight value is required');
   }
   if (!receiptLines.length) throw new Error('No valid receipt lines to post');
+  const preflight = _invPreflightPurchaseReceipt_(Object.assign({}, header, { lines: receiptLines }));
+  if (!preflight.allReady) {
+    const blocked = preflight.rows.filter(function(row) {
+      return row.status !== 'READY' && row.status !== 'OVERRIDE_APPROVED';
+    });
+    throw new Error('GRN preflight failed:\n' + blocked.map(function(row) {
+      return 'Line ' + row.lineNo + ' ' + (row.itemCode || row.itemName || '') + ': ' + row.message;
+    }).join('\n'));
+  }
+  preflight.rows.forEach(function(row) {
+    if (!receiptLines[row.index]) return;
+    if (Number(row.stockQty || 0) > 0) receiptLines[row.index].qty = Number(row.stockQty);
+    if (Number(row.purchaseQty || 0) > 0) receiptLines[row.index].purchaseQty = Number(row.purchaseQty);
+    if (row.rateOverrideApprovalId) receiptLines[row.index].rateOverrideApprovalId = row.rateOverrideApprovalId;
+  });
   const receiptPoNo = String(header.poNo || '').trim();
   if (!receiptPoNo) {
     throw new Error('PO No is required. GRN can be posted only against a Purchase Order.');
@@ -24905,7 +28963,7 @@ function invPostPurchaseReceiptBulk(payload) {
     throw new Error('PO line reference is required for every GRN line. Direct PR receipt is disabled.');
   }
   const rateIncreaseReason = String(header.rateIncreaseReason || header.remarks || '').trim();
-  const rateWarnings = _invValidateGRNRateHistory_(receiptLines, rateIncreaseReason);
+  const rateWarnings = _invValidateGRNRateHistory_(receiptLines);
   const rateWarningNote = rateWarnings.length
     ? ('RateIncreaseReviewed: ' + rateWarnings.map(function(row) {
         return row.itemCode + ' +' + row.increasePct + '% (' + row.previousRate + ' -> ' + row.currentRate + ')';
@@ -24940,13 +28998,14 @@ function invPostPurchaseReceiptBulk(payload) {
       Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Kolkata', 'yyyyMMddHHmmss') +
       '-' +
       idempotencyKey.slice(-6).toUpperCase();
-    const posted = [];
+    const preparedLines = [];
 
     receiptLines.forEach(function(line) {
       const basePayload = {
         itemCode: line.itemCode,
         itemName: line.itemName,
         qty: Number(line.qty || 0),
+        purchaseQty: line.purchaseQty == null ? null : Number(line.purchaseQty || 0),
         rate: Number(line.rate || 0),
         taxPct: Number(line.taxPct || 0),
         location: header.location || DEFAULT_LOCATION,
@@ -24954,6 +29013,7 @@ function invPostPurchaseReceiptBulk(payload) {
         invoiceDate: String(header.invoiceDate || '').trim(),
         poNo: String(header.poNo || '').trim(),
         vendorName: String(header.vendorName || '').trim(),
+        vendorId: String(header.vendorId || '').trim(),
         challanNo: String(header.challanNo || '').trim(),
         challanDate: String(header.challanDate || '').trim(),
         paymentTerms: String(header.paymentTerms || '').trim(),
@@ -24974,12 +29034,15 @@ function invPostPurchaseReceiptBulk(payload) {
         const poRow = poRowMap[receiptPoNo] || null;
         const liveLine = poLineMap[poLineId] || null;
         if (receiptPoNo) touchedPoNos[receiptPoNo] = true;
-        posted.push(invPostPOReceiptLine_(Object.assign({}, basePayload, {
+        preparedLines.push(_invPreparePOReceiptLine_(Object.assign({}, basePayload, {
           poLineId: poLineId,
           sourceType: line.sourceType,
           poRow: poRow,
           lineRow: liveLine,
           liveLine: liveLine,
+          vendorId: line.vendorId || poRow && poRow.vendorId || header.vendorId || '',
+          rateOverrideApprovalId: line.rateOverrideApprovalId || line.rate_override_approval_id || '',
+          reels: Array.isArray(line.reels) ? line.reels : [],
           skipStockRefresh: true,
           skipPOStatusRefresh: true,
           skipPurchaseCacheVersion: true
@@ -24987,24 +29050,53 @@ function invPostPurchaseReceiptBulk(payload) {
       }
     });
 
-    if (!posted.length) throw new Error('No valid receipt lines to post');
+    if (!preparedLines.length) throw new Error('No valid receipt lines to post');
 
-    Object.keys(touchedPoNos).forEach(function(poNo) {
-      _purchaseUpdatePOStatus_(poNo);
-    });
-    if (Object.keys(touchedPoNos).length) {
-      PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+    const postedResult = _purchasePostGRNTransaction_({
+      po_no: receiptPoNo,
+      grn_no: grnNo,
+      idempotency_key: idempotencyKey,
+      vendor_id: String(header.vendorId || '').trim(),
+      vendor_name: String(header.vendorName || '').trim(),
+      invoice_no: String(header.invoiceNo || '').trim(),
+      invoice_date: String(header.invoiceDate || '').trim(),
+      challan_no: String(header.challanNo || '').trim(),
+      challan_date: String(header.challanDate || '').trim(),
+      location: String(header.location || DEFAULT_LOCATION),
+      payment_terms: String(header.paymentTerms || '').trim(),
+      freight_terms: String(header.freightTerms || '').trim(),
+      freight_value: Number(header.freightValue || 0),
+      freight_gst_pct: Number(header.freightGstPct || 0),
+      delivery_terms: String(header.deliveryTerms || '').trim(),
+      remarks: String(header.remarks || '').trim(),
+      created_by: _authActorName_(user)
+    }, preparedLines);
+
+    const postCommitWarnings = [];
+    try {
+      Object.keys(touchedPoNos).forEach(function(poNo) {
+        _purchaseUpdatePOStatus_(poNo);
+      });
+      if (Object.keys(touchedPoNos).length) {
+        PropertiesService.getScriptProperties().setProperty('PURCHASE_CACHE_VERSION', String(Date.now()));
+      }
+    } catch (statusErr) {
+      postCommitWarnings.push('GRN posted, but PO status refresh needs retry.');
+      Logger.log('Post-GRN PO status refresh failed: ' + String(statusErr && statusErr.message || statusErr));
     }
-    refreshStockMV_(true);
+    try {
+      refreshStockMV_(true);
+    } catch (stockErr) {
+      postCommitWarnings.push('GRN posted, but stock summary refresh needs retry.');
+      Logger.log('Post-GRN stock refresh failed: ' + String(stockErr && stockErr.message || stockErr));
+    }
 
-    return {
+    return Object.assign({}, postedResult || {}, {
       ok: true,
-      duplicate: false,
-      grnNo: grnNo,
-      receiptNo: posted[0]?.receiptNo || '',
-      receipts: posted,
-      rateWarnings: rateWarnings
-    };
+      grnNo: postedResult && postedResult.grnNo || grnNo,
+      rateWarnings: rateWarnings,
+      systemWarnings: postCommitWarnings
+    });
   } finally {
     lock.releaseLock();
   }
@@ -25373,6 +29465,7 @@ function _invPreparedWOIssueRowMatchLabelSet_(row, snapshotJson) {
 
 function _invComputePreparedWOIssueRowIssuedQty_(row, issuedRows, snapshotJson) {
   const parsedTarget = parseStoredWOMaterialKey_(row.material_key || row.materialKey || '');
+  const targetMaterialKey = normalizeStoredWOMaterialKey_(row.material_key || row.materialKey || '');
   const targetLabels = _invPreparedWOIssueRowMatchLabelSet_(row, snapshotJson);
   const targetUom = _invNormalizeIssueUom_(row.uom || parsedTarget.uom || '');
   const targetGsm = String(row.gsm || parsedTarget.gsm || '').trim();
@@ -25381,8 +29474,14 @@ function _invComputePreparedWOIssueRowIssuedQty_(row, issuedRows, snapshotJson) 
   const approxEqual = function(a, b) {
     return Math.abs(Number(a || 0) - Number(b || 0)) <= 0.01;
   };
+  const hasExactMovement = (issuedRows || []).some(function(ledgerRow) {
+    return Number(ledgerRow.qty_out || ledgerRow.qty_in || 0) > 0 &&
+      normalizeStoredWOMaterialKey_(ledgerRow.remarks || '') === targetMaterialKey;
+  });
 
   return (issuedRows || []).reduce(function(sum, ledgerRow) {
+    const isExactMovement = normalizeStoredWOMaterialKey_(ledgerRow.remarks || '') === targetMaterialKey;
+    if (hasExactMovement && !isExactMovement) return sum;
     const parsed = parseStoredWOMaterialKey_(ledgerRow.remarks || '');
     const labelKey = String(parsed.label || '').trim().toUpperCase();
     if (!labelKey || !targetLabels[labelKey]) return sum;
@@ -25414,8 +29513,9 @@ function _invComputePreparedWOIssueRowIssuedQty_(row, issuedRows, snapshotJson) 
   }, 0);
 }
 
-function _invNormalizePreparedWOIssueRows_(preparedRows) {
+function _invNormalizePreparedWOIssueRows_(preparedRows, opts) {
   const rows = Array.isArray(preparedRows) ? preparedRows : [];
+  const trustDatabaseLedger = !!(opts && opts.trustDatabaseLedger === true);
   if (!rows.length) return rows;
 
   const woNumbers = [...new Set(rows.map(function(row) {
@@ -25483,7 +29583,7 @@ function _invNormalizePreparedWOIssueRows_(preparedRows) {
     const woNo = String(row.wo_no || row.woNo || row.wo_number || '').trim();
     const snapshot = snapshotByWoNo[woNo] || {};
     const normalized = _invBuildNormalizedWOIssuePreparedRow_(row, snapshot);
-    if (_invIsFlexoSnapshot_(snapshot)) {
+    if (_invIsFlexoSnapshot_(snapshot) && !trustDatabaseLedger) {
       normalized.issued_qty = _invComputePreparedWOIssueRowIssuedQty_(
         normalized,
         issueRowsByWoNo[woNo] || [],
@@ -25602,12 +29702,14 @@ function invGetWorkOrderForIssueFast_(woNo) {
   const key = String(woNo || '').trim();
   if (!key) return null;
   try {
-    const rows = supabaseRpc_('inv_work_order_issue_detail_ui', {
+    const rows = supabaseRpc_('inv_work_order_issue_reconciled_ui', {
       p_wo_no: key
     }) || [];
     const list = Array.isArray(rows) ? rows : (rows.rows || []);
     if (!list.length) return null;
-    const preparedRows = _invNormalizePreparedWOIssueRows_(list);
+    const preparedRows = _invNormalizePreparedWOIssueRows_(list, {
+      trustDatabaseLedger: true
+    });
     const built = invBuildWorkOrdersForIssueFromPreparedRows_(preparedRows);
     if (built[0]) {
       built[0].detailLoaded = true;
@@ -25616,11 +29718,26 @@ function invGetWorkOrderForIssueFast_(woNo) {
     return null;
   } catch (err) {
     const msg = String(err && err.message || err || '');
-    if (msg.indexOf('inv_work_order_issue_detail_ui') === -1 &&
+    if (msg.indexOf('inv_work_order_issue_reconciled_ui') === -1 &&
         msg.indexOf('schema cache') === -1 &&
         msg.indexOf('Could not find') === -1 &&
         msg.indexOf('does not exist') === -1) {
-      Logger.log('WO issue detail fast path failed: ' + msg);
+      Logger.log('WO issue reconciled detail path failed: ' + msg);
+    }
+    try {
+      const rows = supabaseRpc_('inv_work_order_issue_detail_ui', {
+        p_wo_no: key
+      }) || [];
+      const list = Array.isArray(rows) ? rows : (rows.rows || []);
+      if (!list.length) return null;
+      const preparedRows = _invNormalizePreparedWOIssueRows_(list);
+      const built = invBuildWorkOrdersForIssueFromPreparedRows_(preparedRows);
+      if (built[0]) {
+        built[0].detailLoaded = true;
+        return built[0];
+      }
+    } catch (fallbackErr) {
+      Logger.log('WO issue legacy detail fallback failed: ' + String(fallbackErr && fallbackErr.message || fallbackErr || ''));
     }
     return null;
   }
@@ -25945,25 +30062,12 @@ function invListWOIssueVarianceJSON(opts) {
   const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
   let rows = [];
   try {
-    rows = supabaseRpc_('inv_wo_excess_issue_review_ui', {
-      p_search: request.search || null,
-      p_date_from: request.fromDate || null,
-      p_date_to: request.toDate || null,
-      p_review_filter: 'ALL',
-      p_limit: request.limit,
-      p_offset: request.offset
-    }) || [];
+    rows = _invFetchWOExcessIssueRowsPaged_('inv_wo_excess_issue_review_ui', request, 'ALL');
   } catch (err) {
     if (!_supabaseRelationMissing_(err, 'inv_wo_excess_issue_reviews') && String(err && err.message || err || '').indexOf('inv_wo_excess_issue_review_ui') === -1) {
       throw err;
     }
-    rows = supabaseRpc_('inv_wo_issue_variance_export_ui', {
-      p_search: request.search || null,
-      p_date_from: request.fromDate || null,
-      p_date_to: request.toDate || null,
-      p_limit: request.limit,
-      p_offset: request.offset
-    }) || [];
+    rows = _invFetchWOExcessIssueRowsPaged_('inv_wo_issue_variance_export_ui', request, '');
   }
   const out = _invMapWOExcessIssueRows_(rows);
   return {
@@ -25978,17 +30082,39 @@ function invListWOIssueVarianceJSON(opts) {
   };
 }
 
+function _invFetchWOExcessIssueRowsPaged_(rpcName, request, reviewFilter) {
+  const cap = Math.max(1, Number(request && request.limit || 50000) || 50000);
+  const pageSize = Math.min(1000, cap);
+  const startOffset = Math.max(0, Number(request && request.offset || 0) || 0);
+  const out = [];
+  let offset = startOffset;
+
+  while (out.length < cap) {
+    const take = Math.min(pageSize, cap - out.length);
+    const params = {
+      p_search: request.search || null,
+      p_date_from: request.fromDate || null,
+      p_date_to: request.toDate || null,
+      p_limit: take,
+      p_offset: offset
+    };
+    if (reviewFilter) params.p_review_filter = reviewFilter;
+
+    const response = supabaseRpc_(rpcName, params) || [];
+    const page = Array.isArray(response) ? response : (response.rows || []);
+    if (!page.length) break;
+    out.push.apply(out, page);
+    offset += page.length;
+    if (page.length < take) break;
+  }
+
+  return out;
+}
+
 function invListWOExcessIssueReviewJSON(opts) {
   const request = _invNormalizeWorkOrderIssueListOpts_(opts || {});
-  const reviewFilter = String(opts && opts.reviewFilter || 'PENDING').trim().toUpperCase() || 'PENDING';
-  const rows = supabaseRpc_('inv_wo_excess_issue_review_ui', {
-    p_search: request.search || null,
-    p_date_from: request.fromDate || null,
-    p_date_to: request.toDate || null,
-    p_review_filter: reviewFilter,
-    p_limit: request.limit,
-    p_offset: request.offset
-  }) || [];
+  const reviewFilter = String(opts && opts.reviewFilter || 'ALL').trim().toUpperCase() || 'ALL';
+  const rows = _invFetchWOExcessIssueRowsPaged_('inv_wo_excess_issue_review_ui', request, reviewFilter);
   return {
     ok: true,
     rows: _invMapWOExcessIssueRows_(rows),
@@ -26052,7 +30178,7 @@ function invGetWorkOrderForIssue(woNo) {
   };
 }
 
-function invPostIssue(payload) {
+function _invPostIssueAuthorized_(payload) {
   if (!payload.itemCode || !payload.qty)
     throw new Error('Item and qty required');
   const resolvedItem = payload.item || ensureInventoryItemExists_(payload.itemCode, {
@@ -26067,11 +30193,71 @@ function invPostIssue(payload) {
   throw new Error('Invalid quantity');
 
   const isDirect = !payload.workOrderNo || String(payload.workOrderNo).trim().toUpperCase() === 'DIRECT';
+  const transactionIntent = String(payload.transactionIntent || '').trim().toUpperCase();
+  if (isDirect && transactionIntent !== 'DIRECT_ISSUE') {
+    throw new Error('Direct issue transaction intent missing or invalid. Refresh and try again.');
+  }
+  if (!isDirect && transactionIntent !== 'WO_ISSUE') {
+    throw new Error('WO issue transaction intent missing or invalid. Refresh and try again.');
+  }
   const directIssueRef = String(payload.issueReference || payload.jobReference || payload.jobRef || '').trim();
 
   // 🔒 WO issue requires materialKey
   if (!isDirect && !payload.materialKey) {
     throw new Error('materialKey required for WO issue');
+  }
+
+  if (_invItemRequiresReelTracking_(resolvedItem)) {
+    if (isDirect) {
+      throw new Error('Kraft reels can be issued only against a work order');
+    }
+    const reelNo = String(payload.batchNo || '').trim();
+    if (!reelNo) {
+      throw new Error('Select the internal reel number before issuing kraft paper');
+    }
+    const reel = (supabaseSelect_('inv_lots', {
+      select: 'id,batch_no,qty_available,is_reel,reel_status,location',
+      filters: {
+        item_id: 'eq.' + resolvedItem.id,
+        batch_no: 'eq.' + reelNo
+      },
+      limit: 1
+    }) || [])[0];
+    if (!reel || reel.is_reel !== true) {
+      throw new Error('Selected batch is not an internal kraft reel');
+    }
+    const reelQty = Number(reel.qty_available || 0);
+    if (Math.abs(qty - reelQty) > 0.0001) {
+      throw new Error(
+        'A kraft reel must be issued in full. Selected reel balance is ' +
+        reelQty.toFixed(3) + ' KG'
+      );
+    }
+    const issueResult = supabaseRpc_('issue_kraft_reel', {
+      p_lot_id: reel.id,
+      p_wo_no: String(payload.workOrderNo || '').trim(),
+      p_material_key: String(payload.materialKey || '').trim(),
+      p_department: String(payload.department || '').trim(),
+      p_actor: String(payload.issuedBy || payload.createdBy || '').trim()
+    }) || { ok: true };
+    try {
+      supabaseRpc_('consume_work_order_stock_reservation', {
+        p_wo_number: String(payload.workOrderNo || '').trim(),
+        p_material_key: String(payload.materialKey || '').trim(),
+        p_item_id: resolvedItem.id,
+        p_qty: reelQty,
+        p_actor: String(payload.issuedBy || payload.createdBy || '').trim()
+      });
+    } catch (reservationErr) {
+      Logger.log(
+        'WO reservation consumption could not be finalized after reel issue ' +
+        payload.workOrderNo + ': ' +
+        String(reservationErr && reservationErr.message || reservationErr || '')
+      );
+    }
+    _invBumpStockSnapshotVersion_();
+    if (payload.skipStockRefresh !== true) refreshStockMV_();
+    return issueResult;
   }
 
   // WO over-issue is intentionally allowed after user confirmation in UI.
@@ -26105,11 +30291,37 @@ remarks: isDirect
   });
   invApplyPreparedLotIssue_(ledger?.id || null, allocationResult.item, allocations, 'ISSUE');
 
+  if (!isDirect) {
+    try {
+      supabaseRpc_('consume_work_order_stock_reservation', {
+        p_wo_number: String(payload.workOrderNo || '').trim(),
+        p_material_key: String(payload.materialKey || '').trim(),
+        p_item_id: allocationResult.item.id,
+        p_qty: qty,
+        p_actor: String(payload.issuedBy || payload.createdBy || '').trim()
+      });
+      _invBumpStockSnapshotVersion_();
+    } catch (reservationErr) {
+      Logger.log('WO reservation consumption could not be finalized after issue ' +
+        payload.workOrderNo + ': ' + String(reservationErr && reservationErr.message || reservationErr || ''));
+    }
+  }
+
   if (payload.skipStockRefresh !== true) {
     refreshStockMV_();
   }
 
   return { ok: true };
+}
+
+function invPostIssue(payload, token) {
+  const p = payload || {};
+  const user = _invRequireMaterialIssueAccess_(p, token);
+  const actor = _authActorName_(user);
+  return _invPostIssueAuthorized_(Object.assign({}, p, {
+    issuedBy: actor,
+    createdBy: actor
+  }));
 }
 
 function _invFindWOMaterialRequirement_(woNo, materialKey) {
@@ -26177,8 +30389,11 @@ function _invGetWOMaterialItemNetIssued_(payload, item) {
   }, 0);
 }
 
-function invPostWOReturn(payload) {
+function invPostWOReturn(payload, token) {
   const p = payload || {};
+  const user = _invRequireMaterialIssueAccess_(p, token);
+  const actor = _authActorName_(user);
+  const transactionIntent = String(p.transactionIntent || '').trim().toUpperCase();
   const woNo = String(p.workOrderNo || '').trim();
   const materialKey = String(p.materialKey || '').trim();
   const itemCode = String(p.itemCode || '').trim();
@@ -26188,6 +30403,9 @@ function invPostWOReturn(payload) {
   const batchNo = String(p.batchNo || '').trim();
 
   if (!woNo) throw new Error('Work order no required');
+  if (transactionIntent !== 'WO_RETURN') {
+    throw new Error('WO return transaction intent missing or invalid. Refresh and try again.');
+  }
   if (!materialKey) throw new Error('Material key required for WO return');
   if (!itemCode) throw new Error('Select Store Item');
   if (!(qty > 0)) throw new Error('Enter valid return quantity');
@@ -26209,6 +30427,29 @@ function invPostWOReturn(payload) {
   }
   if (qty > itemNetIssuedQty + 0.0001) {
     throw new Error('Return quantity cannot exceed this item net issued quantity (' + itemNetIssuedQty.toFixed(2) + ')');
+  }
+  if (_invItemRequiresReelTracking_(item)) {
+    if (!batchNo) throw new Error('Select the internal reel number being returned');
+    const reel = (supabaseSelect_('inv_lots', {
+      select: 'id,batch_no,is_reel,reel_status,assigned_wo_no,issued_gross_qty',
+      filters: {
+        item_id: 'eq.' + item.id,
+        batch_no: 'eq.' + batchNo
+      },
+      limit: 1
+    }) || [])[0];
+    if (!reel || reel.is_reel !== true) throw new Error('Selected batch is not an internal kraft reel');
+    const result = supabaseRpc_('return_kraft_reel_v2', {
+      p_lot_id: reel.id,
+      p_wo_no: woNo,
+      p_return_qty: qty,
+      p_process_waste_qty: Math.max(Number(p.processWasteQty || 0), 0),
+      p_reason: String(p.remarks || 'Stores WO return entry').trim(),
+      p_actor: actor
+    }) || { ok: true };
+    if (p.skipStockRefresh !== true) refreshStockMV_();
+    else _invBumpStockSnapshotVersion_();
+    return result;
   }
   const rate = _invGetWOReturnRate_(p, item);
   const returnRemarks = [
@@ -26249,15 +30490,18 @@ function invPostWOReturn(payload) {
   return { ok: true, returnNo: ledger?.id || '', batchNo: lot.batchNo || '' };
 }
 
-function invPostIssueBulk(input) {
+function invPostIssueBulk(input, token) {
   const opts = Array.isArray(input) ? {} : (input || {});
   const rows = Array.isArray(input) ? input : (Array.isArray(opts.rows) ? opts.rows : []);
+  const user = _invRequireMaterialIssueAccess_(opts, token);
+  const actor = _authActorName_(user);
   if (!Array.isArray(rows) || !rows.length) {
     throw new Error('No issue rows to post');
   }
 
   const grouped = {};
   const itemCache = {};
+  const atomicIssueRows = [];
   rows.forEach(function(row) {
     if (!row.itemCode || !row.qty) throw new Error('Item and qty required');
     const qty = Number(row.qty || 0);
@@ -26271,41 +30515,101 @@ function invPostIssueBulk(input) {
         allowAutoCreate: false
       });
     }
-    const key = itemCode + '||' + location;
+    const reelTracked = _invItemRequiresReelTracking_(itemCache[itemKey]);
+    const batchNo = String(row.batchNo || '').trim();
+    let reelLotId = '';
+    if (reelTracked && !batchNo) {
+      throw new Error('Select an internal reel number for ' + itemCode);
+    }
+    if (reelTracked) {
+      const reel = (supabaseSelect_('inv_lots', {
+        select: 'id,batch_no,qty_available,is_reel,reel_status,location',
+        filters: {
+          item_id: 'eq.' + itemCache[itemKey].id,
+          batch_no: 'eq.' + batchNo
+        },
+        limit: 1
+      }) || [])[0];
+      if (!reel || reel.is_reel !== true) {
+        throw new Error('Selected batch ' + batchNo + ' is not an internal kraft reel');
+      }
+      if (String(reel.reel_status || '').toUpperCase() !== 'AVAILABLE' &&
+          String(reel.reel_status || '').toUpperCase() !== 'RETURNED') {
+        throw new Error('Kraft reel ' + batchNo + ' is not available for issue');
+      }
+      if (String(reel.location || '').trim().toUpperCase() !== 'MAIN') {
+        throw new Error('Kraft reel ' + batchNo + ' must be in Main Stores before issue');
+      }
+      if (Math.abs(qty - Number(reel.qty_available || 0)) > 0.0001) {
+        throw new Error(
+          'Kraft reel ' + batchNo + ' must be issued in full (' +
+          Number(reel.qty_available || 0).toFixed(3) + ' KG)'
+        );
+      }
+      reelLotId = reel.id;
+    }
+    atomicIssueRows.push({
+      item_id: itemCache[itemKey].id,
+      item_code: itemCode,
+      qty: qty,
+      location: location,
+      batch_no: batchNo,
+      reel_lot_id: reelLotId,
+      transaction_intent: String(row.transactionIntent || '').trim().toUpperCase(),
+      wo_no: String(row.workOrderNo || '').trim(),
+      issue_reference: String(row.issueReference || row.jobReference || row.jobRef || '').trim(),
+      material_key: String(row.materialKey || '').trim(),
+      department: String(row.department || '').trim(),
+      remarks: String(row.remarks || '').trim()
+    });
+    const key = itemCode + '||' + location + '||' + (reelTracked ? batchNo : '');
     grouped[key] = (grouped[key] || 0) + qty;
   });
 
-  if (rows.length > 1) {
-    Object.keys(grouped).forEach(function(key) {
-      const parts = key.split('||');
-      const itemCode = String(parts[0] || '').trim();
-      const location = parts[1] || DEFAULT_LOCATION;
-      invAllocateLots_({
-        item: itemCache[itemCode.toUpperCase()],
-        itemCode: itemCode,
-        qty: grouped[key],
-        location: location
-      });
-    });
-  }
-
-  rows.forEach(function(row) {
-    const itemCode = String(row.itemCode || '').trim();
-    invPostIssue(Object.assign({}, row, {
+  Object.keys(grouped).forEach(function(key) {
+    const parts = key.split('||');
+    const itemCode = String(parts[0] || '').trim();
+    const location = parts[1] || DEFAULT_LOCATION;
+    const batchNo = String(parts[2] || '').trim();
+    invAllocateLots_({
       item: itemCache[itemCode.toUpperCase()],
-      skipStockRefresh: true
-    }));
+      itemCode: itemCode,
+      qty: grouped[key],
+      location: location,
+      batchNo: batchNo
+    });
   });
+
+  const result = supabaseRpc_('post_inventory_issue_bulk', {
+    p_rows: atomicIssueRows,
+    p_actor: actor
+  }) || { ok: true, count: rows.length };
+  atomicIssueRows.forEach(function(row) {
+    if (row.transaction_intent === 'WO_ISSUE') {
+      try {
+        supabaseRpc_('consume_work_order_stock_reservation', {
+          p_wo_number: row.wo_no,
+          p_material_key: row.material_key,
+          p_item_id: row.item_id,
+          p_qty: row.qty,
+          p_actor: actor
+        });
+      } catch (reservationErr) {
+        Logger.log(
+          'WO reservation consumption could not be finalized after atomic inventory issue ' +
+          row.wo_no + ': ' + String(reservationErr && reservationErr.message || reservationErr || '')
+        );
+      }
+    }
+  });
+  _invBumpStockSnapshotVersion_();
   if (opts.deferStockRefresh === true) {
     PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
   } else {
     refreshStockMV_(true);
   }
 
-  return {
-    ok: true,
-    count: rows.length
-  };
+  return result;
 }
 
 function invBuildRTSRemark_(payload) {
@@ -27400,6 +31704,7 @@ function _invStockSnapshotItemRows_(opts) {
 
 function _invReconcileStockRows_(rows, opts) {
   const out = Array.isArray(rows) ? rows.slice() : [];
+  const allocationMap = _invStockAllocationTotalsMap_(opts || {});
   const locationFilter = String(opts && opts.location || '').trim();
   const defaultLocation = locationFilter || DEFAULT_LOCATION || 'MAIN';
   const itemRows = _invStockSnapshotItemRows_(opts || {});
@@ -27415,6 +31720,11 @@ function _invReconcileStockRows_(rows, opts) {
     const loc = String(row.location || defaultLocation).trim().toUpperCase() || 'MAIN';
     const meta = itemMetaByCode[code] || {};
     const qty = Number(row.qty || 0);
+    const allocation = allocationMap['ID|' + String(row.itemId || row.item_id || meta.id || '') + '|' + loc] ||
+      allocationMap['CODE|' + code + '|' + loc] || { allocatedQty: 0, allocationCount: 0 };
+    const allocatedQty = Math.max(0, Number(allocation.allocatedQty || 0));
+    const freeStockQty = Math.max(0, qty - allocatedQty);
+    const overallocatedQty = Math.max(0, allocatedQty - qty);
     const dailyConsumption = Number(row.avgDailyConsumption || row.avg_daily_consumption || 0);
     const manualLeadRaw = meta.lead_time_days;
     const manualLead = manualLeadRaw === null || typeof manualLeadRaw === 'undefined' || manualLeadRaw === ''
@@ -27444,14 +31754,22 @@ function _invReconcileStockRows_(rows, opts) {
       moqQty: meta.moq_qty === null || typeof meta.moq_qty === 'undefined' ? '' : Number(meta.moq_qty),
       location: row.location || defaultLocation,
       qty: qty,
+      physicalStockQty: qty,
+      allocatedQty: allocatedQty,
+      freeStockQty: freeStockQty,
+      overallocatedQty: overallocatedQty,
+      allocationCount: Number(allocation.allocationCount || 0),
+      allocatedWorkOrders: allocation.workOrders || '',
+      allocationStatus: overallocatedQty > 0 ? 'OVER_ALLOCATED' :
+        (allocatedQty <= 0 ? 'FREE' : (freeStockQty <= 0 ? 'FULLY_ALLOCATED' : 'PARTIALLY_ALLOCATED')),
       avgRate: Number(row.avgRate || row.avgrate || row.avg_rate || 0),
       value: Number(row.value || 0),
       avgLeadTimeDays: Number(baseLead || 0),
       avgDailyConsumption: dailyConsumption,
       safetyFactor: Number(row.safetyFactor || row.safety_factor || 1.2),
       minimumStockLevel: msl,
-      mslStatus: qty < msl ? 'BELOW_MSL' : 'OK',
-      mslGap: Number((qty - msl).toFixed(2))
+      mslStatus: freeStockQty < msl ? 'BELOW_MSL' : 'OK',
+      mslGap: Number((freeStockQty - msl).toFixed(2))
     });
     existing[locationFilter ? (code + '|' + loc) : code] = true;
   });
@@ -27461,6 +31779,10 @@ function _invReconcileStockRows_(rows, opts) {
     if (!code) return;
     const key = locationFilter ? (code + '|' + defaultLocation.toUpperCase()) : code;
     if (existing[key]) return;
+    const zeroLocation = defaultLocation.toUpperCase();
+    const allocation = allocationMap['ID|' + String(item.id || '') + '|' + zeroLocation] ||
+      allocationMap['CODE|' + code + '|' + zeroLocation] || { allocatedQty: 0, allocationCount: 0 };
+    const allocatedQty = Math.max(0, Number(allocation.allocatedQty || 0));
     out.push({
       itemCode: item.item_code || '',
       itemName: item.item_name || '',
@@ -27475,6 +31797,13 @@ function _invReconcileStockRows_(rows, opts) {
       moqQty: item.moq_qty === null || typeof item.moq_qty === 'undefined' ? '' : Number(item.moq_qty),
       location: defaultLocation,
       qty: 0,
+      physicalStockQty: 0,
+      allocatedQty: allocatedQty,
+      freeStockQty: 0,
+      overallocatedQty: allocatedQty,
+      allocationCount: Number(allocation.allocationCount || 0),
+      allocatedWorkOrders: allocation.workOrders || '',
+      allocationStatus: allocatedQty > 0 ? 'OVER_ALLOCATED' : 'FREE',
       avgRate: 0,
       value: 0,
       ageingDays: null,
@@ -28057,7 +32386,38 @@ function _invReadReplenishmentRowsFromSupabase_(request) {
     p_alert: request && request.alert ? String(request.alert || '').trim() : null,
     p_limit: Math.max(1, Number(request && request.limit || 50000) || 50000)
   }) || [];
-  return rows.map(_invMapReplenishmentSqlRow_);
+  const allocationMap = _invStockAllocationTotalsMap_(request || {});
+  return rows.map(_invMapReplenishmentSqlRow_).map(function(row) {
+    const loc = String(row.location || DEFAULT_LOCATION || 'MAIN').trim().toUpperCase() || 'MAIN';
+    const code = String(row.itemCode || '').trim().toUpperCase();
+    const allocation = allocationMap['ID|' + String(row.itemId || '') + '|' + loc] ||
+      allocationMap['CODE|' + code + '|' + loc] || { allocatedQty: 0 };
+    const reservedQty = Math.max(0, Number(allocation.allocatedQty || 0));
+    const netAvailableQty = _invReplenishmentRound_(
+      Number(row.currentStockQty || 0) + Number(row.pipelineQty || 0) - reservedQty,
+      3
+    );
+    const shortageQty = _invReplenishmentQtyForUom_(
+      Math.max(0, Number(row.minimumStockLevel || 0) - netAvailableQty),
+      row.uom,
+      3
+    );
+    const suggestedPrQty = shortageQty > 0
+      ? _invReplenishmentQtyForUom_(Math.max(shortageQty, Number(row.moqQty || 0)), row.uom, 3)
+      : 0;
+    row.reservedQty = reservedQty;
+    row.freeStockQty = Math.max(0, Number(row.currentStockQty || 0) - reservedQty);
+    row.netAvailableQty = netAvailableQty;
+    row.shortageQty = shortageQty;
+    row.suggestedPrQty = suggestedPrQty;
+    row.canCreatePr = row.isActive && row.stockManaged &&
+      Number(row.effectiveLeadTimeDays || 0) > 0 &&
+      Number(row.avgDailyConsumption || 0) > 0 && suggestedPrQty > 0;
+    if (reservedQty > 0 && suggestedPrQty > 0) {
+      row.reason = 'PR required after active Work Order allocations';
+    }
+    return row;
+  });
 }
 
 function _invReplenishmentConsumptionMap_(itemIds, location, windowDays) {
@@ -28200,7 +32560,7 @@ function _invBuildReplenishmentRows_(opts) {
     const moqQty = _invReplenishmentQtyForUom_(rawMoqQty, row.uom, 3);
     const currentStockQty = Number(row.qty || 0);
     const coverage = coverageMap[itemCode] || { pipelineQty: 0, openPrQty: 0, openPoQty: 0, prNos: [], poRefs: [] };
-    const reservedQty = 0;
+    const reservedQty = Math.max(0, Number(row.allocatedQty || 0));
     const rawMsl = effectiveLeadTimeDays * computedDaily * safetyFactor;
     const minimumStockLevel = integerUom
       ? _invReplenishmentQtyForUom_(rawMsl, row.uom, 0)
@@ -28248,6 +32608,7 @@ function _invBuildReplenishmentRows_(opts) {
       openPoQty: Number(coverage.openPoQty || 0),
       pipelineQty: Number(coverage.pipelineQty || 0),
       reservedQty: reservedQty,
+      freeStockQty: Math.max(0, currentStockQty - reservedQty),
       netAvailableQty: netAvailableQty,
       shortageQty: shortageQty,
       suggestedPrQty: suggestedPrQty,
@@ -28471,9 +32832,15 @@ function _fgGetDetailRowsFromView_() {
     order: 'stock_date.desc',
     limit: 5000
   }) || [];
+  const usage = _billingGetInvoiceUsageByLineIds_([...new Set(rows.map(function(row){ return row.so_line_id; }).filter(Boolean))]);
   return rows.map(function(row) {
     const stockDate = row.stock_date || '';
     const ageingDays = _fgDaysOld_(stockDate);
+    const netUsage = usage[String(row.so_line_id || '')];
+    const billedQty = netUsage ? _fgQty_(netUsage.billedQty) : _fgQty_(row.billed_qty);
+    const capacityQty = String(row.source_type || '').toUpperCase() === 'OPENING'
+      ? _fgQty_(row.opening_qty) : _fgQty_(row.packed_qty);
+    const availableQty = Math.max(capacityQty - billedQty - _fgQty_(row.adjusted_qty), 0);
     return {
       rowId: row.row_id || String(row.source_type || '') + '::' + String(row.pack_id || row.opening_id || ''),
       sourceType: row.source_type || '',
@@ -28491,9 +32858,9 @@ function _fgGetDetailRowsFromView_() {
       openingQty: _fgQty_(row.opening_qty),
       packedQty: _fgQty_(row.packed_qty),
       adjustedQty: _fgQty_(row.adjusted_qty),
-      availableQty: _fgQty_(row.available_qty),
-      billedQty: _fgQty_(row.billed_qty),
-      billableQty: _fgQty_(row.billable_qty),
+      availableQty: availableQty,
+      billedQty: billedQty,
+      billableQty: availableQty,
       stockDate: stockDate,
       stockDateLabel: _fgDateOnly_(stockDate),
       ageingDays: ageingDays,
@@ -29399,6 +33766,31 @@ function _billingGetInvoiceUsageByLineIds_(lineIds) {
       else totals[key].draftQty += qty;
       if (invoice.invoice_no) totals[key].references.push(invoice.invoice_no + ' [' + (invoice.status || 'DRAFT') + ']');
     });
+    try {
+      const adjustmentLines = _supabaseSelectByKeyInBatches_(
+        'billing_adjustment_note_lines','note_id,so_line_id,rebill_release_qty','so_line_id',ids
+      ) || [];
+      const noteIds = [...new Set(adjustmentLines.map(function(row){return row.note_id;}).filter(Boolean))];
+      const noteMap = {};
+      if (noteIds.length) {
+        (_supabaseSelectByKeyInBatches_(
+          'billing_adjustment_notes','id,note_no,note_type,status','id',noteIds
+        ) || []).forEach(function(row){noteMap[String(row.id)] = row;});
+      }
+      adjustmentLines.forEach(function(row) {
+        const key = String(row.so_line_id || '').trim();
+        const note = noteMap[String(row.note_id)] || {};
+        if (!key || String(note.status).toUpperCase() !== 'POSTED' ||
+            String(note.note_type).toUpperCase() !== 'CREDIT_NOTE') return;
+        if (!totals[key]) totals[key] = { billedQty:0,postedQty:0,draftQty:0,references:[] };
+        const release = _billingToNumber_(row.rebill_release_qty);
+        totals[key].billedQty = Math.max(totals[key].billedQty - release, 0);
+        totals[key].postedQty = Math.max(totals[key].postedQty - release, 0);
+        if (note.note_no) totals[key].references.push(note.note_no + ' [CREDIT_NOTE / POSTED]');
+      });
+    } catch (err) {
+      if (!_supabaseRelationMissing_(err, 'billing_adjustment_notes')) throw err;
+    }
     Object.keys(totals).forEach(function(key) {
       totals[key].billedQty = _billingRound2_(totals[key].billedQty);
       totals[key].postedQty = _billingRound2_(totals[key].postedQty);
@@ -29460,7 +33852,12 @@ function _billingListInvoicesFast_(params, token) {
       remarks: row.remarks || '',
       subtotal: _billingRound2_(row.subtotal),
       taxTotal: _billingRound2_(row.tax_total),
-      grandTotal: _billingRound2_(row.grand_total),
+      freightAmount: _billingRound2_(row.freight),
+      freightGstPct: _billingRound2_(row.freight_gst_pct),
+      packingAmount: _billingRound2_(row.packing),
+      otherAmount: _billingRound2_(row.other),
+      storedGrandTotal: _billingRound2_(row.stored_grand_total != null ? row.stored_grand_total : row.grand_total),
+      grandTotal: _billingRound2_(row.complete_amount != null ? row.complete_amount : row.grand_total),
       createdAt: row.created_at || '',
       postedAt: row.posted_at || '',
       sortTs: row.sort_ts || row.posted_at || row.created_at || '',
@@ -29516,12 +33913,22 @@ function _billingListInvoicesFast_(params, token) {
         'remarks.ilike.' + term
       ].join(',') + ')';
     }
-    const rows = supabaseSelect_('v_billing_document_register', {
-      select: 'id,invoice_no,invoice_date,document_type,client_code,client_name,status,billing_mode,total_qty,line_count,product_preview,remarks,subtotal,tax_total,grand_total,created_at,posted_at,sort_ts',
-      filters: filters,
-      order: 'invoice_date.desc,sort_ts.desc,invoice_no.desc',
-      limit: 5000
-    }) || [];
+    let rows;
+    try {
+      rows = supabaseSelect_('v_billing_document_register', {
+        select: 'id,invoice_no,invoice_date,document_type,client_code,client_name,status,billing_mode,total_qty,line_count,product_preview,remarks,subtotal,tax_total,grand_total,stored_grand_total,freight,freight_gst_pct,packing,other,complete_amount,created_at,posted_at,sort_ts',
+        filters: filters,
+        order: 'invoice_date.desc,sort_ts.desc,invoice_no.desc',
+        limit: 5000
+      }) || [];
+    } catch (viewColsErr) {
+      rows = supabaseSelect_('v_billing_document_register', {
+        select: 'id,invoice_no,invoice_date,document_type,client_code,client_name,status,billing_mode,total_qty,line_count,product_preview,remarks,subtotal,tax_total,grand_total,created_at,posted_at,sort_ts',
+        filters: filters,
+        order: 'invoice_date.desc,sort_ts.desc,invoice_no.desc',
+        limit: 5000
+      }) || [];
+    }
     return {
       ok: true,
       fastPath: 'v_billing_document_register',
@@ -30788,22 +35195,57 @@ function invGetGRNPrintData(grnNo) {
 
   const first = rows[0];
   const firstNote = invParseReceiptNote_(first.remarks);
-  const poNo = String(firstNote.PO || '').trim();
+  let structuredGrn = null;
+  let structuredReceiptRows = [];
+  let structuredReelRows = [];
+  try {
+    structuredGrn = (supabaseSelect_('purchase_grns', {
+      filters: { grn_no: 'eq.' + key },
+      limit: 1
+    }) || [])[0] || null;
+    structuredReceiptRows = supabaseSelect_('purchase_po_receipts', {
+      filters: { grn_no: 'eq.' + key },
+      limit: 1000
+    }) || [];
+    const structuredReceiptIds = structuredReceiptRows.map(function(row) {
+      return String(row.id || '').trim();
+    }).filter(Boolean);
+    if (structuredReceiptIds.length) {
+      try {
+        structuredReelRows = supabaseSelect_('purchase_grn_reels', {
+          select: 'id,receipt_id,lot_id,ledger_id,internal_reel_no,gross_weight_kg,master_width_mm,master_gsm',
+          filters: { receipt_id: _supabaseInFilter_(structuredReceiptIds) },
+          order: 'created_at.asc',
+          limit: 5000
+        }) || [];
+      } catch (reelErr) {
+        if (!_supabaseRelationMissing_(reelErr, 'purchase_grn_reels')) throw reelErr;
+      }
+    }
+  } catch (structuredErr) {
+    if (!_supabaseRelationMissing_(structuredErr, 'purchase_grns')) throw structuredErr;
+  }
+  const receiptByLedgerId = {};
+  structuredReceiptRows.forEach(function(receipt) {
+    const ledgerId = String(receipt.ledger_id || '').trim();
+    if (ledgerId) receiptByLedgerId[ledgerId] = receipt;
+  });
+  const poNo = String(structuredGrn && structuredGrn.po_no || firstNote.PO || '').trim();
   const poHeader = poNo ? _purchaseListPOHeaders_().find(function(row) {
     return String(row.poNo || '') === poNo;
   }) : null;
   const vendor = poHeader ? (_purchaseListVendors_().find(function(v) {
     return String(v.id || '') === String(poHeader.vendorId || '');
   }) || {}) : {};
-  const vendorName = String(firstNote.VENDOR || poHeader?.vendorName || vendor.vendorName || '').trim();
+  const vendorName = String(structuredGrn && structuredGrn.vendor_name || firstNote.VENDOR || poHeader?.vendorName || vendor.vendorName || '').trim();
   const vendorAddress = String(vendor.address || poHeader?.vendorAddress || '').trim();
   const vendorGstin = String(vendor.gstin || '').trim();
-  const invoiceNo = String(firstNote.INV || '').trim();
-  const paymentTerms = String(firstNote.PAY || '').trim();
-  const freightTerms = String(firstNote.FREIGHT || '').trim();
-  const deliveryTerms = String(firstNote.DELIVERY || '').trim();
-  const freightValue = Number(firstNote.FREIGHTVALUE || 0);
-  const freightGstPct = Number(firstNote.FREIGHTGST || 0);
+  const invoiceNo = String(structuredGrn && structuredGrn.invoice_no || firstNote.INV || '').trim();
+  const paymentTerms = String(structuredGrn && structuredGrn.payment_terms || firstNote.PAY || '').trim();
+  const freightTerms = String(structuredGrn && structuredGrn.freight_terms || firstNote.FREIGHT || '').trim();
+  const deliveryTerms = String(structuredGrn && structuredGrn.delivery_terms || firstNote.DELIVERY || '').trim();
+  const freightValue = Number(structuredGrn && structuredGrn.freight_value || firstNote.FREIGHTVALUE || 0);
+  const freightGstPct = Number(structuredGrn && structuredGrn.freight_gst_pct || firstNote.FREIGHTGST || 0);
   const freightGstValue = freightValue * freightGstPct / 100;
   const preparedBy = String(Session.getActiveUser?.().getEmail?.() || 'ERP User').trim();
   const missingItemIds = [...new Set(rows
@@ -30840,10 +35282,10 @@ function invGetGRNPrintData(grnNo) {
       poLineLookup[poKey + '||' + itemKey] = line;
     }
   });
-  const lines = rows.map(function(row, idx) {
+  let lines = rows.map(function(row, idx) {
     const item = row.inv_items || (row.item_id ? itemMap[row.item_id] : null) || {};
     const qty = Number(row.qty_in || 0);
-    const rate = Number(row.rate || 0);
+    const stockRate = Number(row.rate || 0);
     const value = Number(row.value || 0);
     const note = invParseReceiptNote_(row.remarks);
     const poNoForLine = String(note.PO || '').trim().toUpperCase();
@@ -30854,7 +35296,15 @@ function invGetGRNPrintData(grnNo) {
       poLineLookup[poNoForLine + '|' + refNoForLine + '|' + itemCodeForLine] ||
       poLineLookup[poNoForLine + '||' + itemCodeForLine] ||
       null;
-    let gstPct = Number(note.TAXPCT);
+    const receipt = receiptByLedgerId[String(row.id || '').trim()] || null;
+    const conversionFactor = Number(resolvedPoLine?.conversionFactor || 1) || 1;
+    const purchaseQty = receipt && receipt.purchase_qty != null
+      ? Number(receipt.purchase_qty || 0)
+      : Number((qty * conversionFactor).toFixed(6));
+    const purchaseRate = receipt && receipt.rate != null
+      ? Number(receipt.rate || 0)
+      : Number((conversionFactor > 0 ? stockRate / conversionFactor : stockRate) || 0);
+    let gstPct = receipt && receipt.tax_pct != null ? Number(receipt.tax_pct) : Number(note.TAXPCT);
     if (isNaN(gstPct)) gstPct = Number(resolvedPoLine?.taxPct);
     if (isNaN(gstPct)) gstPct = _purchaseItemTaxPct_(item);
     gstPct = Number(isNaN(gstPct) ? 0 : gstPct);
@@ -30863,13 +35313,19 @@ function invGetGRNPrintData(grnNo) {
     return {
       srNo: idx + 1,
       receiptNo: row.id,
-      prNo: row.ref_no || '',
+      prNo: resolvedPoLine?.sourceRef || row.ref_no || '',
       itemCode: item.item_code || '',
       itemName: item.item_name || '',
       category: item.category || '',
       uom: item.uom || '',
       qty: qty,
-      rate: rate,
+      stockQty: qty,
+      stockUom: resolvedPoLine?.stockUom || item.uom || '',
+      purchaseQty: purchaseQty,
+      purchaseUom: receipt?.purchase_uom || resolvedPoLine?.purchaseUom || resolvedPoLine?.stockUom || item.uom || '',
+      conversionFactor: conversionFactor,
+      rate: purchaseRate,
+      stockRate: stockRate,
       value: value,
       gstPct: gstPct,
       gstValue: gstValue,
@@ -30880,6 +35336,77 @@ function invGetGRNPrintData(grnNo) {
       remarks: String(note.REMARKS || '').trim()
     };
   });
+  if (structuredReceiptRows.length) {
+    const sourceLineByLedger = {};
+    lines.forEach(function(line) {
+      sourceLineByLedger[String(line.receiptNo || '').trim()] = line;
+    });
+    const reelRowsByReceipt = {};
+    structuredReelRows.forEach(function(reel) {
+      const receiptId = String(reel.receipt_id || '').trim();
+      if (!reelRowsByReceipt[receiptId]) reelRowsByReceipt[receiptId] = [];
+      reelRowsByReceipt[receiptId].push(reel);
+    });
+    lines = structuredReceiptRows.map(function(receipt, idx) {
+      const receiptId = String(receipt.id || '').trim();
+      const reelRows = reelRowsByReceipt[receiptId] || [];
+      const ledgerIds = reelRows.map(function(reel) {
+        return String(reel.ledger_id || '').trim();
+      }).filter(Boolean);
+      if (!ledgerIds.length && receipt.ledger_id) ledgerIds.push(String(receipt.ledger_id));
+      const relatedLines = ledgerIds.map(function(id) {
+        return sourceLineByLedger[id];
+      }).filter(Boolean);
+      const base = relatedLines[0] || sourceLineByLedger[String(receipt.ledger_id || '').trim()] || {};
+      const poLine = poLineById[String(receipt.po_line_id || '').trim()] || {};
+      const stockQty = Number(receipt.qty || relatedLines.reduce(function(sum, row) {
+        return sum + Number(row.stockQty || row.qty || 0);
+      }, 0));
+      const stockValue = relatedLines.length
+        ? relatedLines.reduce(function(sum, row) { return sum + Number(row.value || 0); }, 0)
+        : Number(stockQty * Number(base.stockRate || 0));
+      const gstPct = Number(receipt.tax_pct == null ? (base.gstPct || 0) : receipt.tax_pct);
+      const gstValue = Number((stockValue * gstPct / 100).toFixed(2));
+      const reelBreakdown = reelRows.map(function(reel) {
+        return {
+          reelNo: reel.internal_reel_no || '',
+          grossWeightKg: Number(reel.gross_weight_kg || 0),
+          widthMm: reel.master_width_mm == null ? '' : Number(reel.master_width_mm),
+          gsm: reel.master_gsm == null ? '' : Number(reel.master_gsm)
+        };
+      });
+      return {
+        srNo: idx + 1,
+        receiptNo: receiptId,
+        prNo: poLine.sourceRef || receipt.source_ref || base.prNo || '',
+        itemCode: poLine.itemCode || base.itemCode || '',
+        itemName: poLine.itemName || base.itemName || '',
+        category: base.category || '',
+        uom: base.uom || receipt.stock_uom || '',
+        qty: stockQty,
+        stockQty: stockQty,
+        stockUom: receipt.stock_uom || poLine.stockUom || base.stockUom || '',
+        purchaseQty: Number(receipt.purchase_qty == null ? stockQty : receipt.purchase_qty),
+        purchaseUom: receipt.purchase_uom || poLine.purchaseUom || base.purchaseUom || '',
+        conversionFactor: Number(poLine.conversionFactor || base.conversionFactor || 1),
+        rate: Number(receipt.rate == null ? (base.rate || 0) : receipt.rate),
+        stockRate: Number(stockQty > 0 ? stockValue / stockQty : (base.stockRate || 0)),
+        value: stockValue,
+        gstPct: gstPct,
+        gstValue: gstValue,
+        lineTotal: Number((stockValue + gstValue).toFixed(2)),
+        batchNo: reelBreakdown.length
+          ? reelBreakdown.map(function(reel) {
+              return reel.reelNo + ' (' + Number(reel.grossWeightKg || 0).toFixed(3) + ' KG)';
+            }).join(', ')
+          : (base.batchNo || ''),
+        reels: reelBreakdown,
+        department: base.department || '',
+        location: base.location || DEFAULT_LOCATION,
+        remarks: receipt.remarks || base.remarks || ''
+      };
+    });
+  }
 
   const totalQty = lines.reduce(function(sum, line) { return sum + Number(line.qty || 0); }, 0);
   const totalValue = lines.reduce(function(sum, line) { return sum + Number(line.value || 0); }, 0);
@@ -30891,14 +35418,14 @@ function invGetGRNPrintData(grnNo) {
     grn: {
       grnNo: key,
       documentNo: key,
-      date: first.created_at || '',
+      date: structuredGrn && structuredGrn.created_at || first.created_at || '',
       type: 'GOODS_RECEIPT_NOTE',
       invoiceNo: invoiceNo,
       poNo: poNo,
       vendorName: vendorName,
       vendorAddress: vendorAddress,
       vendorGstin: vendorGstin,
-      location: first.location || DEFAULT_LOCATION,
+      location: structuredGrn && structuredGrn.location || first.location || DEFAULT_LOCATION,
       department: first.department || '',
       paymentTerms: paymentTerms,
       freightTerms: freightTerms,
@@ -30906,7 +35433,7 @@ function invGetGRNPrintData(grnNo) {
       freightValue: freightValue,
       freightGstPct: freightGstPct,
       freightGstValue: freightGstValue,
-      remarks: String(firstNote.REMARKS || '').trim()
+      remarks: String(structuredGrn && structuredGrn.remarks || firstNote.REMARKS || '').trim()
     },
     lines: lines,
     totals: {
@@ -31716,8 +36243,79 @@ function _billingSelectInvoiceLinesForExport_(invoiceIds) {
   return [];
 }
 
+function _billingCompleteDocumentAmount_(row) {
+  const subtotal = _billingRound2_((row && (row.subtotal != null ? row.subtotal : row.subtotalAmount)) || 0);
+  const taxTotal = _billingRound2_((row && (row.tax_total != null ? row.tax_total : row.taxTotal)) || 0);
+  const storedGrand = _billingRound2_((row && (row.grand_total != null ? row.grand_total : row.grandTotal)) || 0);
+  const freight = _billingRound2_((row && (row.freight != null ? row.freight : row.freightAmount)) || 0);
+  const packing = _billingRound2_((row && (row.packing != null ? row.packing : row.packingAmount)) || 0);
+  const other = _billingRound2_((row && (row.other != null ? row.other : row.otherAmount)) || 0);
+  const derived = _billingRound2_(subtotal + taxTotal + freight + packing + other);
+  if (derived > storedGrand + 0.01) return derived;
+  return storedGrand;
+}
+
+function _billingInvoiceChargeMap_(invoiceIds) {
+  const ids = (invoiceIds || []).map(function(id) {
+    return String(id || '').trim();
+  }).filter(Boolean);
+  const out = {};
+  if (!ids.length) return out;
+  const selects = [
+    'id,subtotal,tax_total,grand_total,freight,freight_gst_pct,packing,other',
+    'id,subtotal,tax_total,grand_total,freight,freight_gst_pct',
+    'id,subtotal,tax_total,grand_total,freight',
+    'id,subtotal,tax_total,grand_total'
+  ];
+  let rows = [];
+  for (var i = 0; i < selects.length; i++) {
+    try {
+      rows = _supabaseSelectByKeyInBatches_('invoices', selects[i], 'id', ids, 'invoice_date.desc', 40) || [];
+      break;
+    } catch (err) {
+      rows = [];
+    }
+  }
+  rows.forEach(function(row) {
+    const id = String(row.id || '').trim();
+    if (id) out[id] = row;
+  });
+  return out;
+}
+
+function _billingEnrichDocumentAmount_(row, chargeRow) {
+  const out = Object.assign({}, row || {});
+  const charge = chargeRow || {};
+  out.subtotal = _billingRound2_(charge.subtotal != null ? charge.subtotal : out.subtotal);
+  out.taxTotal = _billingRound2_(charge.tax_total != null ? charge.tax_total : out.taxTotal);
+  out.storedGrandTotal = _billingRound2_(charge.grand_total != null ? charge.grand_total : out.grandTotal);
+  out.freightAmount = _billingRound2_(charge.freight || out.freightAmount || 0);
+  out.freightGstPct = _billingRound2_(charge.freight_gst_pct || out.freightGstPct || 0);
+  out.packingAmount = _billingRound2_(charge.packing || out.packingAmount || 0);
+  out.otherAmount = _billingRound2_(charge.other || out.otherAmount || 0);
+  out.grandTotal = _billingCompleteDocumentAmount_({
+    subtotal: out.subtotal,
+    taxTotal: out.taxTotal,
+    grandTotal: out.storedGrandTotal,
+    freightAmount: out.freightAmount,
+    packingAmount: out.packingAmount,
+    otherAmount: out.otherAmount
+  });
+  return out;
+}
+
+function _billingEnrichDocumentAmounts_(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const chargeMap = _billingInvoiceChargeMap_(list.map(function(row) { return row && row.id; }));
+  return list.map(function(row) {
+    return _billingEnrichDocumentAmount_(row, chargeMap[String(row && row.id || '').trim()]);
+  });
+}
+
 function _billingBuildDivisionSummaryForExport_(lineRows, documentMap) {
   const byDivision = {};
+  const invoiceDivisionTotals = {};
+  const invoiceLineTotals = {};
   const totals = {
     division: 'TOTAL',
     documentLines: 0,
@@ -31728,10 +36326,13 @@ function _billingBuildDivisionSummaryForExport_(lineRows, documentMap) {
     taxableAmount: 0,
     taxAmount: 0,
     lineTotal: 0,
+    headerCharges: 0,
+    completeValue: 0,
     lastDocumentDate: ''
   };
   (lineRows || []).forEach(function(line) {
     const doc = documentMap[String(line.invoice_id || '')] || {};
+    const docId = String(line.invoice_id || '').trim();
     const division = String(line.division || '').trim() || 'Unassigned';
     if (!byDivision[division]) {
       byDivision[division] = {
@@ -31744,6 +36345,8 @@ function _billingBuildDivisionSummaryForExport_(lineRows, documentMap) {
         taxableAmount: 0,
         taxAmount: 0,
         lineTotal: 0,
+        headerCharges: 0,
+        completeValue: 0,
         lastDocumentDate: ''
       };
     }
@@ -31761,12 +36364,40 @@ function _billingBuildDivisionSummaryForExport_(lineRows, documentMap) {
       bucket.taxableAmount = _billingRound2_(bucket.taxableAmount + taxable);
       bucket.taxAmount = _billingRound2_(bucket.taxAmount + tax);
       bucket.lineTotal = _billingRound2_(bucket.lineTotal + lineTotal);
+      bucket.completeValue = _billingRound2_(bucket.completeValue + lineTotal);
       if (docNo) {
         bucket.documents[docNo] = true;
         if (docType === 'CHALLAN') bucket.challans[docNo] = true;
         else bucket.invoices[docNo] = true;
       }
       if (docDate && (!bucket.lastDocumentDate || docDate > bucket.lastDocumentDate)) bucket.lastDocumentDate = docDate;
+    });
+    if (docId) {
+      if (!invoiceDivisionTotals[docId]) invoiceDivisionTotals[docId] = {};
+      invoiceDivisionTotals[docId][division] = _billingRound2_((invoiceDivisionTotals[docId][division] || 0) + lineTotal);
+      invoiceLineTotals[docId] = _billingRound2_((invoiceLineTotals[docId] || 0) + lineTotal);
+    }
+  });
+
+  Object.keys(invoiceDivisionTotals).forEach(function(docId) {
+    const doc = documentMap[docId] || {};
+    const lineTotal = _billingRound2_(invoiceLineTotals[docId] || 0);
+    const completeTotal = _billingRound2_(doc.grandTotal || 0);
+    const headerExtra = Math.max(_billingRound2_(completeTotal - lineTotal), 0);
+    if (!(headerExtra > 0)) return;
+    const divisions = Object.keys(invoiceDivisionTotals[docId]);
+    let allocated = 0;
+    divisions.forEach(function(division, idx) {
+      const bucket = byDivision[division];
+      if (!bucket) return;
+      const isLast = idx === divisions.length - 1;
+      const share = lineTotal > 0 ? _billingRound2_((invoiceDivisionTotals[docId][division] || 0) / lineTotal) : (1 / divisions.length);
+      const amount = isLast ? _billingRound2_(headerExtra - allocated) : _billingRound2_(headerExtra * share);
+      allocated = _billingRound2_(allocated + amount);
+      bucket.headerCharges = _billingRound2_(bucket.headerCharges + amount);
+      bucket.completeValue = _billingRound2_(bucket.completeValue + amount);
+      totals.headerCharges = _billingRound2_(totals.headerCharges + amount);
+      totals.completeValue = _billingRound2_(totals.completeValue + amount);
     });
   });
   const rows = Object.keys(byDivision).sort().map(function(key) {
@@ -31781,6 +36412,8 @@ function _billingBuildDivisionSummaryForExport_(lineRows, documentMap) {
       taxableAmount: row.taxableAmount,
       taxAmount: row.taxAmount,
       lineTotal: row.lineTotal,
+      headerCharges: row.headerCharges,
+      completeValue: row.completeValue,
       lastDocumentDate: row.lastDocumentDate
     };
   });
@@ -31795,6 +36428,8 @@ function _billingBuildDivisionSummaryForExport_(lineRows, documentMap) {
       taxableAmount: totals.taxableAmount,
       taxAmount: totals.taxAmount,
       lineTotal: totals.lineTotal,
+      headerCharges: totals.headerCharges,
+      completeValue: totals.completeValue,
       lastDocumentDate: totals.lastDocumentDate
     });
   }
@@ -31806,7 +36441,7 @@ function billingExportDocumentRegisterExcel(params, token) {
   const p = _billingNormalizeRegisterParams_(params || {});
   const columnFilters = (params && params.columnFilters) || {};
   const register = billingListInvoices(p, token);
-  const documents = ((register && register.rows) || []).filter(function(row) {
+  const documents = _billingEnrichDocumentAmounts_((register && register.rows) || []).filter(function(row) {
     return _billingRegisterRowPassesColumnFilters_(row, columnFilters);
   });
   const documentMap = {};
@@ -31849,7 +36484,10 @@ function billingExportDocumentRegisterExcel(params, token) {
     { label:'Total Qty', type:'number' },
     { label:'Subtotal', type:'money' },
     { label:'Tax Total', type:'money' },
-    { label:'Grand Total', type:'money' },
+    { label:'Freight', type:'money' },
+    { label:'Packing', type:'money' },
+    { label:'Other', type:'money' },
+    { label:'Complete Amount', type:'money' },
     { label:'Remarks' },
     { label:'Posted At' }
   ];
@@ -31879,6 +36517,8 @@ function billingExportDocumentRegisterExcel(params, token) {
     { label:'SGST', type:'money' },
     { label:'IGST', type:'money' },
     { label:'Line Total', type:'money' },
+    { label:'Document Freight', type:'money' },
+    { label:'Document Complete Amount', type:'money' },
     { label:'Remarks' },
     { label:'Posted At' }
   ];
@@ -31891,7 +36531,9 @@ function billingExportDocumentRegisterExcel(params, token) {
     { label:'Qty', type:'number' },
     { label:'Taxable Amount', type:'money' },
     { label:'Tax Amount', type:'money' },
-    { label:'Document Value', type:'money' },
+    { label:'Line Value', type:'money' },
+    { label:'Allocated Header Charges', type:'money' },
+    { label:'Complete Value', type:'money' },
     { label:'Last Document Date', type:'date' }
   ];
 
@@ -31916,6 +36558,9 @@ function billingExportDocumentRegisterExcel(params, token) {
           _billingRound2_(row.totalQty || 0),
           _billingRound2_(row.subtotal || 0),
           _billingRound2_(row.taxTotal || 0),
+          _billingRound2_(row.freightAmount || 0),
+          _billingRound2_(row.packingAmount || 0),
+          _billingRound2_(row.otherAmount || 0),
           _billingRound2_(row.grandTotal || 0),
           row.remarks || '',
           row.postedAt || ''
@@ -31956,6 +36601,8 @@ function billingExportDocumentRegisterExcel(params, token) {
           _billingRound2_(line.sgst_amt || 0),
           _billingRound2_(line.igst_amt || 0),
           _billingRound2_(line.line_total != null ? line.line_total : taxable),
+          _billingRound2_(doc.freightAmount || 0),
+          _billingRound2_(doc.grandTotal || 0),
           doc.remarks || '',
           doc.postedAt || ''
         ];
@@ -31977,6 +36624,8 @@ function billingExportDocumentRegisterExcel(params, token) {
           row.taxableAmount,
           row.taxAmount,
           row.lineTotal,
+          row.headerCharges,
+          row.completeValue,
           row.lastDocumentDate
         ];
       })
@@ -32082,6 +36731,10 @@ function deletePostedInvoiceAdmin(invoiceId, token) {
   if (String(inv.status || '').toUpperCase() !== 'POSTED') {
     throw new Error('Only posted documents can be deleted from this action.');
   }
+  const hasAdjustments = supabaseRpc_('billing_invoice_has_adjustments', { p_invoice_id: invoiceId });
+  if (hasAdjustments === true || (Array.isArray(hasAdjustments) && hasAdjustments[0] === true)) {
+    throw new Error('This invoice has credit/debit note history and cannot be deleted. Cancel or reverse the adjustment first.');
+  }
 
   const lines = supabaseSelect_('invoice_lines', {
     filters: { invoice_id: 'eq.' + invoiceId }
@@ -32130,6 +36783,15 @@ function reopenPostedInvoiceAdmin(invoiceId, token) {
   if (!inv) throw new Error('Invoice not found');
   if (String(inv.status || '').toUpperCase() !== 'POSTED') {
     throw new Error('Only posted documents can be reopened for admin editing.');
+  }
+  try {
+    const hasAdjustments = supabaseRpc_('billing_invoice_has_posted_adjustments', { p_invoice_id: invoiceId });
+    if (hasAdjustments === true || (Array.isArray(hasAdjustments) && hasAdjustments[0] === true)) {
+      throw new Error('This invoice has posted credit/debit notes and cannot be reopened. Use another adjustment note.');
+    }
+  } catch (err) {
+    if (String(err && err.message || err).indexOf('cannot be reopened') !== -1) throw err;
+    console.warn('Unable to verify posted adjustment notes before invoice reopen', err);
   }
 
   const auditBefore = _billingAuditInvoiceSnapshot_(invoiceId);
@@ -32850,6 +37512,317 @@ function postInvoice(invoiceId) {
     pdfUrl: _billingBuildPrintUrl_(invoiceId, token, documentType),
     status: 'POSTED'
   };
+}
+
+// ===== BILLING CREDIT / DEBIT NOTES =====
+function _billingAdjustmentType_(value) {
+  const type = String(value || '').trim().toUpperCase();
+  if (type !== 'CREDIT_NOTE' && type !== 'DEBIT_NOTE') throw new Error('Select Credit Note or Debit Note.');
+  return type;
+}
+
+function _billingAdjustmentLabel_(type) {
+  return _billingAdjustmentType_(type) === 'CREDIT_NOTE' ? 'Credit Note' : 'Debit Note';
+}
+
+function _billingAdjustmentPrintUrl_(noteId, token) {
+  const qs = ['p=printadjustment', 'noteId=' + encodeURIComponent(noteId)];
+  if (token) qs.push('token=' + encodeURIComponent(token));
+  return ScriptApp.getService().getUrl() + '?' + qs.join('&');
+}
+
+function billingAdjustmentListInvoices(params, token) {
+  _requireModuleAccess_(token, 'BILLING', 'can_view');
+  const p = params || {};
+  const q = String(p.q || '').trim().toLowerCase();
+  const filters = { status: 'eq.POSTED' };
+  if (p.dateFrom) filters.invoice_date = 'gte.' + String(p.dateFrom);
+  if (p.dateTo) filters.invoice_date = 'lte.' + String(p.dateTo);
+  return (_supabaseSelectAllUnbounded_('invoices', {
+    select: 'id,invoice_no,invoice_date,document_type,client_code,client_name,bill_to_name,grand_total,posted_at',
+    filters: filters,
+    order: 'invoice_date.desc,posted_at.desc',
+    limit: 1000
+  }) || []).filter(function(row) {
+    if (_billingInferDocumentType_(row) !== 'INVOICE') return false;
+    if (!q) return true;
+    return [row.invoice_no,row.client_code,row.client_name,row.bill_to_name]
+      .join(' ').toLowerCase().indexOf(q) !== -1;
+  }).slice(0, 250).map(function(row) {
+    return {
+      id: row.id, invoiceNo: row.invoice_no || '', invoiceDate: row.invoice_date || '',
+      clientCode: row.client_code || '', clientName: row.client_name || row.bill_to_name || '',
+      grandTotal: _billingRound2_(row.grand_total), postedAt: row.posted_at || ''
+    };
+  });
+}
+
+function billingAdjustmentGetInvoice(invoiceId, token) {
+  _requireModuleAccess_(token, 'BILLING', 'can_view');
+  const payload = _invLoadInvoice_(invoiceId);
+  const inv = payload.inv || {};
+  if (String(inv.status || '').toUpperCase() !== 'POSTED' ||
+      _billingInferDocumentType_(inv) !== 'INVOICE') {
+    throw new Error('Credit/debit notes can only be raised against a posted invoice.');
+  }
+  const lines = payload.lines || [];
+  let creditedCharges = { taxable:0,cgst:0,sgst:0,igst:0 };
+  try {
+    const priorNotes = supabaseSelect_('billing_adjustment_notes', {
+      select:'note_type,status,charge_taxable_amount,charge_cgst_amt,charge_sgst_amt,charge_igst_amt',
+      filters:{original_invoice_id:'eq.'+invoiceId,status:'eq.POSTED'}
+    }) || [];
+    priorNotes.forEach(function(row) {
+      if (String(row.note_type).toUpperCase() !== 'CREDIT_NOTE') return;
+      creditedCharges.taxable += _billingToNumber_(row.charge_taxable_amount);
+      creditedCharges.cgst += _billingToNumber_(row.charge_cgst_amt);
+      creditedCharges.sgst += _billingToNumber_(row.charge_sgst_amt);
+      creditedCharges.igst += _billingToNumber_(row.charge_igst_amt);
+    });
+  } catch (err) {}
+  const balances = {};
+  if (lines.length) {
+    (_supabaseSelectByKeyInBatches_(
+      'v_billing_adjustment_line_balance',
+      'original_invoice_line_id,original_qty,original_taxable,credited_qty,released_qty,credited_taxable,debited_taxable,creditable_qty,creditable_taxable',
+      'original_invoice_line_id',
+      lines.map(function(row){ return row.id; }),
+      'original_invoice_line_id.asc'
+    ) || []).forEach(function(row){ balances[String(row.original_invoice_line_id)] = row; });
+  }
+  return {
+    invoiceId: inv.id, invoiceNo: inv.invoice_no || '', invoiceDate: inv.invoice_date || '',
+    clientCode: inv.client_code || '', clientName: inv.client_name || inv.bill_to_name || '',
+    clientGstin: inv.client_gst || inv.bill_to_gstin || '', clientState: inv.client_state || inv.bill_to_state || '',
+    billToName: inv.bill_to_name || '', billToAddress: inv.bill_to_address || '',
+    billToGstin: inv.bill_to_gstin || '', billToState: inv.bill_to_state || '',
+    currency: inv.currency || 'INR', grandTotal: _billingRound2_(inv.grand_total),
+    originalChargeTaxable:_billingRound2_(_billingToNumber_(inv.freight)+_billingToNumber_(inv.packing)+_billingToNumber_(inv.other)),
+    originalChargeTax:_billingRound2_(Math.max(_billingToNumber_(inv.tax_total) -
+      lines.reduce(function(s,r){return s+_billingToNumber_(r.cgst_amt)+_billingToNumber_(r.sgst_amt)+_billingToNumber_(r.igst_amt);},0),0)),
+    creditableChargeTaxable:_billingRound2_(Math.max(_billingToNumber_(inv.freight)+_billingToNumber_(inv.packing)+_billingToNumber_(inv.other)-creditedCharges.taxable,0)),
+    creditedChargeTaxable:_billingRound2_(creditedCharges.taxable),
+    lines: lines.map(function(row) {
+      const b = balances[String(row.id)] || {};
+      return {
+        invoiceLineId: row.id, soId: row.so_id, soLineId: row.so_line_id,
+        soNumber: row.so_number || '', lineNo: Number(row.line_no || 0),
+        productCode: row.product_code || '', productName: row.product_name || '',
+        hsn: row.hsn || '', unit: row.unit || 'Nos', division: row.division || '',
+        originalQty: _billingRound3_(row.qty), rate: _billingRound3_(row.rate),
+        gstPct: _billingRound2_(row.gst_pct),
+        cgstPct:_billingRound2_(row.cgst_pct),sgstPct:_billingRound2_(row.sgst_pct),igstPct:_billingRound2_(row.igst_pct),
+        taxableAmount: _billingRound2_(row.line_amount || row.taxable_amount),
+        lineTotal: _billingRound2_(row.line_total),
+        creditedQty: _billingRound3_(b.credited_qty),
+        releasedQty: _billingRound3_(b.released_qty),
+        creditedTaxable: _billingRound2_(b.credited_taxable),
+        debitedTaxable: _billingRound2_(b.debited_taxable),
+        creditableQty: _billingRound3_(b.creditable_qty == null ? row.qty : b.creditable_qty),
+        creditableTaxable: _billingRound2_(b.creditable_taxable == null ? (row.line_amount || row.taxable_amount) : b.creditable_taxable)
+      };
+    })
+  };
+}
+
+function _billingAdjustmentNormalizePayload_(payload) {
+  const p = payload || {};
+  const type = _billingAdjustmentType_(p.noteType);
+  const treatment = String(p.noteTreatment || 'GST').trim().toUpperCase();
+  if (treatment !== 'GST' && treatment !== 'COMMERCIAL') throw new Error('Select a valid note treatment.');
+  const invoiceId = String(p.originalInvoiceId || '').trim();
+  if (!invoiceId) throw new Error('Select an original posted invoice.');
+  const dateText = String(p.noteDate || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateText) || isNaN(new Date(dateText + 'T00:00:00').getTime())) {
+    throw new Error('Enter a valid adjustment note date.');
+  }
+  const reasonCode = String(p.reasonCode || '').trim().toUpperCase();
+  if (!reasonCode) throw new Error('Adjustment reason is required.');
+  const rows = (Array.isArray(p.lines) ? p.lines : []).map(function(row) {
+    return {
+      invoiceLineId: String(row.invoiceLineId || '').trim(),
+      adjustmentQty: Math.max(_billingRound3_(row.adjustmentQty), 0),
+      rebillReleaseQty: Math.max(_billingRound3_(row.rebillReleaseQty), 0),
+      taxableAmount: Math.max(_billingRound2_(row.taxableAmount), 0),
+      reason: String(row.reason || '').trim()
+    };
+  }).filter(function(row) {
+    return row.invoiceLineId && (row.adjustmentQty > 0 || row.taxableAmount > 0);
+  });
+  const chargeTaxableAmount = Math.max(_billingRound2_(p.chargeTaxableAmount),0);
+  if (!rows.length && chargeTaxableAmount <= 0) {
+    throw new Error('Enter an adjustment against an invoice item or invoice-level charge.');
+  }
+  if (type === 'DEBIT_NOTE' && rows.some(function(row){ return row.rebillReleaseQty > 0; })) {
+    throw new Error('Debit notes cannot release quantity for rebilling.');
+  }
+  if (rows.some(function(row){ return row.rebillReleaseQty > row.adjustmentQty; })) {
+    throw new Error('Rebill release quantity cannot exceed adjustment quantity.');
+  }
+  rows.forEach(function(row) {
+    if (row.rebillReleaseQty > 0 && row.taxableAmount <= 0) {
+      throw new Error('A quantity release requires a positive taxable adjustment value.');
+    }
+  });
+  return {
+    noteType: type, noteTreatment:treatment, noteDate:dateText,
+    originalInvoiceId: invoiceId, reasonCode: reasonCode,
+    reasonText: String(p.reasonText || '').trim(), lines: rows,
+    chargeTaxableAmount:chargeTaxableAmount,
+    chargeCgstAmount:treatment === 'COMMERCIAL' ? 0 : Math.max(_billingRound2_(p.chargeCgstAmount),0),
+    chargeSgstAmount:treatment === 'COMMERCIAL' ? 0 : Math.max(_billingRound2_(p.chargeSgstAmount),0),
+    chargeIgstAmount:treatment === 'COMMERCIAL' ? 0 : Math.max(_billingRound2_(p.chargeIgstAmount),0)
+  };
+}
+
+function billingSaveAdjustmentDraft(noteId, payload, token) {
+  const user = _requireModuleAccess_(token, 'BILLING', 'can_edit');
+  const p = _billingAdjustmentNormalizePayload_(payload);
+  const source = billingAdjustmentGetInvoice(p.originalInvoiceId, token);
+  const sourceMap = {};
+  source.lines.forEach(function(row){ sourceMap[String(row.invoiceLineId)] = row; });
+  const lineRows = p.lines.map(function(entry) {
+    const row = sourceMap[entry.invoiceLineId];
+    if (!row) throw new Error('Selected line does not belong to the original invoice.');
+    if (p.noteType === 'CREDIT_NOTE' &&
+        (entry.adjustmentQty > row.creditableQty || entry.taxableAmount > row.creditableTaxable)) {
+      throw new Error('Credit exceeds the remaining balance for ' + (row.productName || row.productCode));
+    }
+    return {
+      original_invoice_line_id: row.invoiceLineId,
+      adjustment_qty: entry.adjustmentQty,
+      rebill_release_qty: entry.rebillReleaseQty,
+      taxable_amount: entry.taxableAmount,
+      reason: entry.reason
+    };
+  });
+  const actor = String(user.userId || user.displayName || Session.getActiveUser()?.getEmail?.() || 'user');
+  const result = supabaseRpc_('billing_save_adjustment_draft', {
+    p_note_id: String(noteId || '').trim() || null,
+    p_header: {
+      noteType:p.noteType,noteTreatment:p.noteTreatment,noteDate:p.noteDate,
+      originalInvoiceId:p.originalInvoiceId,reasonCode:p.reasonCode,reasonText:p.reasonText,
+      chargeTaxableAmount:p.chargeTaxableAmount,chargeCgstAmount:p.chargeCgstAmount,
+      chargeSgstAmount:p.chargeSgstAmount,chargeIgstAmount:p.chargeIgstAmount
+    },
+    p_lines: lineRows,
+    p_actor: actor
+  });
+  const out = Array.isArray(result) ? result[0] : result;
+  if (!out || !out.noteId) throw new Error('Adjustment draft was not saved.');
+  _auditTryInsertEvent_({
+    entityType:'BILLING_ADJUSTMENT',entityId:out.noteId,entityKey:out.noteNo || out.noteId,
+    action:noteId?'UPDATE_DRAFT':'CREATE_DRAFT',sourceModule:'BILLING',actor:user,
+    reason:p.reasonCode,afterJson:{header:p,lines:lineRows}
+  });
+  return Object.assign({},out,{printUrl:_billingAdjustmentPrintUrl_(out.noteId,token)});
+}
+
+function billingPostAdjustmentNote(noteId, token) {
+  const user = _requireAdmin_(token);
+  const actor = String(user.userId || user.displayName || Session.getActiveUser()?.getEmail?.() || 'system');
+  const result = supabaseRpc_('billing_post_adjustment_note', { p_note_id:noteId, p_actor:actor });
+  const out = Array.isArray(result) ? result[0] : result;
+  _auditTryInsertEvent_({
+    entityType:'BILLING_ADJUSTMENT',entityId:noteId,entityKey:(out && out.noteNo) || noteId,
+    action:'POST',sourceModule:'BILLING',actor:user,reason:'Adjustment note approved and posted',
+    afterJson:billingGetAdjustmentNote(noteId,token)
+  });
+  return Object.assign({}, out || {}, { printUrl:_billingAdjustmentPrintUrl_(noteId, token) });
+}
+
+function billingCancelAdjustmentNote(noteId, reason, token) {
+  const user = _requireAdmin_(token);
+  const actor = String(user.userId || user.displayName || Session.getActiveUser()?.getEmail?.() || 'system');
+  const before = billingGetAdjustmentNote(noteId, token);
+  const result = supabaseRpc_('billing_cancel_adjustment_note', {
+    p_note_id:noteId,p_actor:actor,p_reason:String(reason || '').trim()
+  });
+  const out = Array.isArray(result) ? result[0] : result;
+  _auditTryInsertEvent_({
+    entityType:'BILLING_ADJUSTMENT',entityId:noteId,entityKey:before.noteNo || noteId,
+    action:'CANCEL_POSTED',sourceModule:'BILLING',actor:user,reason:String(reason || '').trim(),
+    beforeJson:before,afterJson:out
+  });
+  return out;
+}
+
+function billingListAdjustmentNotes(params, token) {
+  _requireModuleAccess_(token, 'BILLING', 'can_view');
+  const p = params || {}, q = String(p.q || '').trim().toLowerCase(), filters = {};
+  if (p.status && String(p.status).toUpperCase() !== 'ALL') filters.status = 'eq.' + String(p.status).toUpperCase();
+  if (p.noteType && String(p.noteType).toUpperCase() !== 'ALL') filters.note_type = 'eq.' + _billingAdjustmentType_(p.noteType);
+  if (p.dateFrom) filters.note_date = 'gte.' + String(p.dateFrom);
+  if (p.dateTo) filters.note_date = 'lte.' + String(p.dateTo);
+  const rows = _supabaseSelectAllUnbounded_('billing_adjustment_notes', {
+    select:'id,note_no,note_type,note_treatment,note_date,original_invoice_id,client_code,client_name,status,reason_code,reason_text,subtotal,tax_total,grand_total,total_adjustment_qty,total_rebill_release_qty,posted_at,created_at,cancelled_at,cancellation_reason',
+    filters:filters, order:'note_date.desc,created_at.desc', limit:2000
+  }) || [];
+  const invoiceIds = [...new Set(rows.map(function(r){return r.original_invoice_id;}).filter(Boolean))];
+  const invoiceMap = {};
+  if (invoiceIds.length) (_supabaseSelectByKeyInBatches_('invoices','id,invoice_no,invoice_date','id',invoiceIds) || [])
+    .forEach(function(r){invoiceMap[String(r.id)] = r;});
+  return rows.filter(function(r){
+    if (!q) return true;
+    const inv = invoiceMap[String(r.original_invoice_id)] || {};
+    return [r.note_no,r.client_code,r.client_name,r.reason_code,r.reason_text,inv.invoice_no].join(' ').toLowerCase().indexOf(q) !== -1;
+  }).map(function(r){
+    const inv = invoiceMap[String(r.original_invoice_id)] || {};
+    return {id:r.id,noteNo:r.note_no,noteType:r.note_type,noteTreatment:r.note_treatment || 'GST',noteDate:r.note_date,
+      originalInvoiceId:r.original_invoice_id,originalInvoiceNo:inv.invoice_no || '',
+      originalInvoiceDate:inv.invoice_date || '',clientCode:r.client_code,clientName:r.client_name,
+      status:r.status,reasonCode:r.reason_code,reasonText:r.reason_text,
+      subtotal:_billingRound2_(r.subtotal),taxTotal:_billingRound2_(r.tax_total),
+      grandTotal:_billingRound2_(r.grand_total),adjustmentQty:_billingRound3_(r.total_adjustment_qty),
+      releasedQty:_billingRound3_(r.total_rebill_release_qty),postedAt:r.posted_at || '',
+      printUrl:_billingAdjustmentPrintUrl_(r.id,token)};
+  });
+}
+
+function billingGetAdjustmentNote(noteId, token) {
+  _requireModuleAccess_(token, 'BILLING', 'can_view');
+  const note = (supabaseSelect_('billing_adjustment_notes', { filters:{id:'eq.'+noteId}, limit:1 }) || [])[0];
+  if (!note) throw new Error('Adjustment note not found.');
+  const inv = billingAdjustmentGetInvoice(note.original_invoice_id, token);
+  const lines = supabaseSelect_('billing_adjustment_note_lines', {
+    filters:{note_id:'eq.'+noteId}, order:'line_no.asc,id.asc'
+  }) || [];
+  return {
+    noteId:note.id,noteNo:note.note_no,noteType:note.note_type,noteTreatment:note.note_treatment || 'GST',noteDate:note.note_date,
+    status:note.status,reasonCode:note.reason_code,reasonText:note.reason_text,
+    subtotal:_billingRound2_(note.subtotal),taxTotal:_billingRound2_(note.tax_total),
+    grandTotal:_billingRound2_(note.grand_total),adjustmentQty:_billingRound3_(note.total_adjustment_qty),
+    releasedQty:_billingRound3_(note.total_rebill_release_qty),postedAt:note.posted_at || '',
+    chargeTaxableAmount:_billingRound2_(note.charge_taxable_amount),
+    chargeTaxAmount:_billingRound2_(_billingToNumber_(note.charge_cgst_amt)+_billingToNumber_(note.charge_sgst_amt)+_billingToNumber_(note.charge_igst_amt)),
+    originalInvoice:inv,
+    lines:lines.map(function(r){return {
+      id:r.id,invoiceLineId:r.original_invoice_line_id,soNumber:r.so_number,lineNo:r.line_no,
+      productCode:r.product_code,productName:r.product_name,hsn:r.hsn,unit:r.unit,division:r.division,
+      originalQty:_billingRound3_(r.original_invoice_qty),adjustmentQty:_billingRound3_(r.adjustment_qty),
+      rebillReleaseQty:_billingRound3_(r.rebill_release_qty),rate:_billingRound3_(r.rate),
+      gstPct:_billingRound2_(r.gst_pct),taxableAmount:_billingRound2_(r.taxable_amount),
+      cgstAmt:_billingRound2_(r.cgst_amt),sgstAmt:_billingRound2_(r.sgst_amt),
+      igstAmt:_billingRound2_(r.igst_amt),lineTotal:_billingRound2_(r.line_total),reason:r.reason || ''
+    }}),
+    printUrl:_billingAdjustmentPrintUrl_(note.id,token)
+  };
+}
+
+function billingDeleteAdjustmentDraft(noteId, token) {
+  _requireModuleAccess_(token, 'BILLING', 'can_edit');
+  const note = (supabaseSelect_('billing_adjustment_notes', {
+    select:'id,status', filters:{id:'eq.'+noteId}, limit:1
+  }) || [])[0];
+  if (!note || String(note.status).toUpperCase() !== 'DRAFT') throw new Error('Only draft adjustment notes can be deleted.');
+  supabaseDelete_('billing_adjustment_note_lines',{note_id:'eq.'+noteId});
+  supabaseDelete_('billing_adjustment_notes',{id:'eq.'+noteId});
+  return {ok:true,noteId:noteId};
+}
+
+function billingGetAdjustmentPrintData(noteId, token) {
+  const note = billingGetAdjustmentNote(noteId, token);
+  return { company:_billingCompanyProfile_(), note:note };
 }
 
 function billingGetInvoicePrintData(invoiceId, token) {
@@ -33690,11 +38663,26 @@ function _prodCorrPaperIdentitySet_(snapshot) {
   return out;
 }
 
-function _invReceiptCommercialMismatch_(payload, liveLine) {
+function _invReceiptCommercialControl_(payload, liveLine) {
   const baseLine = liveLine || {};
-  const rateDiff = Math.abs(Number(payload.rate || 0) - Number(baseLine.rate || 0));
-  const taxDiff = Math.abs(Number(payload.taxPct || 0) - Number(baseLine.taxPct || 0));
-  return rateDiff > 0.0001 || taxDiff > 0.0001;
+  const policy = _purchaseNormalizeRatePolicy_(baseLine.ratePolicy || baseLine.rate_policy);
+  const governedTaxPct = Number(baseLine.taxPct || baseLine.tax_pct || 0);
+  const taxMismatch = policy === 'RATE_CONTROLLED' &&
+    Math.abs(Number(payload.taxPct || 0) - governedTaxPct) > 0.0001;
+  const ceilingRate = _purchaseEffectiveGRNCeiling_(baseLine);
+  return {
+    policy: policy,
+    ceilingRate: ceilingRate,
+    governedTaxPct: governedTaxPct,
+    taxMismatch: taxMismatch,
+    overrideRequired: policy === 'RATE_CONTROLLED' &&
+      _purchaseRateExceedsCeiling_(Number(payload.rate || 0), ceilingRate)
+  };
+}
+
+function _invReceiptCommercialMismatch_(payload, liveLine) {
+  const control = _invReceiptCommercialControl_(payload, liveLine);
+  return control.taxMismatch || control.overrideRequired;
 }
 
 function _invAssertReceiptHeaderMetadata_(payload) {
@@ -34840,7 +39828,7 @@ function _prodIsCorrugationPreparedSheetStage_(routingRow) {
   return name.indexOf('PRINT') !== -1 || name.indexOf('LAMINAT') !== -1 || name.indexOf('COAT') !== -1;
 }
 
-function _prodCorrugationPostPastingPlanQty_(routingList, currentIndex, categoryGroup, combinedTotals, stage1Plan) {
+function _prodCorrugationPostPastingPlanQty_(routingList, currentIndex, categoryGroup, combinedTotals, stage1Plan, snapshot, productTexts) {
   if (_prodNormalizeCategoryGroup_(categoryGroup) !== 'CORRUGATION') return null;
   const list = Array.isArray(routingList) ? routingList : [];
   const index = Number(currentIndex);
@@ -34852,16 +39840,23 @@ function _prodCorrugationPostPastingPlanQty_(routingList, currentIndex, category
     return null;
   }
 
-  // Corrugation layer stages can carry a multiple of the finished sheet count.
-  // Reset the first downstream operation to the last prepared top-sheet output.
+  const snap = snapshot || {};
+  const corrRows = Array.isArray(snap.corrugation) ? snap.corrugation : [];
+  const setCount = Math.max(_prodCorr2PlySetCountFromSnapshot_(snap, corrRows.length, productTexts), 1);
+  const sheetPastingOk = Math.max(Number((combinedTotals || {})[String(previous.id || '')] || 0), 0);
+  const pastedFinishedSheets = Math.floor(sheetPastingOk / setCount);
+  let preparedTopSheetOk = Number(stage1Plan || 0);
+
+  // Layer-stage output is recorded once per 2-ply set. Convert it back to
+  // finished sheets, then constrain downstream work by both available inputs.
   for (let i = index - 2; i >= 0; i -= 1) {
     const candidate = list[i] || {};
     if (!_prodIsCorrugationPreparedSheetStage_(candidate)) continue;
-    return Number((combinedTotals || {})[String(candidate.id || '')] || 0);
+    preparedTopSheetOk = Math.max(Number((combinedTotals || {})[String(candidate.id || '')] || 0), 0);
+    break;
   }
 
-  // Plain corrugation jobs have no printing/lamination/coating stage.
-  return Number(stage1Plan || 0);
+  return Math.min(preparedTopSheetOk, pastedFinishedSheets);
 }
 
 function _prodLastFlexoRmCarryQty_(routingList, currentIndex, combinedTotals, categoryGroup) {
@@ -34980,7 +39975,9 @@ function _prodGetPlannedAndProducedForEntry_(payload, routing, routingList, snap
       index,
       categoryGroup,
       combinedTotals,
-      stage1Plan
+      stage1Plan,
+      snapshot,
+      (jobs || []).map(function(job) { return job?.product_name || job?.productName || ''; })
     );
     const plannedQty = categoryGroup === 'FLEXO' && (_isInspectionSlittingProductionStage_(routing) || _isFlexoOfflineDieCutProductionStage_(routing, categoryGroup)) && index > 0
       ? _prodLastFlexoRmCarryQty_(list, index, combinedTotals, categoryGroup)
@@ -35120,8 +40117,16 @@ function _prodBuildCorr2PlyDetailInsert_(detail, productionEntryId, productionRo
   const flutingWidthMm = Number(d.flutingReelWidthMm || 0);
   const linerGsm = Number(d.linerActualGsm || group.linerGsm || 0);
   const flutingGsm = Number(d.flutingActualGsm || group.flutingGsm || 0);
-  const linerKg = _prodCorrRound3_(producedSheets * linerWidthMm * cutSizeMm * linerGsm / 1000000000);
-  const flutingKg = _prodCorrRound3_(producedSheets * flutingWidthMm * cutSizeMm * flutingGsm * _prodCorrFluteFactor_(group.flute) / 1000000000);
+  const deckleMm = Number(group.deckleMm || 0);
+  const linerAcross = Math.max(1, deckleMm > 0 ? Math.floor(linerWidthMm / deckleMm) : 1);
+  const flutingAcross = Math.max(1, deckleMm > 0 ? Math.floor(flutingWidthMm / deckleMm) : 1);
+  const linerWebCuts = Math.ceil(producedSheets / linerAcross);
+  const flutingWebCuts = Math.ceil(producedSheets / flutingAcross);
+  const linerKg = _prodCorrRound3_(linerWebCuts * linerWidthMm * cutSizeMm * linerGsm / 1000000000);
+  const flutingKg = _prodCorrRound3_(
+    flutingWebCuts * flutingWidthMm * cutSizeMm * flutingGsm *
+    _prodCorrFluteFactor_(group.flute) / 1000000000
+  );
   return {
     production_entry_id: productionEntryId || null,
     wo_id: routing.wo_id,
@@ -35137,7 +40142,11 @@ function _prodBuildCorr2PlyDetailInsert_(detail, productionEntryId, productionRo
     liner_actual_item_name: d.linerActualItemName || '',
     liner_actual_gsm: linerGsm || null,
     liner_reel_no: d.linerReelNo || '',
+    liner_reel_lot_id: d.linerReelLotId || null,
+    liner_issue_cycle_id: d.linerIssueCycleId || null,
     liner_reel_width_mm: linerWidthMm || null,
+    liner_across_count: linerAcross,
+    liner_trim_width_mm: Math.max(linerWidthMm - (linerAcross * deckleMm), 0),
     fluting_item_code: group.flutingItemCode || '',
     fluting_item_name: group.flutingItemName || '',
     fluting_wo_gsm: group.flutingGsm || null,
@@ -35145,7 +40154,11 @@ function _prodBuildCorr2PlyDetailInsert_(detail, productionEntryId, productionRo
     fluting_actual_item_name: d.flutingActualItemName || '',
     fluting_actual_gsm: flutingGsm || null,
     fluting_reel_no: d.flutingReelNo || '',
+    fluting_reel_lot_id: d.flutingReelLotId || null,
+    fluting_issue_cycle_id: d.flutingIssueCycleId || null,
     fluting_reel_width_mm: flutingWidthMm || null,
+    fluting_across_count: flutingAcross,
+    fluting_trim_width_mm: Math.max(flutingWidthMm - (flutingAcross * deckleMm), 0),
     deckle_mm: group.deckleMm || null,
     cut_size_mm: cutSizeMm || null,
     produced_sheets: producedSheets,
@@ -35155,6 +40168,39 @@ function _prodBuildCorr2PlyDetailInsert_(detail, productionEntryId, productionRo
     total_consumed_kg: _prodCorrRound3_(linerKg + flutingKg),
     created_by: createdBy
   };
+}
+
+function _prodResolveIssuedKraftReel_(reelNo, woId, materialRole) {
+  const number = String(reelNo || '').trim();
+  const role = String(materialRole || 'Material').trim();
+  if (!number) throw new Error(role + ' internal reel number is required');
+  const wo = (supabaseSelect_('work_orders', {
+    select: 'id,wo_number',
+    filters: { id: 'eq.' + String(woId || '').trim() },
+    limit: 1
+  }) || [])[0];
+  if (!wo) throw new Error('Work order not found for ' + role + ' reel validation');
+  const reel = (supabaseSelect_('inv_lots', {
+    select: 'id,batch_no,item_id,item_code,is_reel,reel_status,assigned_wo_no,issued_gross_qty,master_width_mm,master_gsm,current_issue_cycle_id',
+    filters: { batch_no: 'eq.' + number },
+    limit: 1
+  }) || [])[0];
+  if (!reel || reel.is_reel !== true) {
+    throw new Error(role + ' reel ' + number + ' is not an internal kraft reel');
+  }
+  if (String(reel.reel_status || '').toUpperCase() !== 'ISSUED') {
+    throw new Error(role + ' reel ' + number + ' is not currently issued');
+  }
+  if (String(reel.assigned_wo_no || '').trim() !== String(wo.wo_number || '').trim()) {
+    throw new Error(role + ' reel ' + number + ' is not issued to WO ' + wo.wo_number);
+  }
+  if (!(Number(reel.master_width_mm || 0) > 0) || !(Number(reel.master_gsm || 0) > 0)) {
+    throw new Error(role + ' reel ' + number + ' is missing master width/GSM snapshot');
+  }
+  if (!String(reel.current_issue_cycle_id || '').trim()) {
+    throw new Error(role + ' reel ' + number + ' has no active issue cycle. Run the kraft reel hardening migration.');
+  }
+  return reel;
 }
 
 function _prodIsCorrugationFinalRouting_(routing, routingList, categoryGroup) {
@@ -35275,7 +40321,9 @@ function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWo
         idx,
         categoryByWoId[woId],
         combinedTotals,
-        stage1Plan
+        stage1Plan,
+        snapshot,
+        jobs.map(function(job) { return job?.product_name || job?.productName || ''; })
       );
       const plannedQty = _prodNormalizeCategoryGroup_(categoryByWoId[woId]) === 'FLEXO' && (_isInspectionSlittingProductionStage_(routing) || _isFlexoOfflineDieCutProductionStage_(routing, categoryByWoId[woId])) && idx > 0
         ? _prodLastFlexoRmCarryQty_(routingList, idx, combinedTotals, categoryByWoId[woId])
@@ -35439,10 +40487,10 @@ function _prodRound3_(value) {
   return Number.isFinite(n) ? Number(n.toFixed(3)) : 0;
 }
 
-function _prodBuildCorrugationFgAllocations_(payload, jobs, goodQty, fgWeightKg) {
-  const qty = Math.max(Number(goodQty || 0), 0);
+function _prodBuildCorrugationFgAllocations_(payload, jobs, goodQty, fgWeightKg, routing, snapshot) {
+  const sourceQty = Math.max(Number(goodQty || 0), 0);
   const weight = Math.max(Number(fgWeightKg || 0), 0);
-  if (!(qty > 0)) return [];
+  if (!(sourceQty > 0)) return [];
 
   const soNumber = String(payload && payload.soNumber || '').trim();
   const lineNo = String(payload && payload.lineNo || '').trim();
@@ -35454,7 +40502,13 @@ function _prodBuildCorrugationFgAllocations_(payload, jobs, goodQty, fgWeightKg)
         String(job.line_no || '').trim() === lineNo;
     });
     if (!selectedJobs.length) {
-      selectedJobs = [{ so_number: soNumber, line_no: lineNo, product_name: payload.productName || '', qty: qty }];
+      selectedJobs = [{
+        so_number: soNumber,
+        line_no: lineNo,
+        product_name: payload.productName || '',
+        qty: sourceQty,
+        ups: Number(payload && payload.jobUps || 0)
+      }];
     }
   } else {
     selectedJobs = allJobs.filter(function(job) {
@@ -35463,26 +40517,63 @@ function _prodBuildCorrugationFgAllocations_(payload, jobs, goodQty, fgWeightKg)
   }
   if (!selectedJobs.length) throw new Error('Corrugation FG posting needs sales-order line details on the work order.');
 
+  const sourceUom = _opsPackingSourceUom_('CORRUGATION', routing || {});
   const positiveBase = selectedJobs.reduce(function(sum, job) {
     return sum + Math.max(Number(job.qty || 0), 0);
   }, 0);
   const equalBase = selectedJobs.length;
-  let qtyPosted = 0;
+  let directQtyPosted = 0;
+  const convertedRows = selectedJobs.map(function(job, idx) {
+    let jobSourceQty = sourceQty;
+    if (sourceUom === 'PCS' && selectedJobs.length > 1 && !(soNumber && lineNo)) {
+      const share = positiveBase > 0
+        ? Math.max(Number(job.qty || 0), 0) / positiveBase
+        : 1 / equalBase;
+      const isLast = idx === selectedJobs.length - 1;
+      jobSourceQty = isLast
+        ? Math.max(sourceQty - directQtyPosted, 0)
+        : _opsFloorFinishedQty_(sourceQty * share);
+      directQtyPosted += jobSourceQty;
+    }
+    const conversion = _opsResolveFinishedPackingQty_(
+      jobSourceQty,
+      'CORRUGATION',
+      routing || {},
+      job,
+      snapshot || {}
+    );
+    if (conversion.conversionStatus !== 'OK') {
+      throw new Error(
+        'Unable to convert final corrugation output for SO ' +
+        String(job.so_number || soNumber || '') + ' line ' +
+        String(job.line_no || lineNo || '') + ': ' +
+        conversion.conversionStatus
+      );
+    }
+    return {
+      job: job,
+      qty: Number(conversion.finishedQty || 0)
+    };
+  }).filter(function(row) {
+    return Number(row.qty || 0) > 0;
+  });
+  const convertedTotal = convertedRows.reduce(function(sum, row) {
+    return sum + Number(row.qty || 0);
+  }, 0);
+  if (!(convertedTotal > 0)) return [];
+
   let weightPosted = 0;
-  return selectedJobs.map(function(job, idx) {
-    const isLast = idx === selectedJobs.length - 1;
-    const share = positiveBase > 0
-      ? Math.max(Number(job.qty || 0), 0) / positiveBase
-      : 1 / equalBase;
-    const lineQty = isLast ? _prodRound3_(qty - qtyPosted) : _prodRound3_(qty * share);
+  return convertedRows.map(function(converted, idx) {
+    const job = converted.job || {};
+    const isLast = idx === convertedRows.length - 1;
+    const share = Number(converted.qty || 0) / convertedTotal;
     const lineWeight = isLast ? _prodRound3_(weight - weightPosted) : _prodRound3_(weight * share);
-    qtyPosted = _prodRound3_(qtyPosted + lineQty);
     weightPosted = _prodRound3_(weightPosted + lineWeight);
     return {
       soNumber: String(job.so_number || soNumber || '').trim(),
       lineNo: String(job.line_no || lineNo || '').trim(),
       productName: String(job.product_name || payload.productName || '').trim(),
-      qty: lineQty,
+      qty: Number(converted.qty || 0),
       weightKg: lineWeight
     };
   }).filter(function(row) {
@@ -35536,7 +40627,7 @@ function _prodGetSalesLineMapForFg_(allocations) {
   return out;
 }
 
-function _prodPostCorrugationFgCompletion_(payload, productionEntry, routing, routingList, jobs, createdBy) {
+function _prodPostCorrugationFgCompletion_(payload, productionEntry, routing, routingList, jobs, createdBy, snapshot) {
   const category = _prodNormalizeCategoryGroup_((payload && payload.categoryGroup) || '');
   if (!_prodIsCorrugationFinalRouting_(routing, routingList, category)) return;
 
@@ -35564,7 +40655,43 @@ function _prodPostCorrugationFgCompletion_(payload, productionEntry, routing, ro
     }
   }
 
-  const allocations = _prodBuildCorrugationFgAllocations_(payload || {}, jobs || [], goodQty, fgWeightKg);
+  const snap = snapshot || {};
+  let packingSourceQty = goodQty;
+  if (_prodIsCorrugationSheetPastingStage_(routing)) {
+    const activeRouting = (Array.isArray(routingList) ? routingList : []).filter(function(row) {
+      return !_prodIsExcludedProcess_(row?.process_name || row?.department || '');
+    }).sort(function(a, b) {
+      return Number(a?.sequence_no || 0) - Number(b?.sequence_no || 0);
+    });
+    const routingIndex = activeRouting.findIndex(function(row) {
+      return String(row?.id || '') === String(routing?.id || '');
+    });
+    const totals = _prodBuildTotalsFromEntryRows_(_prodGetProducedEntryRowsForRoutingIds_(activeRouting.map(function(row) {
+      return row.id;
+    }))).combinedTotals;
+    const corrRows = Array.isArray(snap.corrugation) ? snap.corrugation : [];
+    const setCount = Math.max(_prodCorr2PlySetCountFromSnapshot_(snap, corrRows.length, (jobs || []).map(function(job) {
+      return job?.product_name || '';
+    })), 1);
+    const pastedFinishedSheets = Math.floor(goodQty / setCount);
+    let preparedTopSheetOk = Number(_getStage1PlannedQtyFromSnapshot_(snap, {}, '') || 0);
+    for (let i = routingIndex - 1; i >= 0; i -= 1) {
+      const candidate = activeRouting[i] || {};
+      if (!_prodIsCorrugationPreparedSheetStage_(candidate)) continue;
+      preparedTopSheetOk = Math.max(Number(totals[String(candidate.id || '')] || 0), 0);
+      break;
+    }
+    packingSourceQty = Math.min(preparedTopSheetOk, pastedFinishedSheets);
+  }
+
+  const allocations = _prodBuildCorrugationFgAllocations_(
+    payload || {},
+    jobs || [],
+    packingSourceQty,
+    fgWeightKg,
+    routing || {},
+    snap
+  );
   const lineMap = _prodGetSalesLineMapForFg_(allocations);
   const nowIso = new Date().toISOString();
   const logRows = [];
@@ -35823,9 +40950,16 @@ function _prodGetCorrugationFgRepostContext_(entryRow, routingRow) {
     'wo_id',
     [woId]
   ) || [];
+  const workOrder = (_selectInBatches_(
+    'work_orders',
+    'id,snapshot_json',
+    'id',
+    [woId]
+  ) || [])[0] || {};
   return {
     routingList: routingList,
     jobs: jobs,
+    snapshot: workOrder.snapshot_json || {},
     categoryGroup: 'CORRUGATION'
   };
 }
@@ -36032,14 +41166,32 @@ function saveProductionBulk(entries, token) {
     if (payload.corrugation2PlyDetails) {
       const d = payload.corrugation2PlyDetails || {};
       if (!d.group || !d.group.groupKey) throw new Error('2 Ply detail group missing');
-      if (!d.linerActualItemCode && !d.linerActualItemName) throw new Error('Select liner material for 2 Ply entry');
-      if (!d.flutingActualItemCode && !d.flutingActualItemName) throw new Error('Select fluting material for 2 Ply entry');
-      if (!(Number(d.linerActualGsm || d.group.linerGsm || 0) > 0)) throw new Error('Enter liner actual GSM for 2 Ply entry');
-      if (!(Number(d.flutingActualGsm || d.group.flutingGsm || 0) > 0)) throw new Error('Enter fluting actual GSM for 2 Ply entry');
-      if (!(Number(d.linerReelWidthMm || 0) > 0)) throw new Error('Enter liner reel width for 2 Ply entry');
-      if (!(Number(d.flutingReelWidthMm || 0) > 0)) throw new Error('Enter fluting reel width for 2 Ply entry');
       if (!String(d.linerReelNo || '').trim()) throw new Error('Enter liner reel no for 2 Ply entry');
       if (!String(d.flutingReelNo || '').trim()) throw new Error('Enter fluting reel no for 2 Ply entry');
+      const linerReel = _prodResolveIssuedKraftReel_(d.linerReelNo, routing.wo_id, 'Liner');
+      const flutingReel = _prodResolveIssuedKraftReel_(d.flutingReelNo, routing.wo_id, 'Fluting');
+      if (String(linerReel.id) === String(flutingReel.id)) {
+        throw new Error('Liner and fluting must use different issued reels');
+      }
+      const requiredDeckleMm = Number(d.group.deckleMm || 0);
+      if (requiredDeckleMm > 0 && Number(linerReel.master_width_mm || 0) + 0.001 < requiredDeckleMm) {
+        throw new Error('Selected liner reel is narrower than the WO deckle');
+      }
+      if (requiredDeckleMm > 0 && Number(flutingReel.master_width_mm || 0) + 0.001 < requiredDeckleMm) {
+        throw new Error('Selected fluting reel is narrower than the WO deckle');
+      }
+      d.linerActualItemCode = linerReel.item_code;
+      d.linerActualItemName = d.linerActualItemName || linerReel.item_code;
+      d.linerReelLotId = linerReel.id;
+      d.linerIssueCycleId = linerReel.current_issue_cycle_id;
+      d.linerReelWidthMm = Number(linerReel.master_width_mm);
+      d.linerActualGsm = Number(linerReel.master_gsm);
+      d.flutingActualItemCode = flutingReel.item_code;
+      d.flutingActualItemName = d.flutingActualItemName || flutingReel.item_code;
+      d.flutingReelLotId = flutingReel.id;
+      d.flutingIssueCycleId = flutingReel.current_issue_cycle_id;
+      d.flutingReelWidthMm = Number(flutingReel.master_width_mm);
+      d.flutingActualGsm = Number(flutingReel.master_gsm);
     }
 
     const productionRow = {
@@ -36077,7 +41229,8 @@ function saveProductionBulk(entries, token) {
         payload: Object.assign({}, payload),
         routing: routing,
         routingList: (routingByWoId[woKey] || []).slice(),
-        jobs: (jobsByWoId[woKey] || []).slice()
+        jobs: (jobsByWoId[woKey] || []).slice(),
+        snapshot: snapshot
       });
     }
     inserts.push(productionRow);
@@ -36132,7 +41285,8 @@ function saveProductionBulk(entries, token) {
             ref.routing,
             ref.routingList,
             ref.jobs,
-            createdBy
+            createdBy,
+            ref.snapshot
           );
         });
       } else {
@@ -36291,15 +41445,19 @@ function _prodUpdateCorr2PlyDetailsForEntry_(entryId, producedQty, rejectedQty) 
   if (!id) return;
   try {
     const rows = supabaseSelect_('corrugation_2ply_entry_details', {
-      select: 'id,flute,cut_size_mm,liner_reel_width_mm,fluting_reel_width_mm,liner_actual_gsm,fluting_actual_gsm',
+      select: 'id,flute,cut_size_mm,liner_reel_width_mm,fluting_reel_width_mm,liner_actual_gsm,fluting_actual_gsm,liner_across_count,fluting_across_count',
       filters: { production_entry_id: 'eq.' + id },
       limit: 50
     }) || [];
     rows.forEach(function(row) {
       const producedSheets = Number(producedQty || 0);
       const rejectedSheets = Number(rejectedQty || 0);
-      const linerKg = _prodCorrRound3_(producedSheets * Number(row.liner_reel_width_mm || 0) * Number(row.cut_size_mm || 0) * Number(row.liner_actual_gsm || 0) / 1000000000);
-      const flutingKg = _prodCorrRound3_(producedSheets * Number(row.fluting_reel_width_mm || 0) * Number(row.cut_size_mm || 0) * Number(row.fluting_actual_gsm || 0) * _prodCorrFluteFactor_(row.flute || '') / 1000000000);
+      const linerAcross = Math.max(1, Number(row.liner_across_count || 1));
+      const flutingAcross = Math.max(1, Number(row.fluting_across_count || 1));
+      const linerWebCuts = Math.ceil(producedSheets / linerAcross);
+      const flutingWebCuts = Math.ceil(producedSheets / flutingAcross);
+      const linerKg = _prodCorrRound3_(linerWebCuts * Number(row.liner_reel_width_mm || 0) * Number(row.cut_size_mm || 0) * Number(row.liner_actual_gsm || 0) / 1000000000);
+      const flutingKg = _prodCorrRound3_(flutingWebCuts * Number(row.fluting_reel_width_mm || 0) * Number(row.cut_size_mm || 0) * Number(row.fluting_actual_gsm || 0) * _prodCorrFluteFactor_(row.flute || '') / 1000000000);
       supabaseUpdateMinimal_('corrugation_2ply_entry_details', {
         id: 'eq.' + String(row.id || '')
       }, {
@@ -36638,7 +41796,8 @@ function prodAdminUpdateEntry(payload, token) {
         routing,
         fgContext.routingList,
         fgContext.jobs,
-        changedBy
+        changedBy,
+        fgContext.snapshot
       );
     }
   } catch (err) {
@@ -36659,7 +41818,8 @@ function prodAdminUpdateEntry(payload, token) {
           routing,
           fgContext.routingList,
           fgContext.jobs,
-          changedBy
+          changedBy,
+          fgContext.snapshot
         );
       } catch (restoreErr) {
         rollbackError = restoreErr;
@@ -36735,7 +41895,8 @@ function prodAdminDeleteEntry(entryId, reason, token) {
           routing,
           fgContext.routingList,
           fgContext.jobs,
-          changedBy
+          changedBy,
+          fgContext.snapshot
         );
       } catch (restoreErr) {
         rollbackError = restoreErr;
@@ -36890,6 +42051,11 @@ this.listSOWithStatus = listSOWithStatus;
 this.listSOWithStatusEndpoint = listSOWithStatus;
 this.listFlexoWOStatus = listFlexoWOStatus;
 this.getWorkOrder = getWorkOrder;
+this.getWorkOrderStockAllocation = getWorkOrderStockAllocation;
+this.previewWorkOrderStockAllocation = previewWorkOrderStockAllocation;
+this.confirmWorkOrderStockRelease = confirmWorkOrderStockRelease;
+this.invGetStockAllocationDetail = invGetStockAllocationDetail;
+this.invReleaseStockAllocation = invReleaseStockAllocation;
 this.getFlexoWorkOrder = getFlexoWorkOrder;
 this.saveAndExportWO = saveAndExportWO;
 this.saveFlexoWorkOrder = saveFlexoWorkOrder;
@@ -36930,11 +42096,16 @@ this.purchaseSetVendorStatus = purchaseSetVendorStatus;
 this.purchaseListInventoryRequestsJSON = purchaseListInventoryRequestsJSON;
 this.purchaseListPOsJSON = purchaseListPOsJSON;
 this.purchaseListLeadTimeItemsJSON = purchaseListLeadTimeItemsJSON;
+this.purchaseListRateMasterSetupJSON = purchaseListRateMasterSetupJSON;
 this.purchaseListPOsForPRJSON = purchaseListPOsForPRJSON;
 this.purchaseCreatePO = purchaseCreatePO;
 this.purchaseCreateArtworkPO = purchaseCreateArtworkPO;
 this.purchaseUpdatePO = purchaseUpdatePO;
 this.purchaseSaveLeadTimeBulk = purchaseSaveLeadTimeBulk;
+this.purchaseSaveRateMasterSetup = purchaseSaveRateMasterSetup;
+this.purchaseSubmitRateOverrideRequest = purchaseSubmitRateOverrideRequest;
+this.listPurchaseRateOverrideApprovals = listPurchaseRateOverrideApprovals;
+this.decidePurchaseRateOverrideApproval = decidePurchaseRateOverrideApproval;
 this.purchaseCancelPOs = purchaseCancelPOs;
 this.purchaseShortClosePO = purchaseShortClosePO;
 this.purchaseShortClosePOLines = purchaseShortClosePOLines;
@@ -36948,6 +42119,8 @@ this.mastersGetBootstrap = mastersGetBootstrap;
 this.mastersGetClient = mastersGetClient;
 this.mastersSaveClient = mastersSaveClient;
 this.mastersToggleClientStatus = mastersToggleClientStatus;
+this.mastersExportClientsExcel = mastersExportClientsExcel;
+this.mastersExportVendorsExcel = mastersExportVendorsExcel;
 
   // ===== SALES ORDER APPROVAL =====
 this.getSalesOrderLinesForApproval = getSalesOrderLinesForApproval;
@@ -36959,6 +42132,11 @@ this.bulkUpdateSalesOrderAdvancePaymentReceived = bulkUpdateSalesOrderAdvancePay
 
 // ===== INVENTORY (Supabase Ledger v3) =====
 this.invSaveItem = invSaveItem;
+this.invListPurchaseRmTypesJSON = invListPurchaseRmTypesJSON;
+this.invListPurchaseRmTypeSetup = invListPurchaseRmTypeSetup;
+this.invSavePurchaseRmType = invSavePurchaseRmType;
+this.invDeletePurchaseRmType = invDeletePurchaseRmType;
+this.invSavePurchaseRatePolicies = invSavePurchaseRatePolicies;
 this.invListItemsJSON = invListItemsJSON;
 this.invSearchItemsJSON = invSearchItemsJSON;
 this.materialIndentCreate = materialIndentCreate;
@@ -36982,10 +42160,15 @@ this.invCreateReplenishmentPRs = invCreateReplenishmentPRs;
 this.invGetCurrentStockQty = invGetCurrentStockQty;
 
 this.invPostPurchaseReceipt = invPostPurchaseReceipt;
+this.invPreflightPurchaseReceipt = invPreflightPurchaseReceipt;
+this.purchaseSubmitGRNRateOverrideBatch = purchaseSubmitGRNRateOverrideBatch;
 this.invPostPurchaseReceiptBulk = invPostPurchaseReceiptBulk;
 this.invPostDirectReceipt = invPostDirectReceipt;
 this.invPostIssue = invPostIssue;
 this.invPostIssueBulk = invPostIssueBulk;
+this.invListKraftReelOpeningSourcesJSON = invListKraftReelOpeningSourcesJSON;
+this.invRegisterOpeningKraftReels = invRegisterOpeningKraftReels;
+this.invReverseKraftGRN = invReverseKraftGRN;
 this.invPostWOReturn = invPostWOReturn;
 this.invGetWorkOrderForIssue = invGetWorkOrderForIssue;
 this.invPostRTS = invPostRTS;
@@ -37031,6 +42214,15 @@ this.deletePostedInvoiceAdmin = deletePostedInvoiceAdmin;
 this.reopenPostedInvoiceAdmin = reopenPostedInvoiceAdmin;
 this.previewInvoicePDF = previewInvoicePDF;
 this.billingGetInvoicePrintData = billingGetInvoicePrintData;
+this.billingAdjustmentListInvoices = billingAdjustmentListInvoices;
+this.billingAdjustmentGetInvoice = billingAdjustmentGetInvoice;
+this.billingSaveAdjustmentDraft = billingSaveAdjustmentDraft;
+this.billingPostAdjustmentNote = billingPostAdjustmentNote;
+this.billingCancelAdjustmentNote = billingCancelAdjustmentNote;
+this.billingListAdjustmentNotes = billingListAdjustmentNotes;
+this.billingGetAdjustmentNote = billingGetAdjustmentNote;
+this.billingDeleteAdjustmentDraft = billingDeleteAdjustmentDraft;
+this.billingGetAdjustmentPrintData = billingGetAdjustmentPrintData;
 
 // ===== NPD / SAMPLING =====
 this.npdBootstrap = npdBootstrap;
@@ -37349,21 +42541,24 @@ function _reportsBuildPurchaseSection_() {
 }
 
 function _reportsBuildSalesBillingSection_() {
-  const invoiceHeaders = _reportsTrySelect_('v_billing_document_register', {
+  const invoiceHeaders = _billingEnrichDocumentAmounts_(_reportsTrySelect_('v_billing_document_register', {
     select: 'id,invoice_no,invoice_date,document_type,client_code,client_name,status,billing_mode,total_qty,line_count,product_preview,remarks,subtotal,tax_total,grand_total,created_at,posted_at,sort_ts,created_by',
     order: 'invoice_date.desc,sort_ts.desc,invoice_no.desc',
     limit: 500
   }).map(function(row) {
     return {
+      id: row.id || '',
       invoiceNo: row.invoice_no || '',
       invoiceDate: row.invoice_date || '',
       clientName: row.client_name || '',
       status: row.status || '',
+      subtotal: _reportsSafeNumber_(row.subtotal),
+      taxTotal: _reportsSafeNumber_(row.tax_total),
       grandTotal: _reportsSafeNumber_(row.grand_total),
       totalQty: _reportsSafeNumber_(row.total_qty),
       createdBy: row.created_by || ''
     };
-  });
+  }));
 
   const unbilledDispatchRows = _reportsTrySelect_('v_report_unbilled_dispatch', {
     select: 'so_line_id,so_number,line_no,product_name,dispatch_date,dispatched_qty,billed_qty,unbilled_qty',
@@ -37432,6 +42627,16 @@ this.adminSaveRolePermissions = adminSaveRolePermissions;
 this.adminListMachineHourRates = adminListMachineHourRates;
 this.adminSaveMachineHourRate = adminSaveMachineHourRate;
 this.adminDeactivateMachineHourRate = adminDeactivateMachineHourRate;
+this.adminListPackingBoxes = adminListPackingBoxes;
+this.adminSavePackingBox = adminSavePackingBox;
+this.adminSetPackingBoxActive = adminSetPackingBoxActive;
+this.adminSavePackingBoxSettings = adminSavePackingBoxSettings;
+this.adminListPurchaseRateSetup = adminListPurchaseRateSetup;
+this.adminSavePurchaseRmType = adminSavePurchaseRmType;
+this.adminDeletePurchaseRmType = adminDeletePurchaseRmType;
+this.adminSavePurchaseRateMaster = adminSavePurchaseRateMaster;
+this.adminDeactivatePurchaseRateMaster = adminDeactivatePurchaseRateMaster;
+this.adminSavePurchaseRatePolicies = adminSavePurchaseRatePolicies;
 this.erpGetBrandingAssets = erpGetBrandingAssets;
 this.adminBrandingListSetup = adminBrandingListSetup;
 this.adminBrandingSaveCompanyLogo = adminBrandingSaveCompanyLogo;
@@ -38712,9 +43917,10 @@ function _reportsSectionJobProfitability_(token, params) {
   }).map(function(row) {
     const processHours = _reportsSafeNumber_(row.process_hours);
     const processCost = _reportsSafeNumber_(row.process_cost);
+    const finishingCost = _reportsSafeNumber_(row.finishing_cost);
     const actualCostTillDate = _reportsSafeNumber_(row.actual_cost_till_date);
     const completeCostTillDate = row.complete_cost_till_date == null
-      ? _reportsRoundNumber_(actualCostTillDate + processCost, 2)
+      ? _reportsRoundNumber_(actualCostTillDate + processCost + finishingCost, 2)
       : _reportsSafeNumber_(row.complete_cost_till_date);
     const producedGoodsValue = _reportsSafeNumber_(row.produced_goods_value);
     const orderValue = _reportsSafeNumber_(row.order_value);
@@ -38773,6 +43979,19 @@ function _reportsSectionJobProfitability_(token, params) {
       processHoursSource: row.process_hours_source || '',
       processCostMachines: row.process_cost_machines || '',
       processCostAllocationBasis: row.process_cost_allocation_basis || '',
+      jobAreaSqIn: _reportsSafeNumber_(row.job_area_sq_in),
+      finishingBillingQty: _reportsSafeNumber_(row.finishing_billing_qty),
+      laminationType: row.lamination_type || '',
+      laminationSqIn: _reportsSafeNumber_(row.lamination_sq_in),
+      laminationRatePerSqIn: _reportsSafeNumber_(row.lamination_rate_per_sq_in),
+      laminationCost: _reportsSafeNumber_(row.lamination_cost),
+      laminationCostStatus: row.lamination_cost_status || 'NOT_APPLICABLE',
+      varnishType: row.varnish_type || '',
+      varnishSqIn: _reportsSafeNumber_(row.varnish_sq_in),
+      varnishRatePerSqIn: _reportsSafeNumber_(row.varnish_rate_per_sq_in),
+      varnishCost: _reportsSafeNumber_(row.varnish_cost),
+      varnishCostStatus: row.varnish_cost_status || 'NOT_APPLICABLE',
+      finishingCost: finishingCost,
       completeCostTillDate: completeCostTillDate,
       latestProductionStage: row.latest_production_stage || '',
       latestProductionMachine: row.latest_production_machine || '',
@@ -38825,6 +44044,10 @@ function _reportsSectionJobProfitability_(token, params) {
         'processHoursSource',
         'processCostMachines',
         'processCostAllocationBasis',
+        'laminationType',
+        'laminationCostStatus',
+        'varnishType',
+        'varnishCostStatus',
         'invoiceNos'
       ]) &&
       _reportsStatusPasses_(row, filters, [
@@ -38835,7 +44058,11 @@ function _reportsSectionJobProfitability_(token, params) {
         'costAllocationBasis',
         'rmMaterialStatus',
         'processCostStatus',
-        'processCostAllocationBasis'
+        'processCostAllocationBasis',
+        'laminationType',
+        'laminationCostStatus',
+        'varnishType',
+        'varnishCostStatus'
       ]);
   });
 
@@ -38947,14 +44174,15 @@ function _reportsSectionJobProfitability_(token, params) {
       orderValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.orderValue); }, 0) * 100) / 100,
       phase1Cost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.actualCostTillDate); }, 0) * 100) / 100,
       processCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.processCost); }, 0) * 100) / 100,
+      finishingCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.finishingCost); }, 0) * 100) / 100,
       completeCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.completeCostTillDate); }, 0) * 100) / 100,
       profitOnProducedValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.profitOnProducedComplete); }, 0) * 100) / 100
     },
     tables: [{
       key: 'jobprofitability',
       title: 'Job Profitability Report',
-      subtitle: 'Date range is based on Last Billing Date. Complete cost includes RM issued value, plate/die tooling cost, and MHR-based process cost.',
-      minWidth: 7200,
+      subtitle: 'Date range is based on Last Billing Date. Complete cost includes RM, tooling, MHR process, lamination, and job-card coating/varnish costs.',
+      minWidth: 8500,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -38975,6 +44203,7 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'jobLengthMm', label:'Job Length (mm)', type:'number' },
         { key:'jobWidthMm', label:'Job Width (mm)', type:'number' },
         { key:'jobAreaMm2', label:'Job Area (mm2)', type:'number' },
+        { key:'jobAreaSqIn', label:'Job Area (sq.in)', type:'number' },
         { key:'totalJobAreaMm2', label:'Total WO Job Area (mm2)', type:'number' },
         { key:'costAllocationPct', label:'Cost Allocation %', type:'number' },
         { key:'costAllocationBasis', label:'Cost Basis', type:'status' },
@@ -39007,6 +44236,18 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'processHoursSource', label:'Hours Source', type:'status' },
         { key:'processCostMachines', label:'Process Machines' },
         { key:'processCostAllocationBasis', label:'Process Cost Basis', type:'status' },
+        { key:'finishingBillingQty', label:'Finishing Billing Qty', type:'number' },
+        { key:'laminationType', label:'Lamination Type' },
+        { key:'laminationSqIn', label:'Lamination Sq.In', type:'number' },
+        { key:'laminationRatePerSqIn', label:'Lamination Rate / Sq.In', type:'number' },
+        { key:'laminationCost', label:'Lamination Cost', type:'money' },
+        { key:'laminationCostStatus', label:'Lamination Cost Status', type:'status' },
+        { key:'varnishType', label:'Coating / Varnish Type' },
+        { key:'varnishSqIn', label:'Varnish Sq.In', type:'number' },
+        { key:'varnishRatePerSqIn', label:'Varnish Rate / Sq.In', type:'number' },
+        { key:'varnishCost', label:'Varnish Cost', type:'money' },
+        { key:'varnishCostStatus', label:'Varnish Cost Status', type:'status' },
+        { key:'finishingCost', label:'Total Finishing Cost', type:'money' },
         { key:'completeCostTillDate', label:'Complete Cost Till Date', type:'money' },
         { key:'latestProductionStage', label:'Latest Production Stage' },
         { key:'latestProductionMachine', label:'Latest Machine' },
@@ -42431,8 +47672,8 @@ function _reportsSectionDelivery_(token, params) {
   };
 }
 
-function _reportsDivisionBillingViewSelect_() {
-  return [
+function _reportsDivisionBillingViewSelect_(includeHeaderAllocation) {
+  const cols = [
     'invoice_line_id',
     'invoice_id',
     'invoice_no',
@@ -42461,7 +47702,16 @@ function _reportsDivisionBillingViewSelect_() {
     'line_total',
     'expected_delivery',
     'final_delivery'
-  ].join(',');
+  ];
+  if (includeHeaderAllocation) {
+    cols.splice(cols.indexOf('expected_delivery'), 0,
+      'header_charge_allocation',
+      'complete_line_value',
+      'document_complete_amount',
+      'document_freight'
+    );
+  }
+  return cols.join(',');
 }
 
 function _reportsMapDivisionBillingRow_(row) {
@@ -42497,6 +47747,11 @@ function _reportsMapDivisionBillingRow_(row) {
     rate: _reportsSafeNumber_(row.rate),
     billedValue: billedValue,
     lineTotal: lineTotal,
+    headerChargeAllocation: _reportsSafeNumber_(row.header_charge_allocation),
+    completeLineValue: _reportsSafeNumber_(row.complete_line_value || row.line_total || row.billed_value),
+    documentCompleteAmount: _reportsSafeNumber_(row.document_complete_amount),
+    documentFreight: _reportsSafeNumber_(row.document_freight),
+    hasHeaderAllocation: Object.prototype.hasOwnProperty.call(row, 'document_complete_amount'),
     expectedDelivery: row.expected_delivery || '',
     finalDelivery: row.final_delivery || ''
   };
@@ -42505,13 +47760,27 @@ function _reportsMapDivisionBillingRow_(row) {
 function _reportsBuildDivisionBillingRowsFromView_(filters) {
   try {
     return _supabaseSelectAll_('v_report_billing_register', {
-      select: _reportsDivisionBillingViewSelect_(),
+      select: _reportsDivisionBillingViewSelect_(true),
       filters: _reportsApplyDateFilterToQuery_(filters, 'invoice_date'),
       order: 'invoice_date.desc,posted_at.desc,invoice_no.desc,so_number.asc,line_no.asc'
     }, 1000, 50000).map(_reportsMapDivisionBillingRow_);
   } catch (err) {
     if (_supabaseRelationMissing_(err, 'v_report_billing_register')) return null;
-    throw err;
+    const msg = String((err && err.message) || err || '').toLowerCase();
+    if (
+      msg.indexOf('header_charge_allocation') === -1 &&
+      msg.indexOf('complete_line_value') === -1 &&
+      msg.indexOf('document_complete_amount') === -1 &&
+      msg.indexOf('document_freight') === -1 &&
+      msg.indexOf('schema cache') === -1
+    ) {
+      throw err;
+    }
+    return _supabaseSelectAll_('v_report_billing_register', {
+      select: _reportsDivisionBillingViewSelect_(false),
+      filters: _reportsApplyDateFilterToQuery_(filters, 'invoice_date'),
+      order: 'invoice_date.desc,posted_at.desc,invoice_no.desc,so_number.asc,line_no.asc'
+    }, 1000, 50000).map(_reportsMapDivisionBillingRow_);
   }
 }
 
@@ -42671,7 +47940,80 @@ function _reportsFinalizeDivisionBillingRows_(rows, filters) {
 function _reportsBuildDivisionBillingRows_(filters) {
   const viewRows = _reportsBuildDivisionBillingRowsFromView_(filters);
   const rows = viewRows === null ? _reportsBuildDivisionBillingRowsLegacy_(filters) : viewRows;
-  return _reportsFinalizeDivisionBillingRows_(rows || [], filters);
+  const finalRows = _reportsFinalizeDivisionBillingRows_(rows || [], filters);
+  const viewHasAllocation = finalRows.length > 0 && finalRows.every(function(row) {
+    return row.hasHeaderAllocation === true;
+  });
+  return viewHasAllocation ? finalRows : _reportsApplyDivisionBillingHeaderCharges_(finalRows);
+}
+
+function _reportsApplyDivisionBillingHeaderCharges_(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const invoiceIds = [...new Set(list.map(function(row) {
+    return String(row.invoiceId || '').trim();
+  }).filter(Boolean))];
+  if (!invoiceIds.length) {
+    return list.map(function(row) {
+      const out = Object.assign({}, row);
+      out.headerChargeAllocation = _reportsSafeNumber_(out.headerChargeAllocation);
+      out.completeLineValue = _reportsRoundNumber_(_reportsSafeNumber_(out.completeLineValue || out.lineTotal), 2);
+      out.documentCompleteAmount = _reportsSafeNumber_(out.documentCompleteAmount);
+      out.documentFreight = _reportsSafeNumber_(out.documentFreight);
+      return out;
+    });
+  }
+
+  const chargeMap = _billingInvoiceChargeMap_(invoiceIds);
+  const byInvoice = {};
+  list.forEach(function(row, idx) {
+    const key = String(row.invoiceId || '').trim();
+    if (!key) return;
+    if (!byInvoice[key]) byInvoice[key] = { indexes: [], lineTotal: 0 };
+    byInvoice[key].indexes.push(idx);
+    byInvoice[key].lineTotal += _reportsSafeNumber_(row.lineTotal);
+  });
+
+  const outRows = list.map(function(row) {
+    const out = Object.assign({}, row);
+    out.headerChargeAllocation = 0;
+    out.completeLineValue = _reportsRoundNumber_(_reportsSafeNumber_(row.lineTotal), 2);
+    out.documentCompleteAmount = 0;
+    out.documentFreight = 0;
+    return out;
+  });
+
+  Object.keys(byInvoice).forEach(function(invoiceId) {
+    const group = byInvoice[invoiceId];
+    const charge = chargeMap[invoiceId] || {};
+    const document = _billingEnrichDocumentAmount_({
+      id: invoiceId,
+      subtotal: charge.subtotal,
+      taxTotal: charge.tax_total,
+      grandTotal: charge.grand_total
+    }, charge);
+    const completeAmount = _reportsSafeNumber_(document.grandTotal);
+    const freightAmount = _reportsSafeNumber_(document.freightAmount);
+    const lineTotal = _reportsRoundNumber_(group.lineTotal, 2);
+    const headerExtra = Math.max(_reportsRoundNumber_(completeAmount - lineTotal, 2), 0);
+
+    let allocated = 0;
+    group.indexes.forEach(function(rowIndex, pos) {
+      const row = outRows[rowIndex];
+      const isLast = pos === group.indexes.length - 1;
+      const base = _reportsSafeNumber_(row.lineTotal);
+      const share = lineTotal > 0 ? (base / lineTotal) : (1 / group.indexes.length);
+      const allocation = headerExtra > 0
+        ? (isLast ? _reportsRoundNumber_(headerExtra - allocated, 2) : _reportsRoundNumber_(headerExtra * share, 2))
+        : 0;
+      allocated = _reportsRoundNumber_(allocated + allocation, 2);
+      row.headerChargeAllocation = allocation;
+      row.completeLineValue = _reportsRoundNumber_(base + allocation, 2);
+      row.documentCompleteAmount = completeAmount;
+      row.documentFreight = freightAmount;
+    });
+  });
+
+  return outRows;
 }
 
 function _reportsBuildDivisionBillingSummaryRows_(rows) {
@@ -42682,6 +48024,8 @@ function _reportsBuildDivisionBillingSummaryRows_(rows) {
     billedQty: 0,
     billedValue: 0,
     lineTotal: 0,
+    headerChargeAllocation: 0,
+    completeLineValue: 0,
     documents: {},
     invoices: {},
     challans: {},
@@ -42698,6 +48042,8 @@ function _reportsBuildDivisionBillingSummaryRows_(rows) {
         billedQty: 0,
         billedValue: 0,
         lineTotal: 0,
+        headerChargeAllocation: 0,
+        completeLineValue: 0,
         documents: {},
         invoices: {},
         challans: {},
@@ -42716,6 +48062,10 @@ function _reportsBuildDivisionBillingSummaryRows_(rows) {
     totals.billedValue += _reportsSafeNumber_(row.billedValue);
     acc.lineTotal += _reportsSafeNumber_(row.lineTotal);
     totals.lineTotal += _reportsSafeNumber_(row.lineTotal);
+    acc.headerChargeAllocation += _reportsSafeNumber_(row.headerChargeAllocation);
+    totals.headerChargeAllocation += _reportsSafeNumber_(row.headerChargeAllocation);
+    acc.completeLineValue += _reportsSafeNumber_(row.completeLineValue || row.lineTotal);
+    totals.completeLineValue += _reportsSafeNumber_(row.completeLineValue || row.lineTotal);
     if (row.invoiceNo) {
       acc.documents[row.invoiceNo] = true;
       totals.documents[row.invoiceNo] = true;
@@ -42746,6 +48096,8 @@ function _reportsBuildDivisionBillingSummaryRows_(rows) {
       billedQty: Math.round(acc.billedQty * 100) / 100,
       billedValue: Math.round(acc.billedValue * 100) / 100,
       lineTotal: Math.round(acc.lineTotal * 100) / 100,
+      headerChargeAllocation: Math.round(acc.headerChargeAllocation * 100) / 100,
+      completeLineValue: Math.round(acc.completeLineValue * 100) / 100,
       lastDocumentDate: acc.lastDocumentDate
     };
   }).sort(function(a, b) {
@@ -42767,6 +48119,8 @@ function _reportsBuildDivisionBillingSummaryRows_(rows) {
       billedQty: Math.round(totals.billedQty * 100) / 100,
       billedValue: Math.round(totals.billedValue * 100) / 100,
       lineTotal: Math.round(totals.lineTotal * 100) / 100,
+      headerChargeAllocation: Math.round(totals.headerChargeAllocation * 100) / 100,
+      completeLineValue: Math.round(totals.completeLineValue * 100) / 100,
       lastDocumentDate: totals.lastDocumentDate
     });
   }
@@ -42791,7 +48145,7 @@ function _reportsSectionDivisionBilling_(token, params) {
       divisions: summaryRows.length,
       billedQty: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.billedQty); }, 0) * 100) / 100,
       billedValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.billedValue); }, 0) * 100) / 100,
-      documentValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.lineTotal); }, 0) * 100) / 100
+      documentValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.completeLineValue || row.lineTotal); }, 0) * 100) / 100
     },
     tables: [{
       key: 'divisionbillingsummary',
@@ -42808,7 +48162,9 @@ function _reportsSectionDivisionBilling_(token, params) {
         { key:'clients', label:'Clients', type:'number' },
         { key:'billedQty', label:'Doc Qty', type:'number' },
         { key:'billedValue', label:'Basic Value', type:'money' },
-        { key:'lineTotal', label:'Document Value', type:'money' },
+        { key:'lineTotal', label:'Line Value', type:'money' },
+        { key:'headerChargeAllocation', label:'Freight / Header Charges', type:'money' },
+        { key:'completeLineValue', label:'Complete Billing Value', type:'money' },
         { key:'lastDocumentDate', label:'Last Document', type:'date' }
       ],
       rows: summaryRows
@@ -42836,7 +48192,11 @@ function _reportsSectionDivisionBilling_(token, params) {
         { key:'billedQty', label:'Billed Qty', type:'number' },
         { key:'rate', label:'Rate', type:'money' },
         { key:'billedValue', label:'Basic Value', type:'money' },
-        { key:'lineTotal', label:'Invoice Value', type:'money' },
+        { key:'lineTotal', label:'Line Value', type:'money' },
+        { key:'headerChargeAllocation', label:'Freight Allocation', type:'money' },
+        { key:'completeLineValue', label:'Complete Line Value', type:'money' },
+        { key:'documentFreight', label:'Document Freight', type:'money' },
+        { key:'documentCompleteAmount', label:'Document Complete Amount', type:'money' },
         { key:'expectedDelivery', label:'Expected Delivery', type:'date' },
         { key:'finalDelivery', label:'Final Delivery', type:'date' }
       ],
@@ -42867,7 +48227,7 @@ function _reportsSectionBilling_(token, params) {
     return _reportsTextPasses_(row, filters, ['soNumber','productName']) &&
       _reportsStatusPasses_(row, filters, ['soNumber']);
   });
-  const invoiceRows = _reportsTrySelect_('v_billing_document_register', {
+  const invoiceRows = _billingEnrichDocumentAmounts_(_reportsTrySelect_('v_billing_document_register', {
     select: 'id,invoice_no,invoice_date,document_type,client_code,client_name,status,billing_mode,total_qty,line_count,product_preview,remarks,subtotal,tax_total,grand_total,created_at,posted_at,sort_ts,created_by',
     filters: _reportsApplyDateFilterToQuery_(filters, 'invoice_date'),
     order: 'invoice_date.desc,sort_ts.desc,invoice_no.desc',
@@ -42875,16 +48235,19 @@ function _reportsSectionBilling_(token, params) {
   }).map(function(row) {
     const documentType = _billingInferDocumentType_(row.document_type || row.invoice_no || '');
     return {
+      id: row.id || '',
       invoiceNo: row.invoice_no || '',
       invoiceDate: row.invoice_date || '',
       documentType: documentType,
       clientName: row.client_name || '',
       status: row.status || '',
+      subtotal: _reportsSafeNumber_(row.subtotal),
+      taxTotal: _reportsSafeNumber_(row.tax_total),
       grandTotal: _reportsSafeNumber_(row.grand_total),
       totalQty: _reportsSafeNumber_(row.total_qty),
       createdBy: row.created_by || ''
     };
-  }).filter(function(row) {
+  })).filter(function(row) {
     const pendingPass = filters.pendingOnly ? ['DRAFT'].indexOf(String(row.status || '').toUpperCase()) !== -1 : true;
     return pendingPass &&
       _reportsTextPasses_(row, filters, ['invoiceNo','clientName','createdBy']) &&
@@ -42925,7 +48288,10 @@ function _reportsSectionBilling_(token, params) {
         { key:'clientName', label:'Client' },
         { key:'status', label:'Status', type:'status' },
         { key:'totalQty', label:'Qty', type:'number' },
-        { key:'grandTotal', label:'Amount', type:'money' }
+        { key:'freightAmount', label:'Freight', type:'money' },
+        { key:'packingAmount', label:'Packing', type:'money' },
+        { key:'otherAmount', label:'Other', type:'money' },
+        { key:'grandTotal', label:'Complete Amount', type:'money' }
       ],
       rows: _reportsTake_(invoiceRows, 40)
     }]
@@ -42945,7 +48311,8 @@ function reportsGetOverviewData(params, token) {
 function reportsGetSectionData(section, params, token) {
   _reportsRequireSession_(token);
   const key = String(section || '').trim().toLowerCase();
-  const cacheKey = _reportsCacheKey_('SECTION_' + key, { params: params || {} });
+  const sectionCacheVersion = key === 'jobprofitability' ? 'V3' : 'V1';
+  const cacheKey = _reportsCacheKey_('SECTION_' + key + '_' + sectionCacheVersion, { params: params || {} });
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
   let result;
