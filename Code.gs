@@ -58,6 +58,23 @@ function _supabaseHttpErrorMessage_(code, responseText, response, retrySafe) {
     _supabaseResponseHeader_(response, 'cf-ray');
   const requestSuffix = requestId ? ' [Request ' + requestId + ']' : '';
 
+  let parsed = null;
+  try {
+    parsed = raw ? JSON.parse(raw) : null;
+  } catch (err) {}
+
+  // PostgREST returns database errors such as statement timeouts with HTTP 500.
+  // Preserve that structured detail instead of reporting a generic outage.
+  if (_supabaseTransientHttpCode_(status) && parsed && typeof parsed === 'object' && (parsed.message || parsed.code)) {
+    const databaseDetail = [
+      parsed.message,
+      parsed.details,
+      parsed.hint,
+      parsed.code ? 'Code: ' + parsed.code : ''
+    ].filter(Boolean).join(' | ');
+    return 'Supabase error ' + status + ': ' + String(databaseDetail || 'Database request failed').slice(0, 1800) + requestSuffix;
+  }
+
   if (_supabaseTransientHttpCode_(status)) {
     const action = retrySafe
       ? 'Please refresh and retry.'
@@ -65,10 +82,6 @@ function _supabaseHttpErrorMessage_(code, responseText, response, retrySafe) {
     return 'Supabase is temporarily unavailable (HTTP ' + status + '). ' + action + requestSuffix;
   }
 
-  let parsed = null;
-  try {
-    parsed = raw ? JSON.parse(raw) : null;
-  } catch (err) {}
   const detail = parsed && typeof parsed === 'object'
     ? [
         parsed.message,
@@ -906,7 +919,6 @@ const PAGE_MODULE_MAP = {
   'dispatch':'DISPATCH',
   'production':'PRODUCTION',
   'billing':'BILLING',
-  'adjustmentnotes':'BILLING',
   'printinvoice':'BILLING',
   'printchallan':'BILLING',
   'printadjustment':'BILLING',
@@ -6274,7 +6286,16 @@ function _purchaseCreatePOUnlocked_(payload, token) {
     postCommitWarning = 'PO created, but the purchase cache refresh marker needs retry.';
     Logger.log('Post-PO-create cache refresh failed: ' + String(cacheErr && cacheErr.message || cacheErr));
   }
-  return { ok: true, poNo: poNo, warning: postCommitWarning };
+  let savedRow = null;
+  if (payload.returnDetail !== false) {
+    try {
+      savedRow = purchaseGetPODetail(poNo, { forceRefresh: true }).row || null;
+    } catch (detailErr) {
+      postCommitWarning = postCommitWarning || 'PO created, but its refreshed detail will load separately.';
+      Logger.log('Post-PO-create detail refresh failed: ' + String(detailErr && detailErr.message || detailErr));
+    }
+  }
+  return { ok: true, poNo: poNo, row: savedRow, warning: postCommitWarning };
 }
 
 function purchaseCreateArtworkPO(payload, token) {
@@ -6524,7 +6545,7 @@ function _purchaseUpdatePOUnlocked_(payload, token) {
   const user = _requireModuleAccess_(_authTokenFromPayload_(payload, token), 'PURCHASE', 'can_edit');
   if (!payload || !payload.poNo) throw new Error('PO No is required');
 
-  const header = _purchaseListPOHeaders_().find(row => row.poNo === String(payload.poNo || '').trim());
+  const header = _purchaseGetPOHeaderByNo_(payload.poNo);
   if (!header) throw new Error('PO not found');
   if (_purchaseIsCancelledStatus_(header.status)) throw new Error('Cancelled purchase orders cannot be edited.');
 
@@ -6537,8 +6558,7 @@ function _purchaseUpdatePOUnlocked_(payload, token) {
   const deleteLineIds = [];
   const writeLines = [];
   const livePO = ((purchaseListPOsJSON({ poNo: header.poNo, forceRefresh: true }).rows || [])[0]) || { lines: [] };
-  const existingLines = _purchaseListPOLines_()
-    .filter(line => line.poNo === header.poNo)
+  const existingLines = _purchaseListPOLinesForPO_(header.poNo)
     .sort((a, b) => Number(a.lineNo || 0) - Number(b.lineNo || 0));
   const existingLiveMap = {};
   (livePO.lines || []).forEach(line => { existingLiveMap[String(line.id)] = line; });
@@ -6855,7 +6875,14 @@ function _purchaseUpdatePOUnlocked_(payload, token) {
     postCommitWarning = 'PO changes were saved, but the status/cache refresh needs retry.';
     Logger.log('Post-PO-update refresh failed: ' + String(postCommitErr && postCommitErr.message || postCommitErr));
   }
-  return { ok: true, poNo: header.poNo, warning: postCommitWarning };
+  let savedRow = null;
+  try {
+    savedRow = purchaseGetPODetail(header.poNo, { forceRefresh: true }).row || null;
+  } catch (detailErr) {
+    postCommitWarning = postCommitWarning || 'PO changes were saved, but its refreshed detail will load separately.';
+    Logger.log('Post-PO-update detail refresh failed: ' + String(detailErr && detailErr.message || detailErr));
+  }
+  return { ok: true, poNo: header.poNo, row: savedRow, warning: postCommitWarning };
 }
 
 function _purchaseUpdatePOStatus_(poNo) {
@@ -9318,7 +9345,7 @@ function listSOWithStatus(limit = 200, offset = 0) {
     const cacheKey = _workOrderQueueFastCacheKey_(request);
     if (!request.forceRefresh) {
       const cached = _getCachedJson_(cacheKey);
-      if (cached) return cached;
+      if (cached) return _decorateWorkOrderQueueWithPendingWastage_(cached);
     }
     let fastResult;
     try {
@@ -9333,6 +9360,7 @@ function listSOWithStatus(limit = 200, offset = 0) {
     } catch (processedErr) {
       Logger.log('Standard processed WO loader unavailable; keeping candidate-view processed rows: ' + processedErr.message);
     }
+    fastResult = _decorateWorkOrderQueueWithPendingWastage_(fastResult);
     _putCachedJson_(cacheKey, fastResult, 60);
     return fastResult;
   }
@@ -9341,7 +9369,7 @@ function listSOWithStatus(limit = 200, offset = 0) {
   const pageOffset = Math.max(0, Number(offset || 0) || 0);
   const cacheKey = _workOrderQueueCacheKey_(pageLimit, pageOffset);
   const cached = _getCachedJson_(cacheKey);
-  if (cached) return cached;
+  if (cached) return _decorateWorkOrderQueueWithPendingWastage_(cached);
   let result;
   try {
     result = _listSOWithStatusHybrid_(pageLimit, pageOffset);
@@ -9359,6 +9387,7 @@ function listSOWithStatus(limit = 200, offset = 0) {
   } catch (processedErr) {
     Logger.log('Standard processed WO loader unavailable for legacy request; keeping candidate-view processed rows: ' + processedErr.message);
   }
+  result = _decorateWorkOrderQueueWithPendingWastage_(result);
   _putCachedJson_(cacheKey, result, 60);
   return result;
 }
@@ -10007,6 +10036,42 @@ function _normalizeWOWastageText_(value) {
   return String(value == null ? '' : value).trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ');
 }
 
+function _decorateWorkOrderQueueWithPendingWastage_(queue) {
+  const result = queue && typeof queue === 'object' ? queue : { pending: [], processed: [] };
+  const pending = Array.isArray(result.pending) ? result.pending : [];
+  if (!pending.length) return result;
+  let requestRows;
+  try {
+    requestRows = _supabaseSelectAll_('work_order_wastage_approvals', {
+      select: 'id,request_ref,status,payload_json',
+      filters: { status: 'eq.PENDING' },
+      order: 'requested_at.desc'
+    }, 1000, 5000) || [];
+  } catch (err) {
+    if (_workOrderWastageApprovalTableMissing_(err)) return result;
+    Logger.log('Pending WO wastage request decoration skipped: ' + (err && err.message ? err.message : err));
+    return result;
+  }
+  const blocked = {};
+  requestRows.forEach(function(request) {
+    (Array.isArray(request.payload_json && request.payload_json.jobs) ? request.payload_json.jobs : []).forEach(function(job) {
+      const key = String(job && job.so || '').trim() + '||' + String(job && job.lineNo || '').trim();
+      if (key !== '||' && !blocked[key]) blocked[key] = request;
+    });
+  });
+  pending.forEach(function(row) {
+    const key = String(row && row.so || '').trim() + '||' + String(row && row.lineNo || '').trim();
+    const request = blocked[key];
+    if (!request) return;
+    row.canCreateWo = false;
+    row.wastageApprovalPending = true;
+    row.wastageApprovalRequestRef = request.request_ref || request.id || '';
+    row.approvalStage = 'WO wastage approval pending' +
+      (row.wastageApprovalRequestRef ? ' (' + row.wastageApprovalRequestRef + ')' : '');
+  });
+  return result;
+}
+
 function _workOrderUsesRunningMeterWastage_(payload) {
   const jobType = String(payload && payload.jobDetails && payload.jobDetails.type || '').trim().toUpperCase();
   const wastageBasis = String(payload && payload.wastage && payload.wastage.basis || '').trim().toUpperCase();
@@ -10028,6 +10093,16 @@ function _workOrderHasDigitalProductOrDivision_(payload) {
 function _workOrderWastageSheetBasis_(payload) {
   // Flexo wastage is stored as running meters/percent and must never enter sheet-slab approval.
   if (_workOrderUsesRunningMeterWastage_(payload)) return 0;
+  const papers = Array.isArray(payload && payload.papers) ? payload.papers : [];
+  const hasManualCoreSheets = papers.some(function(paper) {
+    return paper && (paper.sheetsManual === true || paper.sheets_manual === true);
+  });
+  if (hasManualCoreSheets) {
+    const manualCoreSheets = papers.reduce(function(sum, paper) {
+      return sum + Math.max(0, Number(paper && (paper.sheets || paper.coreSheets || 0)) || 0);
+    }, 0);
+    if (manualCoreSheets > 0) return Math.ceil(manualCoreSheets);
+  }
   const jobs = Array.isArray(payload && payload.jobs) ? payload.jobs : [];
   const groupUpsFromDetails = Number(payload && payload.jobDetails && payload.jobDetails.ups || 0) || 0;
   const groupUps = groupUpsFromDetails > 0
@@ -10036,11 +10111,25 @@ function _workOrderWastageSheetBasis_(payload) {
   const totalQty = jobs.reduce(function(sum, job) { return sum + (Number(job.qty || 0) || 0); }, 0);
   if (groupUps > 0 && totalQty > 0) return Math.ceil(totalQty / groupUps);
 
-  const papers = Array.isArray(payload && payload.papers) ? payload.papers : [];
   return papers.reduce(function(max, paper) {
     const sheets = Number(paper && (paper.sheets || paper.coreSheets || 0)) || 0;
     return sheets > max ? sheets : max;
   }, 0);
+}
+
+function _validateManualWorkOrderCoreSheets_(payload) {
+  if (_workOrderUsesRunningMeterWastage_(payload)) return;
+  const papers = Array.isArray(payload && payload.papers) ? payload.papers : [];
+  const hasManualCoreSheets = papers.some(function(paper) {
+    return paper && (paper.sheetsManual === true || paper.sheets_manual === true);
+  });
+  if (!hasManualCoreSheets) return;
+  const total = papers.reduce(function(sum, paper) {
+    return sum + Math.max(0, Number(paper && (paper.sheets || paper.coreSheets || 0)) || 0);
+  }, 0);
+  if (!(total > 0)) {
+    throw new Error('Manual Core Sheets total must be greater than zero. Enter the required sheets or restore the automatic WO Cart calculation.');
+  }
 }
 
 function _workOrderHasKraftPrimaryPaper_(payload) {
@@ -10097,25 +10186,28 @@ function _getDefaultWorkOrderWastageRule_(payload) {
     value = 10;
     label = 'Non-printed brown box';
   } else if (dripOff) {
-    if (sheets <= 1000) {
-      value = 150;
-      label = 'Drip Off: up to 1000 sheets';
-    } else if (sheets <= 3000) {
-      value = 200;
-      label = 'Drip Off: 1001 to 3000 sheets';
+    if (sheets <= 500) {
+      value = 130;
+      label = 'Drip Off: up to 500 sheets';
+    } else if (sheets <= 1000) {
+      value = 180;
+      label = 'Drip Off: 501 to 1000 sheets';
     } else {
-      value = 300;
-      label = 'Drip Off: above 3000 sheets';
+      value = 200;
+      label = 'Drip Off: above 1000 sheets';
     }
   } else if (sheets <= 500) {
     value = 100;
     label = 'Non Drip Off: up to 500 sheets';
   } else if (sheets <= 1000) {
-    value = 150;
+    value = 120;
     label = 'Non Drip Off: 501 to 1000 sheets';
+  } else if (sheets <= 3000) {
+    value = 150;
+    label = 'Non Drip Off: 1001 to 3000 sheets';
   } else {
     value = 200;
-    label = 'Non Drip Off: above 1000 sheets';
+    label = 'Non Drip Off: above 3000 sheets';
   }
 
   return { value: value, sheets: sheets, label: label };
@@ -10140,9 +10232,193 @@ function _workOrderWastageApprovalRequireSession_(token) {
   throw new Error('You do not have permission to approve Work Order wastage overrides.');
 }
 
-function _workOrderWastageSummary_(payload) {
+function _workOrderWastageUserId_(user) {
+  return String(user && (user.userId || user.email || user.id) || '').trim().toLowerCase();
+}
+
+function _workOrderWastageCanonicalJson_(value) {
+  if (Array.isArray(value)) {
+    return '[' + value.map(_workOrderWastageCanonicalJson_).join(',') + ']';
+  }
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map(function(key) {
+      return JSON.stringify(key) + ':' + _workOrderWastageCanonicalJson_(value[key]);
+    }).join(',') + '}';
+  }
+  return JSON.stringify(value == null ? null : value);
+}
+
+function _workOrderWastageHash_(value) {
+  return Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    _workOrderWastageCanonicalJson_(value)
+  ).map(function(byte) {
+    return ('0' + (byte & 0xff).toString(16)).slice(-2);
+  }).join('');
+}
+
+function _workOrderWastageRequestFingerprint_(payload, sourceWasExisting) {
+  const jobs = (Array.isArray(payload && payload.jobs) ? payload.jobs : []).map(function(job) {
+    return {
+      so: String(job && job.so || '').trim().toUpperCase(),
+      lineNo: String(job && job.lineNo || '').trim().toUpperCase(),
+      artworkNo: String(job && job.artworkNo || '').trim().toUpperCase()
+    };
+  }).sort(function(a, b) {
+    return (a.so + '|' + a.lineNo + '|' + a.artworkNo).localeCompare(b.so + '|' + b.lineNo + '|' + b.artworkNo);
+  });
+  return _workOrderWastageHash_({
+    scope: sourceWasExisting ? 'EXISTING_WO' : 'NEW_WO',
+    woNo: sourceWasExisting ? String(payload && payload.woNo || '').trim().toUpperCase() : '',
+    jobs: jobs
+  });
+}
+
+function _workOrderWastageStaleError_(message) {
+  const err = new Error(String(message || 'The Work Order request is no longer current.'));
+  err.code = 'WO_WASTAGE_STALE';
+  return err;
+}
+
+function _workOrderWastageIsTrue_(value) {
+  return value === true || String(value || '').trim().toLowerCase() === 'true';
+}
+
+function _validateWorkOrderWastageLiveState_(approvalRow, payload, summary) {
+  const requestSummary = summary || approvalRow && approvalRow.summary_json || {};
+  const requestedWoNo = String(payload && payload.woNo || '').trim();
+  const sourceWasExisting = requestSummary.sourceWasExisting === true;
+
+  if (approvalRow) {
+    const currentRule = _getDefaultWorkOrderWastageRule_(payload);
+    const requestCeiling = Number(approvalRow.default_wastage_sheets || 0) || 0;
+    const currentCeiling = currentRule && !currentRule.slabNotApplicable
+      ? (Number(currentRule.value || 0) || 0)
+      : null;
+    if (currentCeiling === null || currentCeiling !== requestCeiling) {
+      throw _workOrderWastageStaleError_(
+        'The wastage ceiling changed after this request was submitted' +
+        (currentCeiling === null ? '.' : ' from ' + requestCeiling + ' to ' + currentCeiling + ' sheets.') +
+        ' Review the revised slab and raise a fresh request only if the entered wastage still exceeds it.'
+      );
+    }
+    const requestedWastage = Number(approvalRow.requested_wastage_sheets || 0) || 0;
+    if (requestedWastage <= currentCeiling) {
+      throw _workOrderWastageStaleError_(
+        'The requested wastage is now within the current ceiling and no longer requires approval. Save the Work Order normally.'
+      );
+    }
+  }
+
+  if (requestedWoNo) {
+    const currentRows = supabaseSelect_('work_orders', {
+      select: 'id,wo_number,snapshot_json',
+      filters: { wo_number: 'eq.' + requestedWoNo },
+      limit: 1
+    }) || [];
+    const current = currentRows[0] || null;
+    const currentRequestId = String(current && current.snapshot_json && current.snapshot_json.wastageOverride && current.snapshot_json.wastageOverride.requestId || '').trim();
+    if (current && approvalRow && currentRequestId === String(approvalRow.id || '').trim()) {
+      return;
+    }
+    if (sourceWasExisting) {
+      if (!current) {
+        throw _workOrderWastageStaleError_('The Work Order being edited no longer exists. Create a fresh request.');
+      }
+      const expectedHash = String(requestSummary.sourceWoSnapshotHash || '').trim();
+      if (expectedHash && _workOrderWastageHash_(current.snapshot_json || {}) !== expectedHash) {
+        throw _workOrderWastageStaleError_('The Work Order changed after this wastage request was submitted. Review the latest WO and raise a fresh request.');
+      }
+      return;
+    }
+    if (current) {
+      throw _workOrderWastageStaleError_('The reserved Work Order number is already in use. Refresh and raise a fresh request.');
+    }
+  }
+
   const jobs = Array.isArray(payload && payload.jobs) ? payload.jobs : [];
-  return {
+  const soNumbers = [...new Set(jobs.map(function(job) {
+    return String(job && job.so || '').trim();
+  }).filter(Boolean))];
+  const candidateRows = _fetchWorkOrderCandidateRowsBySoNumbers_(
+    soNumbers,
+    _workOrderQueueSelect_(),
+    'so_number.asc,line_no.asc'
+  ) || [];
+  const candidateMap = {};
+  candidateRows.forEach(function(row) {
+    const key = String(row.so_number || '').trim() + '||' + String(row.line_no || '').trim();
+    if (key !== '||') candidateMap[key] = row;
+  });
+
+  jobs.forEach(function(job) {
+    const soNo = String(job && job.so || '').trim();
+    const lineNo = String(job && job.lineNo || '').trim();
+    const key = soNo + '||' + lineNo;
+    const current = candidateMap[key];
+    if (!current) {
+      throw _workOrderWastageStaleError_('SO ' + soNo + ' line ' + lineNo + ' is no longer available for Work Order creation.');
+    }
+    if (!_workOrderWastageIsTrue_(current.can_create_wo)) {
+      throw _workOrderWastageStaleError_(
+        'SO ' + soNo + ' line ' + lineNo + ' is no longer fully approved for Work Order creation' +
+        (current.approval_stage ? ': ' + current.approval_stage : '.')
+      );
+    }
+    const requestedQty = Number(job && job.qty || 0) || 0;
+    const remainingQty = Math.max(0, Number(current.remaining_qty || 0) || 0);
+    if (!(requestedQty > 0) || requestedQty > remainingQty + 0.0001) {
+      throw _workOrderWastageStaleError_(
+        'SO ' + soNo + ' line ' + lineNo + ' has only ' + remainingQty + ' quantity remaining; this request contains ' + requestedQty + '.'
+      );
+    }
+  });
+}
+
+function _findPendingWorkOrderWastageRequest_(fingerprint) {
+  const requestedFingerprint = String(fingerprint || '').trim();
+  if (!requestedFingerprint) return null;
+  const pendingRows = _supabaseSelectAll_('work_order_wastage_approvals', {
+    select: 'id,request_ref,status,payload_json,summary_json,requested_by,requested_at',
+    filters: { status: 'eq.PENDING' },
+    order: 'requested_at.desc'
+  }, 1000, 5000) || [];
+  return pendingRows.find(function(row) {
+    const summary = row.summary_json || {};
+    const existingFingerprint = String(summary.requestFingerprint || '').trim() ||
+      _workOrderWastageRequestFingerprint_(row.payload_json || {}, summary.sourceWasExisting === true);
+    return existingFingerprint === requestedFingerprint;
+  }) || null;
+}
+
+function _assertNoPendingWorkOrderWastageRequestForSave_(payload, saveOptions) {
+  if (saveOptions && saveOptions.approvalRelease === true) return;
+  const requestedWoNo = String(payload && payload.woNo || '').trim();
+  const sourceRows = requestedWoNo ? (supabaseSelect_('work_orders', {
+    select: 'id',
+    filters: { wo_number: 'eq.' + requestedWoNo },
+    limit: 1
+  }) || []) : [];
+  const fingerprint = _workOrderWastageRequestFingerprint_(payload, sourceRows.length > 0);
+  let pending;
+  try {
+    pending = _findPendingWorkOrderWastageRequest_(fingerprint);
+  } catch (err) {
+    if (_workOrderWastageApprovalTableMissing_(err)) return;
+    throw err;
+  }
+  if (pending) {
+    throw new Error(
+      'Work Order creation is waiting for wastage approval request ' +
+      String(pending.request_ref || pending.id || '') +
+      '. Approve, reject, or cancel that request before saving these jobs.'
+    );
+  }
+}
+
+function _workOrderWastageSummary_(payload, extras) {
+  const jobs = Array.isArray(payload && payload.jobs) ? payload.jobs : [];
+  return Object.assign({
     soNumbers: [...new Set(jobs.map(function(j) { return String(j.so || '').trim(); }).filter(Boolean))],
     client: jobs.map(function(j) { return String(j.client || '').trim(); }).filter(Boolean)[0] || '',
     products: jobs.map(function(j) { return String(j.productName || '').trim(); }).filter(Boolean).slice(0, 6),
@@ -10151,7 +10427,7 @@ function _workOrderWastageSummary_(payload) {
     type: String(payload && payload.jobDetails && payload.jobDetails.type || ''),
     coating: String(payload && payload.jobDetails && payload.jobDetails.coating || ''),
     primaryPaper: String(payload && payload.sheetSpec && (payload.sheetSpec.stock || payload.sheetSpec.parentName) || '')
-  };
+  }, extras || {});
 }
 
 function _selectWOWastageApprovalById_(id) {
@@ -10163,15 +10439,62 @@ function _selectWOWastageApprovalById_(id) {
   return rows[0] || null;
 }
 
+function _mapWorkOrderWastageApprovalRow_(row) {
+  const summary = row && row.summary_json || {};
+  const payload = row && row.payload_json || {};
+  const papers = Array.isArray(payload.papers) ? payload.papers : [];
+  const routing = Array.isArray(payload.routing) ? payload.routing : [];
+  return {
+    id: row.id || '',
+    requestRef: row.request_ref || '',
+    status: row.status || '',
+    defaultWastageSheets: Number(row.default_wastage_sheets || 0),
+    requestedWastageSheets: Number(row.requested_wastage_sheets || 0),
+    approvedWastageSheets: row.approved_wastage_sheets == null ? null : Number(row.approved_wastage_sheets || 0),
+    deltaSheets: Number(row.requested_wastage_sheets || 0) - Number(row.default_wastage_sheets || 0),
+    sheetBasis: Number(row.sheet_basis || 0),
+    ruleLabel: row.rule_label || '',
+    reason: row.reason || '',
+    approvalRemarks: row.approval_remarks || '',
+    requestedBy: row.requested_by || '',
+    requestedAt: row.requested_at || row.created_at || '',
+    decidedBy: row.decided_by || '',
+    decidedAt: row.decided_at || '',
+    finalWoNo: row.final_wo_no || '',
+    reservedWoNo: summary.reservedWoNo || payload.woNo || '',
+    sourceWasExisting: summary.sourceWasExisting === true,
+    soNumbers: Array.isArray(summary.soNumbers) ? summary.soNumbers : [],
+    client: summary.client || '',
+    products: Array.isArray(summary.products) ? summary.products : [],
+    totalQty: Number(summary.totalQty || 0),
+    jobCount: Number(summary.jobCount || 0),
+    type: summary.type || '',
+    coating: summary.coating || '',
+    primaryPaper: summary.primaryPaper || '',
+    paperSummary: papers.map(function(paper) {
+      return String(paper.itemCode || paper.itemName || paper.itemLabel || paper.stock || '').trim();
+    }).filter(Boolean).slice(0, 8),
+    routingSummary: routing.map(function(route) {
+      return String(route.operation || route.dept || '').trim();
+    }).filter(Boolean).slice(0, 12)
+  };
+}
+
 function _validateWorkOrderWastageApproval_(payload, context) {
   if (_workOrderUsesRunningMeterWastage_(payload)) return;
+  _validateManualWorkOrderCoreSheets_(payload);
   const rule = _getDefaultWorkOrderWastageRule_(payload);
   if (!rule) return;
-  const requested = Number(payload && payload.wastage && payload.wastage.processSheets || 0) || 0;
+  const requestedValue = payload && payload.wastage && payload.wastage.processSheets;
+  const requestedRaw = requestedValue == null || requestedValue === '' ? 0 : Number(requestedValue);
+  if (!isFinite(requestedRaw) || requestedRaw < 0 || Math.floor(requestedRaw) !== requestedRaw) {
+    throw new Error('Process wastage must be a non-negative whole number of sheets.');
+  }
+  const requested = requestedRaw;
   if (rule.slabNotApplicable) {
     return;
   }
-  if (requested === Number(rule.value || 0)) return;
+  if (requested <= Number(rule.value || 0)) return;
 
   const ctx = context || {};
   const existingSnapshot = ctx.existingSnapshot || null;
@@ -10203,10 +10526,22 @@ function _validateWorkOrderWastageApproval_(payload, context) {
     }
   }
 
-  throw new Error('Process wastage differs from the approved slab. Submit and approve a Work Order wastage override before saving this WO.');
+  throw new Error('Process wastage exceeds the allowed slab ceiling. Submit and approve a Work Order wastage override before saving this WO.');
 }
 
 function submitWorkOrderWastageOverride(payload, reason, token) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    throw new Error('Another Work Order or wastage request is being processed. Please wait a few seconds and retry.');
+  }
+  try {
+    return _submitWorkOrderWastageOverrideUnlocked_(payload, reason, token);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _submitWorkOrderWastageOverrideUnlocked_(payload, reason, token) {
   const authToken = _authTokenFromPayload_(payload, token);
   const sessionUser = _requireAnyModuleAccess_(authToken, [
     { module: 'WOW', action: 'can_create' },
@@ -10215,21 +10550,61 @@ function submitWorkOrderWastageOverride(payload, reason, token) {
   if (!payload || !Array.isArray(payload.jobs) || !payload.jobs.length) throw new Error('No jobs to submit.');
   _validateCorrugatedWorkOrderPayload_(payload);
   _validateFlexoWorkOrderPayload_(payload);
+  _validateManualWorkOrderCoreSheets_(payload);
 
   const rule = _getDefaultWorkOrderWastageRule_(payload);
   if (!rule) throw new Error('Unable to calculate slab wastage for this request.');
   if (rule.slabNotApplicable) {
     throw new Error('Wastage approval is not required for digital product/division jobs. Enter digital wastage directly on the work order.');
   }
-  const requested = Number(payload && payload.wastage && payload.wastage.processSheets || 0) || 0;
-  if (requested === Number(rule.value || 0)) {
-    throw new Error('Requested wastage is same as the slab default. Approval is not required.');
+  const requestedValue = payload && payload.wastage && payload.wastage.processSheets;
+  const requestedRaw = requestedValue == null || requestedValue === '' ? 0 : Number(requestedValue);
+  if (!isFinite(requestedRaw) || requestedRaw < 0 || Math.floor(requestedRaw) !== requestedRaw) {
+    throw new Error('Requested wastage must be a non-negative whole number of sheets.');
+  }
+  const requested = requestedRaw;
+  if (requested <= Number(rule.value || 0)) {
+    throw new Error('Requested wastage is within the slab ceiling. Approval is not required; save the Work Order directly.');
   }
   const cleanReason = String(reason || '').trim();
   if (!cleanReason) throw new Error('Reason is mandatory for wastage override request.');
 
+  const requestedWoNo = String(payload.woNo || '').trim();
+  const sourceRows = requestedWoNo ? (supabaseSelect_('work_orders', {
+    select: 'id,wo_number,snapshot_json',
+    filters: { wo_number: 'eq.' + requestedWoNo },
+    limit: 1
+  }) || []) : [];
+  const sourceRow = sourceRows[0] || null;
+  const sourceWasExisting = !!sourceRow;
+  const requestFingerprint = _workOrderWastageRequestFingerprint_(payload, sourceWasExisting);
+  let duplicateRequest;
+  try {
+    duplicateRequest = _findPendingWorkOrderWastageRequest_(requestFingerprint);
+  } catch (err) {
+    if (_workOrderWastageApprovalTableMissing_(err)) throw new Error(_workOrderWastageApprovalInstallMessage_());
+    throw err;
+  }
+  if (duplicateRequest) {
+    throw new Error(
+      'A pending wastage approval request already exists for these jobs: ' +
+      String(duplicateRequest.request_ref || duplicateRequest.id || '') +
+      '. Wait for its decision or cancel it before raising another request.'
+    );
+  }
+
   const requestRef = 'WOWR-' + Utilities.getUuid().slice(0, 8).toUpperCase();
   const actor = _authActorName_(sessionUser);
+  const actorUserId = _workOrderWastageUserId_(sessionUser);
+  const summary = _workOrderWastageSummary_(payload, {
+    requestFingerprint: requestFingerprint,
+    requestedByUserId: actorUserId,
+    reservedWoNo: sourceWasExisting ? String(payload.woNo || '').trim() : '',
+    sourceWasExisting: sourceWasExisting,
+    sourceWoSnapshotHash: sourceRow ? _workOrderWastageHash_(sourceRow.snapshot_json || {}) : ''
+  });
+  _validateWorkOrderWastageLiveState_(null, payload, summary);
+
   const row = {
     request_ref: requestRef,
     status: 'PENDING',
@@ -10239,7 +10614,7 @@ function submitWorkOrderWastageOverride(payload, reason, token) {
     rule_label: rule.label || '',
     reason: cleanReason,
     payload_json: payload,
-    summary_json: _workOrderWastageSummary_(payload),
+    summary_json: summary,
     requested_by: actor
   };
 
@@ -10268,12 +10643,14 @@ function submitWorkOrderWastageOverride(payload, reason, token) {
     afterJson: saved,
     metadata: { requestRef: requestRef }
   });
+  _touchWorkOrderDataVersion_();
 
   return {
     ok: true,
     id: saved.id || '',
     requestRef: requestRef,
     status: 'PENDING',
+    reservedWoNo: sourceWasExisting ? String(payload.woNo || '').trim() : '',
     defaultWastageSheets: Number(rule.value || 0),
     requestedWastageSheets: requested
   };
@@ -10298,40 +10675,126 @@ function listWorkOrderWastageApprovals(status, token) {
   }
 
   return {
-    rows: rows.map(function(row) {
-      const summary = row.summary_json || {};
-      return {
-        id: row.id || '',
-        requestRef: row.request_ref || '',
-        status: row.status || '',
-        defaultWastageSheets: Number(row.default_wastage_sheets || 0),
-        requestedWastageSheets: Number(row.requested_wastage_sheets || 0),
-        approvedWastageSheets: row.approved_wastage_sheets == null ? null : Number(row.approved_wastage_sheets || 0),
-        deltaSheets: Number(row.requested_wastage_sheets || 0) - Number(row.default_wastage_sheets || 0),
-        sheetBasis: Number(row.sheet_basis || 0),
-        ruleLabel: row.rule_label || '',
-        reason: row.reason || '',
-        approvalRemarks: row.approval_remarks || '',
-        requestedBy: row.requested_by || '',
-        requestedAt: row.requested_at || row.created_at || '',
-        decidedBy: row.decided_by || '',
-        decidedAt: row.decided_at || '',
-        finalWoNo: row.final_wo_no || '',
-        soNumbers: Array.isArray(summary.soNumbers) ? summary.soNumbers : [],
-        client: summary.client || '',
-        products: Array.isArray(summary.products) ? summary.products : [],
-        totalQty: Number(summary.totalQty || 0),
-        jobCount: Number(summary.jobCount || 0),
-        type: summary.type || '',
-        coating: summary.coating || '',
-        primaryPaper: summary.primaryPaper || ''
-      };
-    })
+    rows: rows.map(_mapWorkOrderWastageApprovalRow_)
   };
+}
+
+function _workOrderWastageAssertRequester_(row, user) {
+  const summary = row && row.summary_json || {};
+  const rowUserId = String(summary.requestedByUserId || '').trim().toLowerCase();
+  const currentUserId = _workOrderWastageUserId_(user);
+  const actor = _authActorName_(user);
+  const ownsById = rowUserId && currentUserId && rowUserId === currentUserId;
+  const ownsLegacy = !rowUserId && String(row && row.requested_by || '').trim() === actor;
+  if (!ownsById && !ownsLegacy) {
+    throw new Error('You can only access your own Work Order wastage requests.');
+  }
+}
+
+function listMyWorkOrderWastageRequests(status, token) {
+  const user = _requireAnyModuleAccess_(token, [
+    { module: 'WOW', action: 'can_create' },
+    { module: 'WOW', action: 'can_edit' }
+  ]);
+  const normalizedStatus = String(status || 'ALL').trim().toUpperCase();
+  const filters = {};
+  if (normalizedStatus && normalizedStatus !== 'ALL') filters.status = 'eq.' + normalizedStatus;
+  let rows;
+  try {
+    rows = _supabaseSelectAll_('work_order_wastage_approvals', {
+      select: '*',
+      filters: filters,
+      order: 'requested_at.desc'
+    }, 500, 2000) || [];
+  } catch (err) {
+    if (_workOrderWastageApprovalTableMissing_(err)) throw new Error(_workOrderWastageApprovalInstallMessage_());
+    throw err;
+  }
+  return {
+    rows: rows.filter(function(row) {
+      try {
+        _workOrderWastageAssertRequester_(row, user);
+        return true;
+      } catch (err) {
+        return false;
+      }
+    }).slice(0, 100).map(_mapWorkOrderWastageApprovalRow_)
+  };
+}
+
+function getMyWorkOrderWastageRequest(requestId, token) {
+  const user = _requireAnyModuleAccess_(token, [
+    { module: 'WOW', action: 'can_create' },
+    { module: 'WOW', action: 'can_edit' }
+  ]);
+  const row = _selectWOWastageApprovalById_(requestId);
+  if (!row) throw new Error('Wastage request not found.');
+  _workOrderWastageAssertRequester_(row, user);
+  return {
+    request: _mapWorkOrderWastageApprovalRow_(row),
+    payload: row.payload_json || {}
+  };
+}
+
+function cancelMyWorkOrderWastageRequest(requestId, reason, token) {
+  const user = _requireAnyModuleAccess_(token, [
+    { module: 'WOW', action: 'can_create' },
+    { module: 'WOW', action: 'can_edit' }
+  ]);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    throw new Error('Another Work Order action is in progress. Please wait a few seconds and retry.');
+  }
+  try {
+    const row = _selectWOWastageApprovalById_(requestId);
+    if (!row) throw new Error('Wastage request not found.');
+    _workOrderWastageAssertRequester_(row, user);
+    if (String(row.status || '').toUpperCase() !== 'PENDING') {
+      throw new Error('Only a pending wastage request can be cancelled.');
+    }
+    const actor = _authActorName_(user);
+    const now = new Date().toISOString();
+    const cleanReason = String(reason || '').trim() || 'Cancelled by requester';
+    supabaseUpdateMinimal_('work_order_wastage_approvals', { id: 'eq.' + row.id, status: 'eq.PENDING' }, {
+      status: 'CANCELLED',
+      approval_remarks: cleanReason,
+      decided_by: actor,
+      decided_at: now,
+      updated_at: now
+    });
+    _auditTryInsertEvent_({
+      entityType: 'WORK_ORDER_WASTAGE_APPROVAL',
+      entityId: row.id,
+      entityKey: row.request_ref || row.id,
+      action: 'CANCEL',
+      sourceModule: 'WORK_ORDER',
+      actor: actor,
+      reason: cleanReason,
+      beforeJson: row,
+      afterJson: Object.assign({}, row, { status: 'CANCELLED', approval_remarks: cleanReason }),
+      metadata: { requestRef: row.request_ref || '' }
+    });
+    _touchWorkOrderDataVersion_();
+    return { ok: true, status: 'CANCELLED' };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function decideWorkOrderWastageApproval(requestId, decision, remarks, token) {
   const sessionUser = _workOrderWastageApprovalRequireSession_(token);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    throw new Error('Another Work Order or approval is being processed. Please wait a few seconds and retry.');
+  }
+  try {
+    return _decideWorkOrderWastageApprovalUnlocked_(requestId, decision, remarks, token, sessionUser);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _decideWorkOrderWastageApprovalUnlocked_(requestId, decision, remarks, token, sessionUser) {
   const id = String(requestId || '').trim();
   const normalizedDecision = String(decision || '').trim().toUpperCase();
   if (!id) throw new Error('Request id is required.');
@@ -10352,6 +10815,7 @@ function decideWorkOrderWastageApproval(requestId, decision, remarks, token) {
   const cleanRemarks = String(remarks || '').trim();
 
   if (normalizedDecision === 'REJECTED') {
+    if (!cleanRemarks) throw new Error('Rejection remarks are mandatory.');
     supabaseUpdateMinimal_('work_order_wastage_approvals', { id: 'eq.' + id }, {
       status: 'REJECTED',
       approval_remarks: cleanRemarks,
@@ -10371,10 +10835,63 @@ function decideWorkOrderWastageApproval(requestId, decision, remarks, token) {
       afterJson: Object.assign({}, row, { status: 'REJECTED', approval_remarks: cleanRemarks }),
       metadata: { requestRef: row.request_ref || '' }
     });
+    _touchWorkOrderDataVersion_();
     return { ok: true, status: 'REJECTED' };
   }
 
   const payload = row.payload_json || {};
+  const summary = row.summary_json || {};
+  const requesterUserId = String(summary.requestedByUserId || '').trim().toLowerCase();
+  const approverUserId = _workOrderWastageUserId_(sessionUser);
+  const approverRole = String(sessionUser && sessionUser.role || '').trim().toUpperCase();
+  const sameIdentifiedUser = requesterUserId && approverUserId && requesterUserId === approverUserId;
+  const sameLegacyActor = !requesterUserId && String(row.requested_by || '').trim() === actor;
+  if (approverRole !== 'ADMIN' && (sameIdentifiedUser || sameLegacyActor)) {
+    throw new Error('The requester cannot approve their own wastage override. Another authorized approver must decide it.');
+  }
+
+  try {
+    _validateWorkOrderWastageLiveState_(row, payload, summary);
+  } catch (err) {
+    if (err && err.code === 'WO_WASTAGE_STALE') {
+      const staleReason = String(err.message || 'The request is no longer current.');
+      supabaseUpdateMinimal_('work_order_wastage_approvals', { id: 'eq.' + id, status: 'eq.PENDING' }, {
+        status: 'CANCELLED',
+        approval_remarks: 'STALE: ' + staleReason,
+        decided_by: actor,
+        decided_at: now,
+        updated_at: now
+      });
+      _auditTryInsertEvent_({
+        entityType: 'WORK_ORDER_WASTAGE_APPROVAL',
+        entityId: id,
+        entityKey: row.request_ref || id,
+        action: 'STALE',
+        sourceModule: 'SALES_ORDER_APPROVAL',
+        actor: actor,
+        reason: staleReason,
+        beforeJson: row,
+        afterJson: Object.assign({}, row, { status: 'CANCELLED', approval_remarks: 'STALE: ' + staleReason }),
+        metadata: { requestRef: row.request_ref || '' }
+      });
+      _touchWorkOrderDataVersion_();
+      return { ok: false, status: 'CANCELLED', stale: true, message: staleReason };
+    }
+    throw err;
+  }
+
+  if (!String(payload.woNo || '').trim()) {
+    payload.woNo = generateWorkOrderNumber();
+    summary.reservedWoNo = payload.woNo;
+    supabaseUpdateMinimal_('work_order_wastage_approvals', { id: 'eq.' + id, status: 'eq.PENDING' }, {
+      payload_json: payload,
+      summary_json: summary,
+      updated_at: now
+    });
+    row.payload_json = payload;
+    row.summary_json = summary;
+  }
+
   payload.wastage = payload.wastage || {};
   payload.wastage.processSheets = Number(row.requested_wastage_sheets || 0) || 0;
   payload.wastageOverride = {
@@ -10390,10 +10907,11 @@ function decideWorkOrderWastageApproval(requestId, decision, remarks, token) {
 
   const saved = saveWorkOrder(payload, {
     approvalRelease: true,
-    wastageApprovalRow: row
+    wastageApprovalRow: row,
+    lockHeld: true
   }, token);
 
-  supabaseUpdateMinimal_('work_order_wastage_approvals', { id: 'eq.' + id }, {
+  supabaseUpdateMinimal_('work_order_wastage_approvals', { id: 'eq.' + id, status: 'eq.PENDING' }, {
     status: 'APPROVED',
     approved_wastage_sheets: Number(row.requested_wastage_sheets || 0) || 0,
     approval_remarks: cleanRemarks,
@@ -10415,11 +10933,28 @@ function decideWorkOrderWastageApproval(requestId, decision, remarks, token) {
     afterJson: Object.assign({}, row, { status: 'APPROVED', final_wo_no: saved && saved.woNo || '' }),
     metadata: { requestRef: row.request_ref || '', woNo: saved && saved.woNo || '' }
   });
+  _touchWorkOrderDataVersion_();
 
   return { ok: true, status: 'APPROVED', woNo: saved && saved.woNo || '' };
 }
 
 function saveWorkOrder(payload, options, token) {
+  const saveOpts = options || {};
+  if (saveOpts.lockHeld === true) {
+    return _saveWorkOrderUnlocked_(payload, saveOpts, token);
+  }
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    throw new Error('Another Work Order is being saved. Please wait a few seconds and retry.');
+  }
+  try {
+    return _saveWorkOrderUnlocked_(payload, saveOpts, token);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _saveWorkOrderUnlocked_(payload, options, token) {
   const saveOpts = options || {};
   const authToken = _authTokenFromPayload_(payload, token || saveOpts.token);
   const sessionUser = saveOpts.approvalRelease
@@ -10434,6 +10969,7 @@ function saveWorkOrder(payload, options, token) {
   }
   _validateCorrugatedWorkOrderPayload_(payload);
   _validateFlexoWorkOrderPayload_(payload);
+  _assertNoPendingWorkOrderWastageRequestForSave_(payload, saveOpts);
   const now = new Date().toISOString();
   const workOrderDate = _workOrderDateOnly_(now);
   const user = _authActorName_(sessionUser);
@@ -11547,7 +12083,13 @@ function saveItem(item, token) {
     throw new Error('Order Unit is required');
   }
 
-  const dimensionUnit = _normalizeItemDimensionUnit_(item.dimensionUnit || 'MM') || 'MM';
+  const dimensionUnit = _normalizeItemDimensionUnit_(item.dimensionUnit);
+  if (!dimensionUnit) {
+    throw new Error('Dimension Unit is required');
+  }
+  if (dimensionUnit === 'CM') {
+    throw new Error('Dimension Unit must be INCH or MM');
+  }
   if (!item.length || !item.width) {
     throw new Error('Length and Width are required');
   }
@@ -11595,10 +12137,10 @@ function saveItem(item, token) {
       lengthMm: savedRow.length_mm == null ? '' : Number(savedRow.length_mm),
       widthMm: savedRow.width_mm == null ? '' : Number(savedRow.width_mm),
       heightMm: savedRow.height_mm == null ? '' : Number(savedRow.height_mm),
-      dimensionUnit: _normalizeItemDimensionUnit_(savedRow.dimension_unit || 'MM') || 'MM',
-      lengthMmDisplay: _formatItemDimensionDisplay_(savedRow.length_mm, savedRow.dimension_unit || 'MM'),
-      widthMmDisplay: _formatItemDimensionDisplay_(savedRow.width_mm, savedRow.dimension_unit || 'MM'),
-      heightMmDisplay: _formatItemDimensionDisplay_(savedRow.height_mm, savedRow.dimension_unit || 'MM'),
+      dimensionUnit: _normalizeItemDimensionUnit_(savedRow.dimension_unit),
+      lengthMmDisplay: _formatItemDimensionDisplay_(savedRow.length_mm, savedRow.dimension_unit),
+      widthMmDisplay: _formatItemDimensionDisplay_(savedRow.width_mm, savedRow.dimension_unit),
+      heightMmDisplay: _formatItemDimensionDisplay_(savedRow.height_mm, savedRow.dimension_unit),
       clientCode: savedRow.client_code || '',
       clientName: savedRow.client_name || '',
       active: savedRow.active !== false
@@ -11613,7 +12155,7 @@ function _composeSalesOrderItemName_(item, dimensionUnit) {
   const height = _formatSalesOrderItemDimensionInput_(item?.height);
   const unit = _salesOrderItemDimensionUnitLabel_(dimensionUnit);
   const description = String(item?.description || '').trim();
-  if (!category || !length || !width) return '';
+  if (!category || !length || !width || !unit) return '';
   const dims = [length, width];
   if (height) dims.push(height);
   return [category, dims.join(' x ') + ' ' + unit, description]
@@ -11632,7 +12174,8 @@ function _formatSalesOrderItemDimensionInput_(value) {
 }
 
 function _salesOrderItemDimensionUnitLabel_(unit) {
-  const normalizedUnit = _normalizeItemDimensionUnit_(unit) || 'MM';
+  const normalizedUnit = _normalizeItemDimensionUnit_(unit);
+  if (!normalizedUnit) return '';
   if (normalizedUnit === 'INCH') return 'inch';
   if (normalizedUnit === 'CM') return 'cm';
   return 'mm';
@@ -11658,7 +12201,7 @@ function _salesOrderItemSearchLimit_(value, fallback) {
 }
 
 function _salesOrderItemMapRow_(row) {
-  const dimensionUnit = _normalizeItemDimensionUnit_(row.dimension_unit || row.dimensionUnit || 'MM') || 'MM';
+  const dimensionUnit = _normalizeItemDimensionUnit_(row.dimension_unit || row.dimensionUnit);
   return {
     itemCode: row.item_code || row.itemCode || '',
     itemName: row.item_name || row.itemName || '',
@@ -11820,10 +12363,10 @@ function getItems(params) {
     lengthMm: i.length_mm == null ? '' : Number(i.length_mm),
     widthMm: i.width_mm == null ? '' : Number(i.width_mm),
     heightMm: i.height_mm == null ? '' : Number(i.height_mm),
-    dimensionUnit: _normalizeItemDimensionUnit_(i.dimension_unit || 'MM') || 'MM',
-    lengthMmDisplay: _formatItemDimensionDisplay_(i.length_mm, i.dimension_unit || 'MM'),
-    widthMmDisplay: _formatItemDimensionDisplay_(i.width_mm, i.dimension_unit || 'MM'),
-    heightMmDisplay: _formatItemDimensionDisplay_(i.height_mm, i.dimension_unit || 'MM'),
+    dimensionUnit: _normalizeItemDimensionUnit_(i.dimension_unit),
+    lengthMmDisplay: _formatItemDimensionDisplay_(i.length_mm, i.dimension_unit),
+    widthMmDisplay: _formatItemDimensionDisplay_(i.width_mm, i.dimension_unit),
+    heightMmDisplay: _formatItemDimensionDisplay_(i.height_mm, i.dimension_unit),
     clientCode: i.client_code || '',
     clientName: i.client_name || '',
     isVirtual: false,
@@ -18455,7 +18998,6 @@ const ROUTES = {
   dispatch: 'Dispatch',
 
   billing: 'Invoice',
-  adjustmentnotes: 'AdjustmentNote',
   printinvoice: 'InvoicePrint',
   printchallan: 'DeliveryChallanPrint',
   printadjustment: 'AdjustmentNotePrint',
@@ -24489,6 +25031,42 @@ function invSaveItem(payload, token) {
     limit: 1
   }) || [])[0] || null : null;
   const itemCode = requestedItemCode || generateInvItemCode_();
+  const hasOwn = function(key) { return Object.prototype.hasOwnProperty.call(payload, key); };
+  const isActive = payload.active === false ? false : true;
+  const leadTimeSource = hasOwn('leadTimeDays')
+    ? payload.leadTimeDays
+    : (hasOwn('lead_time_days') ? payload.lead_time_days : existingItem?.lead_time_days);
+  const moqSource = hasOwn('moqQty')
+    ? payload.moqQty
+    : (hasOwn('moq_qty') ? payload.moq_qty : existingItem?.moq_qty);
+  const leadTimeBlank = leadTimeSource === '' || leadTimeSource === null || typeof leadTimeSource === 'undefined';
+  const moqBlank = moqSource === '' || moqSource === null || typeof moqSource === 'undefined';
+  if (!existingItem && isActive && (leadTimeBlank || moqBlank)) {
+    throw new Error('Lead Time and MOQ are required for a new active item. Enter 0 where no minimum or delay applies.');
+  }
+  const normalizePlanningValue = function(raw, blank, label, precision, maxValue) {
+    if (blank) return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0) {
+      throw new Error(label + ' must be zero or greater');
+    }
+    if (value > maxValue) {
+      throw new Error(label + ' exceeds the supported maximum');
+    }
+    return Number(value.toFixed(precision));
+  };
+  const leadTimeDays = normalizePlanningValue(leadTimeSource, leadTimeBlank, 'Lead Time', 2, 99999999.99);
+  const moqQty = normalizePlanningValue(moqSource, moqBlank, 'MOQ', 3, 99999999999.999);
+  const planningValueEqual = function(existingValue, nextValue) {
+    const existingBlank = existingValue === '' || existingValue === null || typeof existingValue === 'undefined';
+    const nextBlank = nextValue === '' || nextValue === null || typeof nextValue === 'undefined';
+    if (existingBlank || nextBlank) return existingBlank && nextBlank;
+    return Number(existingValue) === Number(nextValue);
+  };
+  const planningValuesChanged = !existingItem
+    ? (leadTimeDays !== null || moqQty !== null)
+    : (!planningValueEqual(existingItem.lead_time_days, leadTimeDays) ||
+      !planningValueEqual(existingItem.moq_qty, moqQty));
 
   let rmType = _normalizePaperText_(payload.rmType);
   if (!rmType) {
@@ -24537,7 +25115,6 @@ function invSaveItem(payload, token) {
     }
     throw err;
   }
-  const hasOwn = function(key) { return Object.prototype.hasOwnProperty.call(payload, key); };
   const purchaseUomSource = hasOwn('purchaseUom')
     ? payload.purchaseUom
     : (hasOwn('purchase_uom') ? payload.purchase_uom : beforeRule?.purchase_uom);
@@ -24621,6 +25198,8 @@ function invSaveItem(payload, token) {
     }
   }
 
+  const actor = _authActorName_(sessionUser);
+  const now = new Date().toISOString();
   const rec = {
     item_code: itemCode,
     item_name: payload.itemName.trim(),
@@ -24628,7 +25207,7 @@ function invSaveItem(payload, token) {
     department: payload.department.trim(),
     uom: payload.uom.trim(),
     is_consumable: !!payload.isConsumable,
-    active: payload.active === false ? false : true,
+    active: isActive,
     size_profile: sizeProfile || null,
     rm_type: rmType || null,
     length_mm: lengthMm,
@@ -24645,6 +25224,12 @@ function invSaveItem(payload, token) {
     size_key: sizeKey || null,
     reel_tracking_enabled: reelTrackingEnabled
   };
+  if (planningValuesChanged) {
+    rec.lead_time_days = leadTimeDays;
+    rec.moq_qty = moqQty;
+    rec.lead_time_updated_at = now;
+    rec.lead_time_updated_by = actor;
+  }
 
   const savedRows = supabaseUpsert_(
     'inv_items',
@@ -24661,8 +25246,6 @@ function invSaveItem(payload, token) {
       }) || [])[0] || {}).id;
   if (!itemId) throw new Error('Item was saved but its purchase setup could not resolve the item id');
 
-  const actor = _authActorName_(sessionUser);
-  const now = new Date().toISOString();
   const purchaseRule = {
     item_id: itemId,
     item_code: itemCode,
@@ -24727,6 +25310,8 @@ function invSaveItem(payload, token) {
       widthUnit: rec.width_unit || '',
       heightUnit: rec.height_unit || '',
       gsm: rec.gsm == null ? '' : Number(rec.gsm),
+      leadTimeDays: leadTimeDays == null ? '' : Number(leadTimeDays),
+      moqQty: moqQty == null ? '' : Number(moqQty),
       purchaseUom: purchaseRule.purchase_uom,
       conversionType: purchaseRule.conversion_type,
       fixedFactor: purchaseRule.fixed_factor == null ? '' : Number(purchaseRule.fixed_factor),
@@ -24945,6 +25530,14 @@ function _mapInventoryItemRow_(row, source) {
     grainDirection: String(src.grain_direction || src.grainDirection || '').trim(),
     materialKey: String(src.material_key || src.materialKey || '').trim(),
     sizeKey: String(src.size_key || src.sizeKey || '').trim(),
+    leadTimeDays: src.lead_time_days == null && src.leadTimeDays == null
+      ? ''
+      : Number(src.lead_time_days != null ? src.lead_time_days : src.leadTimeDays),
+    moqQty: src.moq_qty == null && src.moqQty == null
+      ? ''
+      : Number(src.moq_qty != null ? src.moq_qty : src.moqQty),
+    leadTimeUpdatedAt: src.lead_time_updated_at || src.leadTimeUpdatedAt || '',
+    leadTimeUpdatedBy: String(src.lead_time_updated_by || src.leadTimeUpdatedBy || '').trim(),
     source: source || 'inventory'
   };
 }
@@ -24955,7 +25548,7 @@ function _getUnifiedInventoryItems_(opts) {
   const requestLimit = 1000000;
 
   const invRows = (_supabaseSelectAll_('inv_items', {
-    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key,reel_tracking_enabled',
+    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key,reel_tracking_enabled,lead_time_days,moq_qty,lead_time_updated_at,lead_time_updated_by',
     order: 'item_name.asc'
   }, 1000, requestLimit) || []).map(function(row) {
     return _mapInventoryItemRow_(row, 'inventory');
@@ -25144,17 +25737,34 @@ function _invNormalizeGRNReels_(line, item) {
     throw new Error('Enter each received reel and its gross weight before posting this kraft line');
   }
 
+  const seenReelNos = {};
   const rows = source.map(function(reel, index) {
-    if (String(reel && (reel.internalReelNo || reel.internal_reel_no) || '').trim()) {
-      throw new Error('Internal reel numbers are generated automatically; do not enter supplier reel numbers');
+    const internalReelNo = String(
+      reel && (reel.internalReelNo || reel.internal_reel_no) || ''
+    ).trim().toUpperCase();
+    if (!internalReelNo) {
+      throw new Error('Enter the internal reel number for reel ' + (index + 1));
     }
+    if (!/^KR-[A-Z0-9]+(?:-[A-Z0-9]+)*$/.test(internalReelNo) || internalReelNo.length > 34) {
+      throw new Error(
+        'Internal reel number ' + internalReelNo +
+        ' must start with KR- and use only letters, numbers, and hyphens'
+      );
+    }
+    if (seenReelNos[internalReelNo]) {
+      throw new Error('Internal reel number ' + internalReelNo + ' is repeated in this GRN');
+    }
+    seenReelNos[internalReelNo] = true;
     const grossWeightKg = Number(reel && (
       reel.grossWeightKg ?? reel.gross_weight_kg ?? reel.weightKg ?? reel.weight
     ) || 0);
     if (!(grossWeightKg > 0)) {
       throw new Error('Reel ' + (index + 1) + ' gross weight must be greater than zero');
     }
-    return { gross_weight_kg: Number(grossWeightKg.toFixed(6)) };
+    return {
+      internal_reel_no: internalReelNo,
+      gross_weight_kg: Number(grossWeightKg.toFixed(6))
+    };
   });
   const total = rows.reduce(function(sum, reel) {
     return sum + Number(reel.gross_weight_kg || 0);
@@ -25235,7 +25845,7 @@ function generateInvItemCode_() {
 function invListItemsJSON(opts = {}) {
   const requestLimit = 1000000;
   let rows = (_supabaseSelectAll_('inv_items', {
-    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key,reel_tracking_enabled',
+    select: 'id,item_code,item_name,category,department,uom,is_consumable,active,size_profile,rm_type,length_mm,width_mm,height_mm,length_unit,width_unit,height_unit,gsm,specs_text,additional_info,grain_direction,material_key,size_key,reel_tracking_enabled,lead_time_days,moq_qty,lead_time_updated_at,lead_time_updated_by',
     order: 'item_name.asc'
   }, 1000, requestLimit) || []).map(function(row) {
     return _mapInventoryItemRow_(row, 'inventory');
@@ -25313,6 +25923,10 @@ function invListItemsJSON(opts = {}) {
       widthUnit: r.widthUnit || '',
       heightUnit: r.heightUnit || '',
       gsm: r.gsm === '' ? '' : Number(r.gsm || 0),
+      leadTimeDays: r.leadTimeDays === '' ? '' : Number(r.leadTimeDays || 0),
+      moqQty: r.moqQty === '' ? '' : Number(r.moqQty || 0),
+      leadTimeUpdatedAt: r.leadTimeUpdatedAt || '',
+      leadTimeUpdatedBy: r.leadTimeUpdatedBy || '',
       purchaseUom: r.purchaseUom || r.uom || '',
       conversionType: r.conversionType || '',
       fixedFactor: r.fixedFactor === '' ? '' : Number(r.fixedFactor || 0),
@@ -26052,6 +26666,46 @@ function _purchaseGetInventoryPRValidationMap_(prNos) {
   }).filter(Boolean))];
   if (!keys.length) return {};
 
+  try {
+    const viewRows = _supabaseSelectByKeyInBatches_(
+      'v_purchase_requests_read_model',
+      'pr_no,item_id,item_code,item_name,requested_qty,stored_received_qty,department,job_ref,remarks,stored_status,ordered_qty,open_po_qty,available_to_order_qty,po_refs,po_rate,tax_pct',
+      'pr_no',
+      keys,
+      null,
+      40
+    ) || [];
+    const viewMap = {};
+    viewRows.forEach(function(row) {
+      const prNo = String(row.pr_no || '').trim();
+      if (!prNo) return;
+      viewMap[prNo] = {
+        prNo: prNo,
+        itemId: row.item_id || '',
+        itemCode: row.item_code || '',
+        itemName: row.item_name || '',
+        requestedQty: Number(row.requested_qty || 0),
+        receivedQty: Number(row.stored_received_qty || 0),
+        department: row.department || '',
+        jobRef: row.job_ref || '',
+        remarks: row.remarks || '',
+        status: String(row.stored_status || 'OPEN').trim().toUpperCase() || 'OPEN',
+        orderedQty: Number(row.ordered_qty || 0),
+        openPOQty: Number(row.open_po_qty || 0),
+        availableToOrderQty: Number(row.available_to_order_qty || 0),
+        poRefs: String(row.po_refs || '').split(',').map(function(ref) {
+          return String(ref || '').trim();
+        }).filter(Boolean),
+        latestRate: Number(row.po_rate || 0),
+        latestTaxPct: Number(row.tax_pct || 0)
+      };
+    });
+    if (Object.keys(viewMap).length || !keys.length) return viewMap;
+  } catch (viewErr) {
+    Logger.log('Purchase PR validation read model unavailable, using compatibility path: ' +
+      String(viewErr && viewErr.message || viewErr || ''));
+  }
+
   const prRows = _supabaseSelectByKeyInBatches_(
     'inv_purchase_requests',
     'pr_no,item_id,item_code,item_name,requested_qty,received_qty,department,job_ref,remarks,status',
@@ -26462,6 +27116,14 @@ function invListKraftReelsJSON(params, token) {
       grossWeightKg: Number(row.gross_weight_kg || row.qty_received || 0),
       receivedQty: Number(row.qty_received || 0),
       availableQty: Number(row.qty_available || 0),
+      floorBalanceQty: String(row.reel_status || '').trim().toUpperCase() === 'ISSUED'
+        ? Math.max(
+            Number(row.cycle_issued_qty_kg || row.issued_gross_qty || 0) -
+            Number(row.cycle_production_consumed_kg || 0) -
+            Number(row.cycle_process_waste_kg || 0),
+            0
+          )
+        : Number(row.qty_available || 0),
       issuedGrossQty: Number(row.issued_gross_qty || 0),
       lastConsumptionKg: Number(row.last_calculated_consumption_kg || 0),
       productionConsumedKg: Number(row.production_consumed_kg || 0),
@@ -26652,11 +27314,151 @@ function invRegisterOpeningKraftReels(payload, token) {
   return result || { ok: true };
 }
 
+function invListLegacyReelAlignmentRequestsJSON(params, token) {
+  const p = params || {};
+  _invRequireReelAccess_(_authTokenFromPayload_(p, token), false);
+  let requests;
+  try {
+    requests = supabaseSelect_('inv_legacy_reel_alignment_requests', {
+      select: '*',
+      filters: { status: 'eq.PENDING' },
+      order: 'created_at.asc',
+      limit: Math.min(Math.max(Number(p.limit || 1000), 1), 5000)
+    }) || [];
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'inv_legacy_reel_alignment_requests')) {
+      throw new Error('Run supabase/kraft_legacy_issued_reel_bridge_20260801.sql before using Legacy Reel Alignment.');
+    }
+    throw err;
+  }
+
+  const itemIds = [...new Set(requests.map(function(row) {
+    return String(row.item_id || '').trim();
+  }).filter(Boolean))];
+  const woNos = [...new Set(requests.map(function(row) {
+    return String(row.wo_no || '').trim();
+  }).filter(Boolean))];
+  const itemMap = {};
+  if (itemIds.length) {
+    (_selectInBatches_('inv_items', 'id,item_code,item_name,rm_type,width_mm,gsm', 'id', itemIds) || []).forEach(function(row) {
+      itemMap[String(row.id || '')] = row;
+    });
+  }
+
+  const issueRows = woNos.length
+    ? (_selectInBatches_(
+        'inv_ledger',
+        'id,item_id,ref_type,ref_no,qty_out,rate,department,batch_no,remarks,created_at',
+        'ref_no',
+        woNos,
+        'created_at.asc'
+      ) || []).filter(function(row) {
+        return String(row.ref_type || '').trim().toUpperCase() === 'ISSUE' && Number(row.qty_out || 0) > 0;
+      })
+    : [];
+  const alignmentRows = issueRows.length ? (supabaseSelect_('inv_legacy_reel_alignments', {
+    select: 'historical_issue_ledger_id,issue_qty_kg',
+    limit: 5000
+  }) || []) : [];
+  const usedByLedger = {};
+  alignmentRows.forEach(function(row) {
+    const key = String(row.historical_issue_ledger_id || '');
+    usedByLedger[key] = Number(usedByLedger[key] || 0) + Number(row.issue_qty_kg || 0);
+  });
+
+  const grouped = {};
+  requests.forEach(function(row) {
+    const key = [
+      String(row.internal_reel_no || '').trim().toUpperCase(),
+      String(row.wo_id || ''),
+      String(row.item_id || '')
+    ].join('|');
+    if (!grouped[key]) {
+      const item = itemMap[String(row.item_id || '')] || {};
+      grouped[key] = {
+        requestId: row.id,
+        requestIds: [],
+        reelNo: String(row.internal_reel_no || '').trim().toUpperCase(),
+        woId: row.wo_id || '',
+        woNo: row.wo_no || '',
+        itemId: row.item_id || '',
+        itemCode: row.item_code || item.item_code || '',
+        itemName: item.item_name || '',
+        rmType: item.rm_type || '',
+        widthMm: Number(row.requested_width_mm || item.width_mm || 0),
+        gsm: Number(row.requested_gsm || item.gsm || 0),
+        roles: {},
+        productionEntryCount: 0,
+        pendingConsumptionKg: 0,
+        createdAt: row.created_at || '',
+        issueCandidates: []
+      };
+    }
+    const group = grouped[key];
+    group.requestIds.push(row.id);
+    group.roles[String(row.material_role || '').trim().toUpperCase()] = true;
+    group.productionEntryCount += 1;
+    group.pendingConsumptionKg += Number(row.calculated_consumption_kg || 0);
+  });
+
+  const rows = Object.keys(grouped).map(function(key) {
+    const group = grouped[key];
+    group.roles = Object.keys(group.roles).join(' / ');
+    group.pendingConsumptionKg = Number(group.pendingConsumptionKg.toFixed(3));
+    group.issueCandidates = issueRows.filter(function(issue) {
+      return String(issue.item_id || '') === String(group.itemId || '') &&
+        String(issue.ref_no || '').trim() === String(group.woNo || '').trim();
+    }).map(function(issue) {
+      const usedQty = Number(usedByLedger[String(issue.id || '')] || 0);
+      return {
+        ledgerId: issue.id,
+        refType: issue.ref_type || '',
+        issueDate: issue.created_at || '',
+        issueQtyKg: Number(issue.qty_out || 0),
+        alignedQtyKg: Number(usedQty.toFixed(6)),
+        remainingEvidenceKg: Number(Math.max(Number(issue.qty_out || 0) - usedQty, 0).toFixed(6)),
+        rate: Number(issue.rate || 0),
+        batchNo: issue.batch_no || '',
+        remarks: issue.remarks || ''
+      };
+    }).filter(function(issue) { return issue.remainingEvidenceKg > 0.0001; });
+    return group;
+  });
+
+  return {
+    ok: true,
+    rows: rows,
+    summary: {
+      pendingReels: rows.length,
+      pendingRequests: requests.length,
+      withoutIssueEvidence: rows.filter(function(row) { return !row.issueCandidates.length; }).length
+    }
+  };
+}
+
+function invAlignLegacyIssuedKraftReel(payload, token) {
+  const p = payload || {};
+  const user = _invRequireReelAccess_(_authTokenFromPayload_(p, token), true);
+  if (!String(p.requestId || '').trim()) throw new Error('Select a pending legacy reel request');
+  if (!String(p.issueLedgerId || '').trim()) throw new Error('Select the matching historical issue transaction');
+  if (!(Number(p.issueQtyKg || 0) > 0)) throw new Error('Enter the original gross issued reel weight');
+  if (!String(p.note || '').trim()) throw new Error('Stores reconciliation note is required');
+  const result = supabaseRpc_('align_legacy_issued_kraft_reel', {
+    p_request_id: String(p.requestId || '').trim(),
+    p_issue_ledger_id: String(p.issueLedgerId || '').trim(),
+    p_issue_qty_kg: Number(p.issueQtyKg || 0),
+    p_note: String(p.note || '').trim(),
+    p_actor: _authActorName_(user)
+  });
+  _invBumpStockSnapshotVersion_();
+  _prodBumpQueueVersion_();
+  return result || { ok: true };
+}
+
 function invReturnKraftReel(payload, token) {
   const p = payload || {};
   const user = _invRequireReelAccess_(_authTokenFromPayload_(p, token), true);
   if (!String(p.lotId || '').trim()) throw new Error('Select a reel to return');
-  if (!String(p.woNo || '').trim()) throw new Error('Work order is required');
   if (!(Number(p.returnQty || 0) > 0)) throw new Error('Return weight must be greater than zero');
   if (!String(p.reason || '').trim()) throw new Error('Return basis or production note is required');
 
@@ -26669,6 +27471,21 @@ function invReturnKraftReel(payload, token) {
     p_actor: _authActorName_(user)
   });
   _invBumpStockSnapshotVersion_();
+  return result || { ok: true };
+}
+
+function invIssueKraftReelToFloor(payload, token) {
+  const p = payload || {};
+  const user = _invRequireReelAccess_(_authTokenFromPayload_(p, token), true);
+  if (!String(p.lotId || '').trim()) throw new Error('Select a reel to issue');
+  const result = supabaseRpc_('issue_kraft_reel_to_floor', {
+    p_lot_id: String(p.lotId).trim(),
+    p_department: String(p.department || 'Corrugation').trim(),
+    p_note: String(p.note || '').trim(),
+    p_actor: _authActorName_(user)
+  });
+  _invBumpStockSnapshotVersion_();
+  _prodBumpQueueVersion_();
   return result || { ok: true };
 }
 
@@ -26695,6 +27512,40 @@ function invListIssuedKraftReelsForWOJSON(woNo, token) {
     limit: 500
   }, token);
   return { ok: true, rows: result.rows || [] };
+}
+
+function invListIssuedKraftReelsForFloorJSON(token) {
+  _requireModuleAccess_(token, 'PRODUCTION', 'can_view');
+  const source = supabaseSelect_('v_kraft_reel_register', {
+    select: 'lot_id,internal_reel_no,item_code,item_name,rm_type,master_width_mm,master_gsm,reel_status,assigned_wo_no,location,current_issue_cycle_id,issued_gross_qty,cycle_issued_qty_kg,cycle_production_consumed_kg,cycle_status',
+    filters: { reel_status: 'eq.ISSUED' },
+    order: 'internal_reel_no.asc',
+    limit: 5000
+  }) || [];
+  const rows = source.filter(function(row) {
+    return String(row.location || '').trim().toUpperCase() === 'CORRUGATION FLOOR' &&
+      String(row.current_issue_cycle_id || '').trim() &&
+      String(row.cycle_status || '').trim().toUpperCase() === 'ACTIVE';
+  }).map(function(row) {
+    const consumed = Number(row.cycle_production_consumed_kg || 0);
+    return {
+      lotId: row.lot_id || '',
+      reelNo: row.internal_reel_no || '',
+      itemCode: row.item_code || '',
+      itemName: row.item_name || '',
+      rmType: row.rm_type || '',
+      widthMm: row.master_width_mm == null ? '' : Number(row.master_width_mm),
+      gsm: row.master_gsm == null ? '' : Number(row.master_gsm),
+      status: row.reel_status || '',
+      initialWoNo: row.assigned_wo_no || '',
+      location: row.location || '',
+      currentIssueCycleId: row.current_issue_cycle_id || '',
+      issuedGrossQty: Number(row.issued_gross_qty || row.cycle_issued_qty_kg || 0),
+      cycleProductionConsumedKg: consumed,
+      remainingFloorQtyKg: Math.max(Number(row.issued_gross_qty || row.cycle_issued_qty_kg || 0) - consumed, 0)
+    };
+  });
+  return { ok: true, rows: rows };
 }
 
 function invListAvailableLotsJSON(itemCode, location) {
@@ -27342,7 +28193,7 @@ function invReverseLedgerTransaction(ledgerId, reason, token) {
   if (reelLot?.is_reel === true) {
     throw new Error(
       'Reel-tracked movements cannot be reversed as a single ledger row. ' +
-      'Use Kraft Reels > WO Return for issued reels; GRN reel reversal must be handled as the complete GRN.'
+      'Use Kraft Reels > Floor Return for issued reels; GRN reel reversal must be handled as the complete GRN.'
     );
   }
 
@@ -29702,6 +30553,27 @@ function invGetWorkOrderForIssueFast_(woNo) {
   const key = String(woNo || '').trim();
   if (!key) return null;
   try {
+    const rows = supabaseRpc_('inv_work_order_issue_reconciled_v2', {
+      p_wo_no: key
+    }) || [];
+    const list = Array.isArray(rows) ? rows : (rows.rows || []);
+    if (list.length) {
+      const preparedRows = _invNormalizePreparedWOIssueRows_(list, {
+        trustDatabaseLedger: true
+      });
+      const built = invBuildWorkOrdersForIssueFromPreparedRows_(preparedRows);
+      if (built[0]) {
+        built[0].detailLoaded = true;
+        return built[0];
+      }
+    }
+  } catch (v2Err) {
+    if (!_supabaseRelationMissing_(v2Err, 'inv_work_order_issue_reconciled_v2')) {
+      Logger.log('WO issue reconciled v2 detail path failed: ' +
+        String(v2Err && v2Err.message || v2Err || ''));
+    }
+  }
+  try {
     const rows = supabaseRpc_('inv_work_order_issue_reconciled_ui', {
       p_wo_no: key
     }) || [];
@@ -30146,13 +31018,26 @@ function invSaveWOExcessIssueReview(payload, token) {
   return Array.isArray(result) ? (result[0] || { ok: true }) : result;
 }
 
-function invGetWorkOrderForIssue(woNo) {
+function invGetWorkOrderForIssue(woNo, opts) {
   const key = String(woNo || '').trim();
   if (!key) throw new Error('Work order no required');
+  const request = opts || {};
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const cacheKey = _reportsCacheKey_('INV_WO_ISSUE_DETAIL', {
+    woNo: key,
+    stockVersion: scriptProperties.getProperty('INV_STOCK_SNAPSHOT_VERSION') || '0',
+    workOrderVersion: scriptProperties.getProperty('WORK_ORDER_DATA_VERSION') || '0'
+  });
+  if (request.forceRefresh !== true) {
+    const cached = _getCachedJson_(cacheKey);
+    if (cached) return cached;
+  }
 
   const fastRow = invGetWorkOrderForIssueFast_(key);
   if (fastRow) {
-    return { ok: true, row: fastRow };
+    const result = { ok: true, row: fastRow };
+    _putCachedJson_(cacheKey, result, 60);
+    return result;
   }
 
   const rows = supabaseSelect_('inv_wo_issue_requirement_v', {
@@ -30164,18 +31049,22 @@ function invGetWorkOrderForIssue(woNo) {
 
   if (!rows.length) {
     const fallbackRows = _invBuildWorkOrdersForIssueFallbackRows_([key]);
-    return {
+    const result = {
       ok: true,
       row: fallbackRows[0] || { woNo: key, materialStatus: 'PENDING', requirements: [] }
     };
+    _putCachedJson_(cacheKey, result, 60);
+    return result;
   }
 
   const preparedRows = _invNormalizePreparedWOIssueRows_(rows);
   const built = invBuildWorkOrdersForIssueFromPreparedRows_(preparedRows);
-  return {
+  const result = {
     ok: true,
     row: built[0] || { woNo: key, materialStatus: 'ISSUED', requirements: [] }
   };
+  _putCachedJson_(cacheKey, result, 60);
+  return result;
 }
 
 function _invPostIssueAuthorized_(payload) {
@@ -30208,9 +31097,13 @@ function _invPostIssueAuthorized_(payload) {
   }
 
   if (_invItemRequiresReelTracking_(resolvedItem)) {
-    if (isDirect) {
-      throw new Error('Kraft reels can be issued only against a work order');
-    }
+    throw new Error(
+      'Issue kraft reels from Inventory > Kraft Reels > Issue to Floor. ' +
+      'A floor-issued reel is not owned by one work order.'
+    );
+    /* Legacy WO reel-issue implementation retained below for source compatibility.
+       This branch is intentionally unreachable for new transactions. */
+    if (isDirect) throw new Error('Use Kraft Reel Control to issue this reel');
     const reelNo = String(payload.batchNo || '').trim();
     if (!reelNo) {
       throw new Error('Select the internal reel number before issuing kraft paper');
@@ -30580,28 +31473,68 @@ function invPostIssueBulk(input, token) {
     });
   });
 
-  const result = supabaseRpc_('post_inventory_issue_bulk', {
-    p_rows: atomicIssueRows,
-    p_actor: actor
-  }) || { ok: true, count: rows.length };
-  atomicIssueRows.forEach(function(row) {
-    if (row.transaction_intent === 'WO_ISSUE') {
-      try {
-        supabaseRpc_('consume_work_order_stock_reservation', {
-          p_wo_number: row.wo_no,
-          p_material_key: row.material_key,
-          p_item_id: row.item_id,
-          p_qty: row.qty,
-          p_actor: actor
-        });
-      } catch (reservationErr) {
-        Logger.log(
-          'WO reservation consumption could not be finalized after atomic inventory issue ' +
-          row.wo_no + ': ' + String(reservationErr && reservationErr.message || reservationErr || '')
-        );
-      }
+  let result;
+  let usedV2 = false;
+  try {
+    result = supabaseRpc_('post_inventory_issue_bulk_v2', {
+      p_rows: atomicIssueRows,
+      p_actor: actor
+    }) || { ok: true, count: rows.length };
+    usedV2 = true;
+  } catch (v2Err) {
+    if (!_supabaseRelationMissing_(v2Err, 'post_inventory_issue_bulk_v2')) {
+      throw v2Err;
     }
-  });
+    result = supabaseRpc_('post_inventory_issue_bulk', {
+      p_rows: atomicIssueRows,
+      p_actor: actor
+    }) || { ok: true, count: rows.length };
+  }
+  if (!usedV2) {
+    atomicIssueRows.forEach(function(row) {
+      if (row.transaction_intent === 'WO_ISSUE') {
+        try {
+          supabaseRpc_('consume_work_order_stock_reservation', {
+            p_wo_number: row.wo_no,
+            p_material_key: row.material_key,
+            p_item_id: row.item_id,
+            p_qty: row.qty,
+            p_actor: actor
+          });
+        } catch (reservationErr) {
+          Logger.log(
+            'WO reservation consumption could not be finalized after atomic inventory issue ' +
+            row.wo_no + ': ' + String(reservationErr && reservationErr.message || reservationErr || '')
+          );
+        }
+      }
+    });
+  }
+  if (usedV2 && Array.isArray(result.workOrders)) {
+    result.workOrders = result.workOrders.map(function(entry) {
+      const preparedRows = _invNormalizePreparedWOIssueRows_(entry && entry.rows || [], {
+        trustDatabaseLedger: true
+      });
+      const built = invBuildWorkOrdersForIssueFromPreparedRows_(preparedRows);
+      if (built[0]) {
+        built[0].detailLoaded = true;
+        return built[0];
+      }
+      return {
+        woNo: String(entry && entry.woNo || '').trim(),
+        materialStatus: 'PENDING',
+        requirements: [],
+        detailLoaded: true
+      };
+    }).filter(function(row) {
+      return !!row.woNo;
+    });
+    result.workOrder = result.workOrders[0] || null;
+  }
+  if (usedV2 && Array.isArray(result.warnings) && result.warnings.length) {
+    Logger.log('Inventory issue v2 completed with compatibility warnings: ' +
+      JSON.stringify(result.warnings));
+  }
   _invBumpStockSnapshotVersion_();
   if (opts.deferStockRefresh === true) {
     PropertiesService.getScriptProperties().setProperty('INV_STOCK_SNAPSHOT_VERSION', String(Date.now()));
@@ -31822,9 +32755,130 @@ function _invReconcileStockRows_(rows, opts) {
     existing[key] = true;
   });
 
-  return out.sort(function(a, b) {
+  const sortedRows = out.sort(function(a, b) {
     return String(a.itemName || a.itemCode || '').localeCompare(String(b.itemName || b.itemCode || '')) ||
       String(a.location || '').localeCompare(String(b.location || ''));
+  });
+  return _invAddStockGstValues_(sortedRows);
+}
+
+function _invAddStockGstValues_(rows) {
+  const result = Array.isArray(rows) ? rows : [];
+  const itemIds = [...new Set(result.map(function(row) {
+    return String(row.itemId || row.item_id || '').trim();
+  }).filter(Boolean))];
+  const itemCodes = [...new Set(result.map(function(row) {
+    return _invNormalizeStockItemCode_(row.itemCode || row.item_code || row.itemcode);
+  }).filter(Boolean))];
+  const fallbackGstByCode = {};
+
+  if (itemCodes.length) {
+    try {
+      const purchaseMasterRows = _supabaseSelectByKeyInBatches_(
+        'v_purchase_rate_master_setup_v2', 'item_code,tax_pct', 'item_code', itemCodes, null, 40
+      ) || [];
+      purchaseMasterRows.forEach(function(item) {
+        const code = _invNormalizeStockItemCode_(item.item_code);
+        const taxPct = Number(item.tax_pct || 0);
+        if (code && taxPct > 0) fallbackGstByCode[code] = taxPct;
+      });
+    } catch (err) {
+      Logger.log('Inventory GST purchase-rate fallback unavailable: ' + String(err && err.message || err || ''));
+    }
+    try {
+      const poRows = _supabaseSelectByKeyInBatches_(
+        'purchase_order_lines', 'item_code,tax_pct,master_tax_pct_snapshot,created_at', 'item_code', itemCodes,
+        'created_at.desc', 30
+      ) || [];
+      poRows.forEach(function(line) {
+        const code = _invNormalizeStockItemCode_(line.item_code);
+        const taxPct = Number(line.tax_pct || line.master_tax_pct_snapshot || 0);
+        if (code && !fallbackGstByCode[code] && taxPct > 0) fallbackGstByCode[code] = taxPct;
+      });
+    } catch (err) {
+      Logger.log('Inventory GST PO-line fallback unavailable: ' + String(err && err.message || err || ''));
+    }
+    try {
+      const salesMasterRows = _supabaseSelectByKeyInBatches_(
+        'items', 'item_code,gst_pct', 'item_code', itemCodes, null, 40
+      ) || [];
+      salesMasterRows.forEach(function(item) {
+        const code = _invNormalizeStockItemCode_(item.item_code);
+        const taxPct = Number(item.gst_pct || 0);
+        if (code && !fallbackGstByCode[code] && taxPct > 0) fallbackGstByCode[code] = taxPct;
+      });
+    } catch (err) {
+      Logger.log('Inventory GST sales-item fallback unavailable: ' + String(err && err.message || err || ''));
+    }
+  }
+
+  const lotValueByKey = {};
+  if (itemIds.length) {
+    try {
+      const lots = _supabaseSelectByKeyInBatches_(
+        'inv_lots', 'id,item_id,location,qty_available,rate', 'item_id', itemIds,
+        null, 24
+      ).filter(function(lot) { return Number(lot.qty_available || 0) > 0; });
+      const lotIds = lots.map(function(lot) { return String(lot.id || '').trim(); }).filter(Boolean);
+      const taxByLotId = {};
+      if (lotIds.length) {
+        const receipts = _supabaseSelectByKeyInBatches_(
+          'purchase_po_receipts', 'lot_id,tax_pct,reversed_at', 'lot_id', lotIds,
+          null, 24
+        ).filter(function(receipt) { return !receipt.reversed_at; });
+        receipts.forEach(function(receipt) {
+          const lotId = String(receipt.lot_id || '').trim();
+          const taxPct = Number(receipt.tax_pct || 0);
+          if (lotId && taxPct > 0 && taxByLotId[lotId] == null) taxByLotId[lotId] = taxPct;
+        });
+      }
+
+      const codeByItemId = {};
+      result.forEach(function(row) {
+        const id = String(row.itemId || row.item_id || '').trim();
+        const code = _invNormalizeStockItemCode_(row.itemCode || row.item_code || row.itemcode);
+        if (id && code) codeByItemId[id] = code;
+      });
+      lots.forEach(function(lot) {
+        const itemId = String(lot.item_id || '').trim();
+        const location = String(lot.location || DEFAULT_LOCATION || 'MAIN').trim().toUpperCase() || 'MAIN';
+        const key = itemId + '|' + location;
+        const basicValue = Number(lot.qty_available || 0) * Number(lot.rate || 0);
+        const lotId = String(lot.id || '').trim();
+        const receiptTaxPct = taxByLotId[lotId];
+        const gstPct = receiptTaxPct == null
+          ? Number(fallbackGstByCode[codeByItemId[itemId] || ''] || 0)
+          : Number(receiptTaxPct || 0);
+        if (!lotValueByKey[key]) lotValueByKey[key] = { basicValue: 0, gstValue: 0, receiptTaxValue: 0 };
+        lotValueByKey[key].basicValue += basicValue;
+        lotValueByKey[key].gstValue += basicValue * gstPct / 100;
+        if (receiptTaxPct != null) lotValueByKey[key].receiptTaxValue += basicValue;
+      });
+    } catch (err) {
+      Logger.log('Inventory lot GST valuation unavailable; using item-master GST fallback: ' + String(err && err.message || err || ''));
+    }
+  }
+
+  return result.map(function(row) {
+    const itemId = String(row.itemId || row.item_id || '').trim();
+    const location = String(row.location || DEFAULT_LOCATION || 'MAIN').trim().toUpperCase() || 'MAIN';
+    const code = _invNormalizeStockItemCode_(row.itemCode || row.item_code || row.itemcode);
+    const basicValue = Number(row.value || 0);
+    const lotValue = lotValueByKey[itemId + '|' + location] || { basicValue: 0, gstValue: 0, receiptTaxValue: 0 };
+    const fallbackGstPct = Number(fallbackGstByCode[code] || 0);
+    const lotBasicValue = Math.max(0, Number(lotValue.basicValue || 0));
+    const coveredBasicValue = Math.min(Math.max(0, basicValue), lotBasicValue);
+    const lotEffectiveGstPct = lotBasicValue > 0 ? (Number(lotValue.gstValue || 0) / lotBasicValue) * 100 : 0;
+    const uncoveredBasicValue = Math.max(0, basicValue - coveredBasicValue);
+    const gstValue = (coveredBasicValue * lotEffectiveGstPct / 100) + (uncoveredBasicValue * fallbackGstPct / 100);
+    const gstPct = basicValue > 0 ? (gstValue / basicValue) * 100 : fallbackGstPct;
+    return Object.assign({}, row, {
+      basicValue: Number(basicValue.toFixed(2)),
+      gstPct: Number(gstPct.toFixed(2)),
+      gstValue: Number(gstValue.toFixed(2)),
+      gstInclusiveValue: Number((basicValue + gstValue).toFixed(2)),
+      gstValueSource: Number(lotValue.receiptTaxValue || 0) > 0 ? 'RECEIPT_LOT' : (fallbackGstPct > 0 ? 'ITEM_MASTER' : 'NO_GST')
+    });
   });
 }
 
@@ -31962,7 +33016,7 @@ function invGetStockSnapshotJSON(opts = {}) {
   const version = PropertiesService.getScriptProperties().getProperty('INV_STOCK_SNAPSHOT_VERSION') || '0';
   const cacheKey = _cacheKeyHash_('INV_STOCK_SNAPSHOT', JSON.stringify({
     v: version,
-    reconcile: 6,
+    reconcile: 8,
     q: String(opts.q || '').trim().toLowerCase(),
     l: String(opts.location || ''),
     n: snapshotLimit,
@@ -32826,21 +33880,23 @@ function fgGetBootstrap(token) {
   };
 }
 
-function _fgGetDetailRowsFromView_() {
-  const rows = supabaseSelect_('v_fg_stock_available', {
-    select: 'row_id,source_type,pack_id,opening_id,so_id,so_line_id,so_number,line_no,client_code,client_name,product_code,product_name,uom,opening_qty,packed_qty,billed_qty,adjusted_qty,available_qty,billable_qty,stock_date,latest_adjustment_reason,latest_adjustment_remarks,latest_adjustment_at,remarks',
-    order: 'stock_date.desc',
-    limit: 5000
-  }) || [];
-  const usage = _billingGetInvoiceUsageByLineIds_([...new Set(rows.map(function(row){ return row.so_line_id; }).filter(Boolean))]);
+function _fgGetDetailRowsFromView_(fromDate, toDate) {
+  let rows;
+  try {
+    rows = supabaseRpc_('fg_stock_period_report', {
+      p_from_date: fromDate,
+      p_to_date: toDate
+    }) || [];
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'fg_stock_period_report') || String(err && err.message || '').indexOf('fg_stock_period_report') !== -1) {
+      throw new Error('FG period valuation is not deployed. Apply supabase/fg_stock_period_valuation_20260804.sql in Supabase first.');
+    }
+    throw err;
+  }
   return rows.map(function(row) {
     const stockDate = row.stock_date || '';
-    const ageingDays = _fgDaysOld_(stockDate);
-    const netUsage = usage[String(row.so_line_id || '')];
-    const billedQty = netUsage ? _fgQty_(netUsage.billedQty) : _fgQty_(row.billed_qty);
-    const capacityQty = String(row.source_type || '').toUpperCase() === 'OPENING'
-      ? _fgQty_(row.opening_qty) : _fgQty_(row.packed_qty);
-    const availableQty = Math.max(capacityQty - billedQty - _fgQty_(row.adjusted_qty), 0);
+    const ageingDays = stockDate ? Math.max(0, Math.ceil((new Date(toDate + 'T23:59:59').getTime() - new Date(stockDate).getTime()) / (24 * 60 * 60 * 1000))) : null;
+    const closingQty = _fgQty_(row.closing_qty);
     return {
       rowId: row.row_id || String(row.source_type || '') + '::' + String(row.pack_id || row.opening_id || ''),
       sourceType: row.source_type || '',
@@ -32856,11 +33912,26 @@ function _fgGetDetailRowsFromView_() {
       productName: row.product_name || '',
       uom: row.uom || 'Pcs',
       openingQty: _fgQty_(row.opening_qty),
-      packedQty: _fgQty_(row.packed_qty),
-      adjustedQty: _fgQty_(row.adjusted_qty),
-      availableQty: availableQty,
-      billedQty: billedQty,
-      billableQty: availableQty,
+      inwardQty: _fgQty_(row.inward_qty),
+      packedQty: String(row.source_type || '').toUpperCase() === 'PACKED' ? _fgQty_(row.inward_qty) : 0,
+      dispatchQty: _fgQty_(row.dispatch_qty),
+      adjustedQty: _fgQty_(row.adjustment_qty),
+      outwardQty: _fgQty_(row.outward_qty),
+      closingQty: closingQty,
+      availableQty: closingQty,
+      billedQty: _fgQty_(row.billed_qty),
+      billableQty: _fgQty_(row.billable_qty),
+      unitRateExGst: _fgQty_(row.unit_rate_ex_gst),
+      gstPct: _fgQty_(row.gst_pct),
+      unitRateIncGst: _fgQty_(row.unit_rate_inc_gst),
+      openingValueExGst: _fgQty_(row.opening_value_ex_gst),
+      openingGstValue: _fgQty_(row.opening_gst_value),
+      openingValueIncGst: _fgQty_(row.opening_value_inc_gst),
+      inwardValueExGst: _fgQty_(row.inward_value_ex_gst),
+      outwardValueExGst: _fgQty_(row.outward_value_ex_gst),
+      closingValueExGst: _fgQty_(row.closing_value_ex_gst),
+      closingGstValue: _fgQty_(row.closing_gst_value),
+      closingValueIncGst: _fgQty_(row.closing_value_inc_gst),
       stockDate: stockDate,
       stockDateLabel: _fgDateOnly_(stockDate),
       ageingDays: ageingDays,
@@ -32881,9 +33952,14 @@ function fgGetDashboard(params, token) {
   const sourceType = String(p.sourceType || '').trim().toUpperCase();
   const ageingBucket = String(p.ageingBucket || '').trim().toUpperCase();
   const includeZero = p.includeZero === true;
+  const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  const fromDate = String(p.fromDate || today.slice(0, 8) + '01').trim();
+  const toDate = String(p.toDate || today).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate)) throw new Error('Select a valid FG period.');
+  if (fromDate > toDate) throw new Error('FG period From Date cannot be after To Date.');
 
-  const detailRows = _fgGetDetailRowsFromView_().filter(function(row) {
-    if (!includeZero && _fgQty_(row.availableQty) <= 0) return false;
+  const detailRows = _fgGetDetailRowsFromView_(fromDate, toDate).filter(function(row) {
+    if (!includeZero && _fgQty_(row.closingQty) <= 0 && _fgQty_(row.openingQty) <= 0 && _fgQty_(row.inwardQty) <= 0 && _fgQty_(row.outwardQty) <= 0) return false;
     if (clientCode && String(row.clientCode || '') !== clientCode) return false;
     if (sourceType && sourceType !== 'ALL' && String(row.sourceType || '') !== sourceType) return false;
     if (ageingBucket && ageingBucket !== 'ALL' && String(row.ageingBucket || '') !== ageingBucket) return false;
@@ -32908,7 +33984,11 @@ function fgGetDashboard(params, token) {
 
   const itemPartyMap = {};
   const partyMap = {};
-  const ageingMap = { '0-15': 0, '16-30': 0, '31-60': 0, '61-90': 0, '90+': 0 };
+  const ageingMap = {
+    '0-15': { qty:0, valueExGst:0 }, '16-30': { qty:0, valueExGst:0 },
+    '31-60': { qty:0, valueExGst:0 }, '61-90': { qty:0, valueExGst:0 },
+    '90+': { qty:0, valueExGst:0 }
+  };
 
   detailRows.forEach(function(row) {
     const itemKey = [
@@ -32923,6 +34003,9 @@ function fgGetDashboard(params, token) {
         productName: row.productName || '',
         openingQty: 0,
         packedQty: 0,
+        inwardQty: 0,
+        outwardQty: 0,
+        closingQty: 0,
         adjustedQty: 0,
         availableQty: 0,
         billedQty: 0,
@@ -32933,6 +34016,9 @@ function fgGetDashboard(params, token) {
     }
     itemPartyMap[itemKey].openingQty += _fgQty_(row.openingQty);
     itemPartyMap[itemKey].packedQty += _fgQty_(row.packedQty);
+    itemPartyMap[itemKey].inwardQty += _fgQty_(row.inwardQty);
+    itemPartyMap[itemKey].outwardQty += _fgQty_(row.outwardQty);
+    itemPartyMap[itemKey].closingQty += _fgQty_(row.closingQty);
     itemPartyMap[itemKey].adjustedQty += _fgQty_(row.adjustedQty);
     itemPartyMap[itemKey].availableQty += _fgQty_(row.availableQty);
     itemPartyMap[itemKey].billedQty += _fgQty_(row.billedQty);
@@ -32963,22 +34049,34 @@ function fgGetDashboard(params, token) {
 
   detailRows.forEach(function(row) {
     const bucket = String(row.ageingBucket || '0-15');
-    ageingMap[bucket] = (ageingMap[bucket] || 0) + _fgQty_(row.availableQty);
+    if (!ageingMap[bucket]) ageingMap[bucket] = { qty:0, valueExGst:0 };
+    ageingMap[bucket].qty += _fgQty_(row.closingQty);
+    ageingMap[bucket].valueExGst += _fgQty_(row.closingValueExGst);
   });
 
   return {
     ok: true,
+    period: { fromDate: fromDate, toDate: toDate },
     summary: {
       openingQty: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.openingQty); }, 0),
+      inwardQty: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.inwardQty); }, 0),
+      outwardQty: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.outwardQty); }, 0),
+      closingQty: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.closingQty); }, 0),
       packedQty: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.packedQty); }, 0),
       adjustedQty: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.adjustedQty); }, 0),
       availableQty: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.availableQty); }, 0),
       billableQty: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.billableQty); }, 0),
+      openingValueExGst: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.openingValueExGst); }, 0),
+      openingValueIncGst: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.openingValueIncGst); }, 0),
+      closingValueExGst: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.closingValueExGst); }, 0),
+      closingGstValue: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.closingGstValue); }, 0),
+      closingValueIncGst: detailRows.reduce(function(sum, row) { return sum + _fgQty_(row.closingValueIncGst); }, 0),
+      missingValuationCount: detailRows.filter(function(row) { return _fgQty_(row.closingQty) > 0 && _fgQty_(row.unitRateExGst) <= 0; }).length,
       partyCount: Object.keys(partyMap).length,
       skuCount: Object.keys(itemPartyMap).length
     },
     ageing: Object.keys(ageingMap).map(function(bucket) {
-      return { bucket: bucket, qty: ageingMap[bucket] || 0 };
+      return { bucket: bucket, qty: ageingMap[bucket].qty || 0, valueExGst: ageingMap[bucket].valueExGst || 0 };
     }),
     itemPartyRows: Object.keys(itemPartyMap).map(function(key) {
       const row = itemPartyMap[key];
@@ -33000,9 +34098,13 @@ function fgSaveOpeningStock(payload, token) {
   _fgRequireTable_('fg_opening_stock');
   const p = payload || {};
   const qty = _fgQty_(p.openingQty);
+  const unitRateExGst = _fgQty_(p.unitRateExGst);
+  const gstPct = _fgQty_(p.gstPct);
   if (qty <= 0) throw new Error('Opening qty must be greater than 0.');
   if (!String(p.clientName || p.clientCode || '').trim()) throw new Error('Party is required.');
   if (!String(p.productName || p.productCode || '').trim()) throw new Error('Product is required.');
+  if (unitRateExGst <= 0) throw new Error('Opening FG rate excluding GST must be greater than 0.');
+  if (gstPct < 0 || gstPct > 100) throw new Error('Opening FG GST % must be between 0 and 100.');
   const stockDate = p.openingDate ? new Date(p.openingDate) : new Date();
   if (isNaN(stockDate.getTime())) throw new Error('Opening date is invalid.');
 
@@ -33013,10 +34115,36 @@ function fgSaveOpeningStock(payload, token) {
     product_name: String(p.productName || p.productCode || '').trim(),
     uom: String(p.uom || 'Pcs').trim(),
     opening_qty: qty,
+    unit_rate_ex_gst: unitRateExGst,
+    gst_pct: gstPct,
+    hsn_group: String(p.hsnGroup || '').trim(),
     opening_date: stockDate.toISOString(),
     remarks: String(p.remarks || '').trim(),
     created_by: Session.getActiveUser()?.getEmail?.() || 'user',
     created_at: new Date().toISOString()
+  });
+  _invBumpStockSnapshotVersion_();
+  return { ok: true };
+}
+
+function fgUpdateOpeningValuation(payload, token) {
+  _requireModuleAccess_(token, 'DISPATCH', 'can_edit');
+  _fgRequireTable_('fg_opening_stock');
+  const p = payload || {};
+  const openingId = String(p.openingId || '').trim();
+  const unitRateExGst = _fgQty_(p.unitRateExGst);
+  const gstPct = _fgQty_(p.gstPct);
+  if (!openingId) throw new Error('Opening FG row is required.');
+  if (unitRateExGst <= 0) throw new Error('Rate excluding GST must be greater than 0.');
+  if (gstPct < 0 || gstPct > 100) throw new Error('GST % must be between 0 and 100.');
+  const opening = _fgSafeSelect_('fg_opening_stock', {
+    select: 'id', filters: { id: 'eq.' + openingId }, limit: 1
+  })[0];
+  if (!opening) throw new Error('Opening FG row not found.');
+  supabaseUpdate_('fg_opening_stock', { id: 'eq.' + openingId }, {
+    unit_rate_ex_gst: unitRateExGst,
+    gst_pct: gstPct,
+    hsn_group: String(p.hsnGroup || '').trim()
   });
   _invBumpStockSnapshotVersion_();
   return { ok: true };
@@ -33044,7 +34172,12 @@ function fgSaveOpeningDispatch(payload, token) {
     filters: { opening_id: 'eq.' + openingId },
     limit: 5000
   }).reduce(function(sum, row) { return sum + _fgQty_(row.dispatch_qty); }, 0);
-  const available = Math.max(_fgQty_(opening.opening_qty) - previousDispatch, 0);
+  const priorAdjustments = _fgSafeSelect_('fg_stock_adjustments', {
+    select: 'adjustment_qty',
+    filters: { opening_id: 'eq.' + openingId },
+    limit: 5000
+  }).reduce(function(sum, row) { return sum + _fgQty_(row.adjustment_qty); }, 0);
+  const available = Math.max(_fgQty_(opening.opening_qty) - previousDispatch - priorAdjustments, 0);
   if (qty > available) throw new Error('Dispatch qty cannot exceed available FG opening balance.');
 
   const dispatchDate = p.dispatchDate ? new Date(p.dispatchDate) : new Date();
@@ -33109,21 +34242,33 @@ function fgSaveStockAdjustment(payload, token) {
       limit: 1
     })[0];
     if (!pack) throw new Error('Packed FG row not found.');
-    const usage = _billingGetInvoiceUsageByLineIds_([pack.so_line_id || '']);
+    const soLineId = String(p.soLineId || pack.so_line_id || '').trim();
+    const packingEntries = _fgSafeSelect_('packing_entry_log', {
+      select: 'packed_qty', filters: { so_line_id: 'eq.' + soLineId }, limit: 5000
+    });
+    const totalPacked = packingEntries.length
+      ? packingEntries.reduce(function(sum, row) { return sum + _fgQty_(row.packed_qty); }, 0)
+      : _fgSafeSelect_('packing_records', {
+          select: 'packed_qty', filters: { so_line_id: 'eq.' + soLineId }, limit: 5000
+        }).reduce(function(sum, row) { return sum + _fgQty_(row.packed_qty); }, 0);
+    const totalDispatched = _fgSafeSelect_('dispatch_records', {
+      select: 'dispatch_qty,status', filters: { so_line_id: 'eq.' + soLineId }, limit: 5000
+    }).reduce(function(sum, row) {
+      return String(row.status || '').toUpperCase() === 'CANCELLED' ? sum : sum + _fgQty_(row.dispatch_qty);
+    }, 0);
     const priorAdjustments = _fgSafeSelect_('fg_stock_adjustments', {
       select: 'adjustment_qty',
-      filters: { pack_id: 'eq.' + packId },
+      filters: { so_line_id: 'eq.' + soLineId },
       limit: 5000
     }).reduce(function(sum, row) { return sum + _fgQty_(row.adjustment_qty); }, 0);
-    const billedQty = _fgQty_((usage[String(pack.so_line_id || '')] || {}).billedQty);
-    const available = Math.max(_fgQty_(pack.packed_qty) - billedQty - priorAdjustments, 0);
+    const available = Math.max(totalPacked - totalDispatched - priorAdjustments, 0);
     if (qty > available) throw new Error('Adjustment qty cannot exceed available FG balance.');
     supabaseInsert_('fg_stock_adjustments', {
       source_type: 'PACKED',
       pack_id: pack.id,
       opening_id: null,
       so_id: pack.so_id || null,
-      so_line_id: pack.so_line_id || null,
+      so_line_id: soLineId || null,
       so_number: pack.so_number || '',
       line_no: pack.line_no || '',
       client_code: String(p.clientCode || '').trim(),
@@ -33149,7 +34294,10 @@ function fgSaveStockAdjustment(payload, token) {
       filters: { opening_id: 'eq.' + openingId },
       limit: 5000
     }).reduce(function(sum, row) { return sum + _fgQty_(row.adjustment_qty); }, 0);
-    const available = Math.max(_fgQty_(opening.opening_qty) - priorAdjustments, 0);
+    const previousDispatch = _fgSafeSelect_('fg_opening_dispatch_entries', {
+      select: 'dispatch_qty', filters: { opening_id: 'eq.' + openingId }, limit: 5000
+    }).reduce(function(sum, row) { return sum + _fgQty_(row.dispatch_qty); }, 0);
+    const available = Math.max(_fgQty_(opening.opening_qty) - previousDispatch - priorAdjustments, 0);
     if (qty > available) throw new Error('Adjustment qty cannot exceed available FG opening balance.');
     supabaseInsert_('fg_stock_adjustments', {
       source_type: 'OPENING',
@@ -38113,6 +39261,25 @@ function saveDispatchBulk(entries, token){
     dispatchedTotals[key] = (dispatchedTotals[key] || 0) + Number(row.dispatch_qty || 0);
   });
 
+  // Preserve the WO while the packing source is still available. If an SO
+  // line has several WOs we deliberately leave it unresolved for review.
+  const woCandidatesByLine = {};
+  [...new Set(packRows.map(function(row) {
+    return String(row.so_number || '').trim();
+  }).filter(Boolean))].forEach(function(soNumber) {
+    const jobRows = supabaseSelect_('work_order_jobs', {
+      select: 'wo_id,so_number,line_no',
+      filters: { so_number: 'eq.' + soNumber },
+      limit: 2000
+    }) || [];
+    jobRows.forEach(function(job) {
+      const key = String(job.so_number || '').trim() + '||' + String(job.line_no == null ? '' : job.line_no).trim();
+      if (!woCandidatesByLine[key]) woCandidatesByLine[key] = [];
+      const woId = String(job.wo_id || '').trim();
+      if (woId && woCandidatesByLine[key].indexOf(woId) === -1) woCandidatesByLine[key].push(woId);
+    });
+  });
+
   const createdAt = new Date().toISOString();
   const createdBy = Session.getActiveUser()?.getEmail?.()||'user';
   const inserts = [];
@@ -38133,8 +39300,14 @@ function saveDispatchBulk(entries, token){
 
     dispatchedTotals[lineKey] = Number(dispatchedTotals[lineKey] || 0) + qty;
 
+    const woLineKey = String(pack.so_number || '').trim() + '||' + String(pack.line_no == null ? '' : pack.line_no).trim();
+    const woCandidates = woCandidatesByLine[woLineKey] || [];
+
     inserts.push({
       dispatch_no:dispatchNo,
+      pack_id:pack.id,
+      wo_id:woCandidates.length === 1 ? woCandidates[0] : null,
+      trace_status:woCandidates.length === 1 ? 'WO_LINKED' : (woCandidates.length > 1 ? 'MULTIPLE_WO_REVIEW' : 'WO_NOT_FOUND'),
       so_id: pack.so_id,
       so_line_id: pack.so_line_id,
       so_number: pack.so_number,
@@ -39010,20 +40183,26 @@ function _prodGetCorr2PlyDetailTotals_(routingIds) {
   }
 }
 
-function _prodExpandCorr2PlyStageRows_(rows) {
+function _prodExpandCorr2PlyStageRows_(rows, prefetched) {
   const list = Array.isArray(rows) ? rows : [];
+  const supplied = prefetched || {};
   const targets = list.filter(function(row) {
     return _prodNormalizeCategoryGroup_(row.categoryGroup || row.department_category || '') === 'CORRUGATION' && _prodIs2PlyMakingProcess_(row);
   });
   if (!targets.length) return list;
 
   const woIds = [...new Set(targets.map(function(row) { return row.woId || row.wo_id; }).filter(Boolean))];
-  const workOrders = _selectInBatches_('work_orders', 'id,snapshot_json', 'id', woIds);
-  const snapshotByWoId = {};
-  workOrders.forEach(function(wo) {
-    snapshotByWoId[String(wo.id || '')] = wo.snapshot_json || {};
-  });
-  const detailTotals = _prodGetCorr2PlyDetailTotals_(targets.map(function(row) { return row.routingId || row.routing_id; }));
+  const snapshotByWoId = supplied.snapshotByWoId || {};
+  if (!supplied.snapshotByWoId) {
+    const workOrders = _selectInBatches_('work_orders', 'id,snapshot_json', 'id', woIds);
+    workOrders.forEach(function(wo) {
+      snapshotByWoId[String(wo.id || '')] = wo.snapshot_json || {};
+    });
+  }
+  let detailTotals = supplied.detailTotals;
+  if (!detailTotals) {
+    detailTotals = _prodGetCorr2PlyDetailTotals_(targets.map(function(row) { return row.routingId || row.routing_id; }));
+  }
 
   const expanded = [];
   list.forEach(function(row) {
@@ -39135,12 +40314,24 @@ function _prodGetStageRowsFastResult_(params) {
 }
 
 function _prodGetStageRowsForWoFast_(woId) {
-  return _prodEnrichCorrugationFinalStageFlags_(_prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(supabaseSelect_('v_production_stage_rows_fast', {
-    select: 'row_key,row_kind,row_description,plan_unit,wo_id,wo_date,routing_id,wo_number,so_numbers,so_number_display,so_number,line_no,job_reference,job_ups,client_name,product_name,product_names,artwork_no,artwork_nos,process_name,process_display_name,department,planned_machine,sequence_no,expected_delivery,job_priority,department_category,planned_qty,produced_qty,balance_qty,status',
-    filters: { wo_id: 'eq.' + woId },
-    order: 'sequence_no.asc,row_sort.asc,job_sort.asc',
-    limit: 5000
-  }) || []))).filter(function(row) {
+  let sourceRows;
+  try {
+    sourceRows = supabaseRpc_('production_wo_entry_rows', {
+      p_wo_id: String(woId || '').trim()
+    }) || [];
+  } catch (rpcErr) {
+    if (!_supabaseRelationMissing_(rpcErr, 'production_wo_entry_rows')) {
+      Logger.log('[production_wo_entry_rows] RPC failed; using view fallback: ' +
+        String(rpcErr && rpcErr.message || rpcErr));
+    }
+    sourceRows = supabaseSelect_('v_production_stage_rows_fast', {
+      select: 'row_key,row_kind,row_description,plan_unit,wo_id,wo_date,routing_id,wo_number,so_numbers,so_number_display,so_number,line_no,job_reference,job_ups,client_name,product_name,product_names,artwork_no,artwork_nos,process_name,process_display_name,department,planned_machine,sequence_no,expected_delivery,job_priority,department_category,planned_qty,produced_qty,balance_qty,status',
+      filters: { wo_id: 'eq.' + woId },
+      order: 'sequence_no.asc,row_sort.asc,job_sort.asc',
+      limit: 5000
+    }) || [];
+  }
+  return _prodEnrichCorrugationFinalStageFlags_(_prodExpandCorr2PlyStageRows_(_prodMapStageRowsFastViewRows_(sourceRows))).filter(function(row) {
     return !_prodIsExcludedProcess_(row.processName || row.department || '');
   });
 }
@@ -40128,6 +41319,7 @@ function _prodBuildCorr2PlyDetailInsert_(detail, productionEntryId, productionRo
     _prodCorrFluteFactor_(group.flute) / 1000000000
   );
   return {
+    id: d.detailId || Utilities.getUuid(),
     production_entry_id: productionEntryId || null,
     wo_id: routing.wo_id,
     routing_id: routing.id,
@@ -40170,10 +41362,13 @@ function _prodBuildCorr2PlyDetailInsert_(detail, productionEntryId, productionRo
   };
 }
 
-function _prodResolveIssuedKraftReel_(reelNo, woId, materialRole) {
-  const number = String(reelNo || '').trim();
+function _prodResolveIssuedKraftReel_(reelNo, woId, materialRole, legacyContext) {
+  const number = String(reelNo || '').trim().toUpperCase();
   const role = String(materialRole || 'Material').trim();
   if (!number) throw new Error(role + ' internal reel number is required');
+  if (!/^KR-[A-Z0-9]+(?:-[A-Z0-9]+)*$/.test(number) || number.length > 34) {
+    throw new Error(role + ' reel ' + number + ' must start with KR- and use only letters, numbers, and hyphens');
+  }
   const wo = (supabaseSelect_('work_orders', {
     select: 'id,wo_number',
     filters: { id: 'eq.' + String(woId || '').trim() },
@@ -40181,18 +41376,68 @@ function _prodResolveIssuedKraftReel_(reelNo, woId, materialRole) {
   }) || [])[0];
   if (!wo) throw new Error('Work order not found for ' + role + ' reel validation');
   const reel = (supabaseSelect_('inv_lots', {
-    select: 'id,batch_no,item_id,item_code,is_reel,reel_status,assigned_wo_no,issued_gross_qty,master_width_mm,master_gsm,current_issue_cycle_id',
+    select: 'id,batch_no,item_id,item_code,is_reel,reel_status,assigned_wo_no,issued_gross_qty,master_width_mm,master_gsm,current_issue_cycle_id,location',
     filters: { batch_no: 'eq.' + number },
     limit: 1
   }) || [])[0];
-  if (!reel || reel.is_reel !== true) {
-    throw new Error(role + ' reel ' + number + ' is not an internal kraft reel');
+  if (!reel) {
+    try {
+      supabaseSelect_('inv_legacy_reel_alignment_requests', { select: 'id', limit: 1 });
+    } catch (bridgeErr) {
+      if (_supabaseRelationMissing_(bridgeErr, 'inv_legacy_reel_alignment_requests')) {
+        throw new Error(
+          role + ' reel ' + number + ' predates reel tracking. Run ' +
+          'supabase/kraft_legacy_issued_reel_bridge_20260801.sql to enable controlled production continuity.'
+        );
+      }
+      throw bridgeErr;
+    }
+    const context = legacyContext || {};
+    const itemCode = String(context.itemCode || '').trim();
+    if (!itemCode) throw new Error(role + ' inventory item is required for legacy reel ' + number);
+    const item = ensureInventoryItemExists_(itemCode, { requireActive: true, allowAutoCreate: false });
+    if (!_invItemRequiresReelTracking_(item)) {
+      throw new Error(role + ' legacy reel ' + number + ' must use a reel-tracked Kraft Paper item');
+    }
+    if (!(Number(item.width_mm || 0) > 0) || !(Number(item.gsm || 0) > 0)) {
+      throw new Error(role + ' Kraft Paper item is missing master width/GSM');
+    }
+    const conflicts = supabaseSelect_('inv_legacy_reel_alignment_requests', {
+      select: 'id,wo_id,item_id,status',
+      filters: { internal_reel_no: 'eq.' + number, status: 'eq.PENDING' },
+      limit: 100
+    }) || [];
+    if (conflicts.some(function(row) {
+      return String(row.item_id || '') !== String(item.id || '');
+    })) {
+      throw new Error(role + ' legacy reel ' + number + ' is already pending alignment for another item');
+    }
+    return {
+      id: null,
+      batch_no: number,
+      item_id: item.id,
+      item_code: item.item_code || itemCode,
+      is_reel: true,
+      reel_status: 'LEGACY_PENDING',
+      assigned_wo_no: wo.wo_number,
+      issued_gross_qty: 0,
+      master_width_mm: Number(item.width_mm),
+      master_gsm: Number(item.gsm),
+      current_issue_cycle_id: null,
+      legacy_alignment_pending: true
+    };
+  }
+  if (reel.is_reel !== true) {
+    throw new Error(
+      role + ' reel ' + number +
+      ' exists as a non-reel stock batch. Stores must split or correct that batch before production can use it.'
+    );
   }
   if (String(reel.reel_status || '').toUpperCase() !== 'ISSUED') {
     throw new Error(role + ' reel ' + number + ' is not currently issued');
   }
-  if (String(reel.assigned_wo_no || '').trim() !== String(wo.wo_number || '').trim()) {
-    throw new Error(role + ' reel ' + number + ' is not issued to WO ' + wo.wo_number);
+  if (String(reel.location || '').trim().toUpperCase() !== 'CORRUGATION FLOOR') {
+    throw new Error(role + ' reel ' + number + ' is not in Corrugation Floor custody');
   }
   if (!(Number(reel.master_width_mm || 0) > 0) || !(Number(reel.master_gsm || 0) > 0)) {
     throw new Error(role + ' reel ' + number + ' is missing master width/GSM snapshot');
@@ -40213,7 +41458,7 @@ function _prodIsCorrugationFinalRouting_(routing, routingList, categoryGroup) {
   return String(last.id || '') === String(routing && routing.id || '');
 }
 
-function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWoId, categoryByWoId) {
+function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWoId, categoryByWoId, prefetchedEntryRows) {
   const ids = Array.isArray(woIds) ? woIds.map(String) : [];
   if (!ids.length) return [];
 
@@ -40230,9 +41475,11 @@ function _prodBuildStageRowsFromData_(woIds, workOrderMap, routingRows, jobsByWo
     });
   });
 
-  const producedEntryRows = _prodGetProducedEntryRowsForRoutingIds_(routingRows.map(function(row) {
-    return row.id;
-  }));
+  const producedEntryRows = Array.isArray(prefetchedEntryRows)
+    ? prefetchedEntryRows
+    : _prodGetProducedEntryRowsForRoutingIds_(routingRows.map(function(row) {
+      return row.id;
+    }));
   const totals = _prodBuildTotalsFromEntryRows_(producedEntryRows);
   const combinedTotals = totals.combinedTotals;
   const jobTotals = totals.jobTotals;
@@ -40423,12 +41670,91 @@ function getProductionBoardByWO(woId, token, forceRefresh){
   }
 
   try {
-    const fastRows = _prodGetStageRowsForWoFast_(woId);
-    if (fastRows && fastRows.length) {
-      if (!bypassCache) _prodCachePutJsonSafe_(cache, cacheKey, fastRows, 60);
-      return fastRows;
+    const sourceResult = supabaseRpc_('production_wo_entry_source', {
+      p_wo_id: String(woId || '').trim()
+    });
+    const source = Array.isArray(sourceResult) ? (sourceResult[0] || {}) : (sourceResult || {});
+    const wo = source.workOrder || {};
+    if (wo && wo.id) {
+      const workOrderJobs = _filterSalesServiceOnlyItems_(source.jobs || []);
+      const routingRows = source.routing || [];
+      const artworkCategoryByNo = {};
+      (source.artworks || []).forEach(function(row) {
+        const category = _prodRecognizeDepartmentCategory_(row.product_type || '');
+        if (category) artworkCategoryByNo[String(row.artwork_no || '')] = category;
+      });
+      const artworkCategories = workOrderJobs.map(function(job) {
+        return artworkCategoryByNo[String(job.artwork_no || '')] || '';
+      }).filter(Boolean);
+      const recognizedJobCategories = workOrderJobs.map(function(job) {
+        return _prodRecognizeDepartmentCategory_(job.category || '');
+      }).filter(Boolean);
+      const category = _prodResolveDepartmentCategory_(
+        wo.snapshot_json,
+        artworkCategories,
+        recognizedJobCategories
+      );
+      const issueTotals = source.issueTotals || {};
+      const woNumber = String(wo.wo_number || '').trim();
+      const snapshot = wo.snapshot_json || {};
+      const sheetQty = Number(issueTotals.issued_sheet_qty || 0);
+      let rmQty = Number(issueTotals.issued_rm_qty || 0);
+      let kgQty = Number(issueTotals.issued_kg_qty || 0);
+      const totalRm = Number(snapshot?.flexoDetails?.totalRunningMeter || snapshot?.flexoDetails?.baseRunningMeter || 0);
+      const requiredKg = Number(snapshot?.flexoDetails?.requiredKg || 0);
+      if (kgQty > 0 && totalRm > 0 && requiredKg > 0) {
+        if (kgQty > requiredKg * 20 && (kgQty / 1000) <= requiredKg * 2.5) kgQty /= 1000;
+        rmQty += Math.min((kgQty * totalRm) / requiredKg, totalRm);
+      }
+      _prodGetStoreIssuedPlanForWo_._cache[woNumber + '|SHEET'] = sheetQty;
+      _prodGetStoreIssuedPlanForWo_._cache[woNumber + '|RM'] = rmQty;
+      const woMap = {};
+      woMap[String(woId)] = wo;
+      const jobsByWoId = {};
+      jobsByWoId[String(woId)] = workOrderJobs;
+      const categoryByWoId = {};
+      categoryByWoId[String(woId)] = category;
+      let instantRows = _prodBuildStageRowsFromData_(
+        [String(woId)],
+        woMap,
+        routingRows,
+        jobsByWoId,
+        categoryByWoId,
+        source.entries || []
+      );
+      const corrDetailTotals = {};
+      (source.corr2PlyDetails || []).forEach(function(row) {
+        const key = String(row.routing_id || '') + '||' + String(row.set_group_key || '');
+        corrDetailTotals[key] = (corrDetailTotals[key] || 0) + Number(row.produced_sheets || 0);
+      });
+      const snapshotByWoId = {};
+      snapshotByWoId[String(woId)] = snapshot;
+      instantRows = _prodExpandCorr2PlyStageRows_(instantRows, {
+        snapshotByWoId: snapshotByWoId,
+        detailTotals: corrDetailTotals
+      });
+      const activeRouting = routingRows.filter(function(row) {
+        return !_prodIsExcludedProcess_(row.process_name || row.department || '');
+      }).sort(function(a, b) {
+        return Number(a.sequence_no || 0) - Number(b.sequence_no || 0);
+      });
+      const finalRoutingId = activeRouting.length
+        ? String(activeRouting[activeRouting.length - 1].id || '')
+        : '';
+      if (_prodNormalizeCategoryGroup_(category) === 'CORRUGATION') {
+        instantRows = instantRows.map(function(row) {
+          return Object.assign({}, row, {
+            isCorrugationFinalStage: String(row.routingId || '') === finalRoutingId
+          });
+        });
+      }
+      if (!bypassCache) _prodCachePutJsonSafe_(cache, cacheKey, instantRows, 60);
+      return instantRows;
     }
-  } catch (err) {}
+  } catch (err) {
+    Logger.log('[getProductionBoardByWO] Scoped RPC failed for WO ' + String(woId) +
+      '; using compatibility fallback: ' + String(err && err.message || err));
+  }
 
   const workOrderJobs = _filterSalesServiceOnlyItems_(supabaseSelect_('work_order_jobs', {
     select: 'wo_id,so_number,line_no,product_name,qty,category,artwork_no,client_name,job_priority,expected_delivery,ups,group_ups,job_reference',
@@ -41066,6 +42392,7 @@ function saveProductionBulk(entries, token) {
   const inserts = [];
   const corr2PlyDetailRefs = [];
   const corrugationFgRefs = [];
+  let legacyAlignmentPendingCount = 0;
   const corr2PlyDetailTotals = entries.some(function(entry) {
     return !!(entry && entry.corrugation2PlyDetails && entry.corrugation2PlyDetails.group && entry.corrugation2PlyDetails.group.groupKey);
   }) ? _prodGetCorr2PlyDetailTotals_(routingIds) : {};
@@ -41168,9 +42495,13 @@ function saveProductionBulk(entries, token) {
       if (!d.group || !d.group.groupKey) throw new Error('2 Ply detail group missing');
       if (!String(d.linerReelNo || '').trim()) throw new Error('Enter liner reel no for 2 Ply entry');
       if (!String(d.flutingReelNo || '').trim()) throw new Error('Enter fluting reel no for 2 Ply entry');
-      const linerReel = _prodResolveIssuedKraftReel_(d.linerReelNo, routing.wo_id, 'Liner');
-      const flutingReel = _prodResolveIssuedKraftReel_(d.flutingReelNo, routing.wo_id, 'Fluting');
-      if (String(linerReel.id) === String(flutingReel.id)) {
+      const linerReel = _prodResolveIssuedKraftReel_(d.linerReelNo, routing.wo_id, 'Liner', {
+        itemCode: d.linerActualItemCode
+      });
+      const flutingReel = _prodResolveIssuedKraftReel_(d.flutingReelNo, routing.wo_id, 'Fluting', {
+        itemCode: d.flutingActualItemCode
+      });
+      if (String(linerReel.batch_no || '').trim().toUpperCase() === String(flutingReel.batch_no || '').trim().toUpperCase()) {
         throw new Error('Liner and fluting must use different issued reels');
       }
       const requiredDeckleMm = Number(d.group.deckleMm || 0);
@@ -41184,14 +42515,22 @@ function saveProductionBulk(entries, token) {
       d.linerActualItemName = d.linerActualItemName || linerReel.item_code;
       d.linerReelLotId = linerReel.id;
       d.linerIssueCycleId = linerReel.current_issue_cycle_id;
+      d.linerLegacyAlignmentPending = linerReel.legacy_alignment_pending === true;
+      d.linerLegacyItemId = linerReel.item_id || null;
+      d.linerLegacyWoNo = linerReel.assigned_wo_no || '';
       d.linerReelWidthMm = Number(linerReel.master_width_mm);
       d.linerActualGsm = Number(linerReel.master_gsm);
+      d.linerReelNo = String(linerReel.batch_no || d.linerReelNo || '').trim().toUpperCase();
       d.flutingActualItemCode = flutingReel.item_code;
       d.flutingActualItemName = d.flutingActualItemName || flutingReel.item_code;
       d.flutingReelLotId = flutingReel.id;
       d.flutingIssueCycleId = flutingReel.current_issue_cycle_id;
+      d.flutingLegacyAlignmentPending = flutingReel.legacy_alignment_pending === true;
+      d.flutingLegacyItemId = flutingReel.item_id || null;
+      d.flutingLegacyWoNo = flutingReel.assigned_wo_no || '';
       d.flutingReelWidthMm = Number(flutingReel.master_width_mm);
       d.flutingActualGsm = Number(flutingReel.master_gsm);
+      d.flutingReelNo = String(flutingReel.batch_no || d.flutingReelNo || '').trim().toUpperCase();
     }
 
     const productionRow = {
@@ -41265,6 +42604,56 @@ function saveProductionBulk(entries, token) {
             );
           });
           if (detailRows.length) _supabaseBulkInsertMinimalInChunks_('corrugation_2ply_entry_details', detailRows, 30, 250000);
+          const legacyRequestRows = [];
+          detailRows.forEach(function(detailRow, index) {
+            const ref = corr2PlyDetailRefs[index] || {};
+            const detail = ref.detail || {};
+            if (detail.linerLegacyAlignmentPending === true) {
+              legacyRequestRows.push({
+                id: Utilities.getUuid(),
+                detail_id: detailRow.id,
+                production_entry_id: detailRow.production_entry_id,
+                internal_reel_no: String(detail.linerReelNo || '').trim().toUpperCase(),
+                material_role: 'LINER',
+                wo_id: detailRow.wo_id,
+                wo_no: String(detail.linerLegacyWoNo || '').trim(),
+                item_id: detail.linerLegacyItemId,
+                item_code: detailRow.liner_actual_item_code,
+                requested_width_mm: detailRow.liner_reel_width_mm,
+                requested_gsm: detailRow.liner_actual_gsm,
+                calculated_consumption_kg: Number(detailRow.liner_consumed_kg || 0),
+                status: 'PENDING',
+                created_by: createdBy
+              });
+            }
+            if (detail.flutingLegacyAlignmentPending === true) {
+              legacyRequestRows.push({
+                id: Utilities.getUuid(),
+                detail_id: detailRow.id,
+                production_entry_id: detailRow.production_entry_id,
+                internal_reel_no: String(detail.flutingReelNo || '').trim().toUpperCase(),
+                material_role: 'FLUTING',
+                wo_id: detailRow.wo_id,
+                wo_no: String(detail.flutingLegacyWoNo || '').trim(),
+                item_id: detail.flutingLegacyItemId,
+                item_code: detailRow.fluting_actual_item_code,
+                requested_width_mm: detailRow.fluting_reel_width_mm,
+                requested_gsm: detailRow.fluting_actual_gsm,
+                calculated_consumption_kg: Number(detailRow.fluting_consumed_kg || 0),
+                status: 'PENDING',
+                created_by: createdBy
+              });
+            }
+          });
+          if (legacyRequestRows.length) {
+            _supabaseBulkInsertMinimalInChunks_(
+              'inv_legacy_reel_alignment_requests',
+              legacyRequestRows,
+              30,
+              250000
+            );
+            legacyAlignmentPendingCount += legacyRequestRows.length;
+          }
         } catch (detailErr) {
           insertedIds.forEach(function(id) {
             try {
@@ -41848,7 +43237,13 @@ function prodAdminUpdateEntry(payload, token) {
   _prodBumpQueueVersion_();
   _opsBumpDatasetVersion_();
   if (hasLinkedFg) _invBumpStockSnapshotVersion_();
-  return { ok: true };
+  return {
+    ok: true,
+    legacyAlignmentPendingCount: legacyAlignmentPendingCount,
+    legacyAlignmentMessage: legacyAlignmentPendingCount
+      ? legacyAlignmentPendingCount + ' legacy reel reference(s) were queued for Stores alignment.'
+      : ''
+  };
 }
 
 function prodAdminDeleteEntry(entryId, reason, token) {
@@ -41944,6 +43339,58 @@ function searchWorkOrders(query, token){
   if (cached) return JSON.parse(cached);
 
   const safe = q.replace(/[%*,()]/g, ' ').trim();
+
+  // WO-wise operators normally enter a job-card/WO number. Resolve that
+  // indexed prefix directly instead of making the aggregate lookup view build
+  // searchable text for every work order first.
+  const directJobCards = supabaseSelect_('work_orders', {
+    select: 'id,wo_number,wo_date,snapshot_json',
+    filters: { wo_number: 'ilike.' + safe + '*' },
+    order: 'wo_date.desc',
+    limit: 12
+  }) || [];
+  if (directJobCards.length) {
+    const directIds = directJobCards.map(function(row) { return row.id; }).filter(Boolean);
+    const directJobs = _filterSalesServiceOnlyItems_(_selectInBatches_(
+      'work_order_jobs',
+      'wo_id,so_number,artwork_no,client_name,product_name,category',
+      'wo_id',
+      directIds
+    ));
+    const directJobsByWo = {};
+    directJobs.forEach(function(row) {
+      const key = String(row.wo_id || '');
+      if (!directJobsByWo[key]) directJobsByWo[key] = [];
+      directJobsByWo[key].push(row);
+    });
+    const directResult = directJobCards.map(function(row) {
+      const jobs = directJobsByWo[String(row.id)] || [];
+      const artworkNos = [...new Set(jobs.map(function(job) {
+        return String(job.artwork_no || '').trim();
+      }).filter(Boolean))];
+      const soNumbers = [...new Set(jobs.map(function(job) {
+        return String(job.so_number || '').trim();
+      }).filter(Boolean))];
+      const products = [...new Set(jobs.map(function(job) {
+        return String(job.product_name || '').trim();
+      }).filter(Boolean))];
+      return {
+        woId: row.id,
+        woNumber: row.wo_number || '',
+        artworkNo: artworkNos[0] || '',
+        client: jobs[0] && jobs[0].client_name || '',
+        product: products.join(' / '),
+        soNumbers: soNumbers,
+        category: _prodFormatCategoryGroupLabel_(_prodResolveDepartmentCategory_(
+          row.snapshot_json,
+          [],
+          jobs.map(function(job) { return job.category || ''; })
+        ))
+      };
+    });
+    _prodCachePutJsonSafe_(cache, cacheKey, directResult, 120);
+    return directResult;
+  }
 
   try {
     const fastRows = supabaseSelect_('v_production_jobcard_lookup_fast', {
@@ -42063,6 +43510,9 @@ this.saveFlexoWorkOrderV2 = saveFlexoWorkOrderV2;
 this.submitWorkOrderWastageOverride = submitWorkOrderWastageOverride;
 this.listWorkOrderWastageApprovals = listWorkOrderWastageApprovals;
 this.decideWorkOrderWastageApproval = decideWorkOrderWastageApproval;
+this.listMyWorkOrderWastageRequests = listMyWorkOrderWastageRequests;
+this.getMyWorkOrderWastageRequest = getMyWorkOrderWastageRequest;
+this.cancelMyWorkOrderWastageRequest = cancelMyWorkOrderWastageRequest;
 this.deleteWorkOrder = deleteWorkOrder;
 this.getNextWONumber = getNextWONumber;
 this.getNextFlexoWONumber = getNextFlexoWONumber;
@@ -42168,6 +43618,8 @@ this.invPostIssue = invPostIssue;
 this.invPostIssueBulk = invPostIssueBulk;
 this.invListKraftReelOpeningSourcesJSON = invListKraftReelOpeningSourcesJSON;
 this.invRegisterOpeningKraftReels = invRegisterOpeningKraftReels;
+this.invListLegacyReelAlignmentRequestsJSON = invListLegacyReelAlignmentRequestsJSON;
+this.invAlignLegacyIssuedKraftReel = invAlignLegacyIssuedKraftReel;
 this.invReverseKraftGRN = invReverseKraftGRN;
 this.invPostWOReturn = invPostWOReturn;
 this.invGetWorkOrderForIssue = invGetWorkOrderForIssue;
@@ -42192,6 +43644,7 @@ this.invRefreshStockViewsJSON = invRefreshStockViewsJSON;
 this.fgGetBootstrap = fgGetBootstrap;
 this.fgGetDashboard = fgGetDashboard;
 this.fgSaveOpeningStock = fgSaveOpeningStock;
+this.fgUpdateOpeningValuation = fgUpdateOpeningValuation;
 this.fgSaveStockAdjustment = fgSaveStockAdjustment;
 this.fgSaveOpeningDispatch = fgSaveOpeningDispatch;
 this.fgPostPackedDispatch = fgPostPackedDispatch;
@@ -42613,6 +44066,46 @@ function reportsGetDashboardData(token) {
   return result;
 }
 
+function searchProductionWorkOrdersByNumber(query, token) {
+  _requireModuleAccess_(token, 'PRODUCTION', 'can_view');
+  const q = String(query || '').trim();
+  if (q.length < 2) return [];
+  const cache = CacheService.getScriptCache();
+  const cacheKey = _prodCacheKey_('wo_number_search|' + q.toLowerCase());
+  const cached = cache.get(cacheKey);
+  if (cached) return JSON.parse(cached);
+  const rows = supabaseRpc_('production_find_work_orders', { p_query: q }) || [];
+  const result = rows.map(function(row) {
+    return {
+      woId: row.wo_id,
+      woNumber: row.wo_number || '',
+      artworkNo: String(row.artwork_nos || '').split(',')[0].trim(),
+      client: row.client_name || '',
+      product: row.product_names || '',
+      soNumbers: String(row.so_numbers || '').split(',').map(function(value) {
+        return String(value || '').trim();
+      }).filter(Boolean),
+      category: _prodFormatCategoryGroupLabel_(row.department_category || '')
+    };
+  });
+  _prodCachePutJsonSafe_(cache, cacheKey, result, 120);
+  return result;
+}
+
+function lookupProductionWorkOrderByNumber(query, token) {
+  const results = searchProductionWorkOrdersByNumber(query, token);
+  const normalized = String(query || '').trim().toUpperCase();
+  const exactMatch = results.find(function(row) {
+    return String(row.woNumber || '').trim().toUpperCase() === normalized;
+  }) || null;
+  const exact = exactMatch || (normalized.length >= 4 && results.length === 1 ? results[0] : null);
+  return {
+    results: results,
+    exact: exact,
+    rows: exact ? getProductionBoardByWO(exact.woId, token, false) : []
+  };
+}
+
 this.reportsGetDashboardData = reportsGetDashboardData;
 
 this.adminCreateRole = adminCreateRole;
@@ -42696,6 +44189,8 @@ function _reportsIsStatementTimeout_(err) {
 
 function _reportsSelectAll_(table, opts) {
   const base = Object.assign({}, opts || {});
+  const throwOnError = base.throwOnError === true;
+  delete base.throwOnError;
   delete base.limit;
   delete base.offset;
 
@@ -42715,6 +44210,7 @@ function _reportsSelectAll_(table, opts) {
         pageSize = Math.max(100, Math.floor(pageSize / 2));
         continue;
       }
+      if (throwOnError) throw err;
       rows = [];
     }
     if (!rows.length) break;
@@ -44216,12 +45712,12 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'billedPct', label:'Billed %', type:'number' },
         { key:'orderValue', label:'SO Value', type:'money' },
         { key:'billedValue', label:'Billed Value', type:'money' },
-        { key:'rmIssuedQty', label:'RM Issued Qty', type:'number' },
-        { key:'rmIssuedValue', label:'RM Issued Value', type:'money' },
-        { key:'rmRequiredQty', label:'RM Required Qty', type:'number' },
-        { key:'rmNetIssuedQty', label:'RM Net Issued Qty', type:'number' },
-        { key:'rmPendingQty', label:'RM Pending Qty', type:'number' },
-        { key:'rmExcessQty', label:'RM Excess Qty', type:'number' },
+        { key:'rmIssuedQty', label:'WO RM Issued Qty', type:'number' },
+        { key:'rmIssuedValue', label:'Allocated RM Value', type:'money' },
+        { key:'rmRequiredQty', label:'WO RM Required Qty', type:'number' },
+        { key:'rmNetIssuedQty', label:'WO RM Net Issued Qty', type:'number' },
+        { key:'rmPendingQty', label:'WO RM Pending Qty', type:'number' },
+        { key:'rmExcessQty', label:'WO RM Excess Qty', type:'number' },
         { key:'rmMaterialStatus', label:'RM Material Status', type:'status' },
         { key:'rmPendingMaterialLines', label:'RM Pending Lines', type:'number' },
         { key:'rmExcessMaterialLines', label:'RM Excess Lines', type:'number' },
@@ -44355,6 +45851,351 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'processCostStatus', label:'Cost Status', type:'status' }
       ],
       rows: processCostRows
+    }]
+  };
+}
+
+function _reportsJobWastageSelect_() {
+  return [
+    'so_line_key','so_line_id','so_number','line_no','so_date','so_line_status',
+    'sales_rep','client_name','division','product_code','product_name','category',
+    'job_type','job_reference','artwork_nos','order_qty','order_unit','billing_status',
+    'gross_billed_qty','credited_qty','net_billed_qty','invoice_nos','credit_note_nos',
+    'first_invoice_date','last_invoice_date','last_credit_note_date','wo_id','wo_number',
+    'wo_date','wo_status','wo_job_qty','wo_job_unit','job_ups','job_record_count',
+    'ups_status','process_wastage_sheets','core_sheets','planned_input_sheets',
+    'qty_with_wastage_pcs','print_routing_id','print_process','print_sequence_no',
+    'print_route_count','print_machines','production_entry_count','production_unit',
+    'production_gross_qty','production_rejected_qty','production_ok_qty',
+    'printed_gross_sheets','printed_rejected_sheets','printed_ok_sheets','printed_input_pcs',
+    'first_print_datetime','last_print_datetime','last_print_date','so_wo_count',
+    'so_wo_numbers','so_ups_list','so_total_wo_job_qty','so_total_process_wastage_sheets',
+    'so_total_core_sheets','so_total_planned_input_sheets','so_total_qty_with_wastage_pcs',
+    'so_total_printed_gross_sheets','so_total_printed_rejected_sheets',
+    'so_total_printed_ok_sheets','so_total_printed_input_pcs','wastage_qty_pcs',
+    'wastage_pct','so_production_entry_count','so_first_print_datetime',
+    'so_last_print_datetime','so_last_print_date','calculation_status'
+  ].join(',');
+}
+
+function _reportsSectionJobWastage_(token, params) {
+  _reportsRequireSession_(token);
+  const filters = _reportsNormalizeFilters_(params);
+  const queryFilters = _reportsFastViewFilters_(filters, 'last_invoice_date', '');
+  if (filters.pendingOnly) queryFilters.calculation_status = 'neq.FINAL';
+  let sourceRows;
+
+  try {
+    sourceRows = _reportsSelectAllRequired_('v_report_job_wastage_complete', {
+      select: _reportsJobWastageSelect_(),
+      filters: queryFilters,
+      order: 'last_invoice_date.desc,so_date.desc,so_number.desc,line_no.asc,wo_date.asc,wo_number.asc'
+    });
+  } catch (err) {
+    const details = String((err && err.message) || err || 'Unknown Supabase error');
+    const normalized = details.toLowerCase();
+    const viewMissing = normalized.indexOf('42p01') !== -1 ||
+      normalized.indexOf('pgrst205') !== -1 ||
+      normalized.indexOf('does not exist') !== -1 ||
+      normalized.indexOf('could not find the table') !== -1;
+    if (viewMissing) {
+      throw new Error(
+        'Job Wastage report view is not installed in Supabase. ' +
+        'Run supabase/job_wastage_report_view.sql and reload the report.'
+      );
+    }
+    throw new Error('Job Wastage report could not be loaded. Supabase returned: ' + details);
+  }
+
+  function optionalNumber(value) {
+    return value == null || value === '' ? '' : _reportsSafeNumber_(value);
+  }
+
+  const detailRows = (sourceRows || []).map(function(row) {
+    return {
+      soLineKey: row.so_line_key || '',
+      soLineId: row.so_line_id || '',
+      soNumber: row.so_number || '',
+      lineNo: row.line_no == null ? '' : String(row.line_no),
+      soDate: row.so_date || '',
+      soLineStatus: row.so_line_status || 'OPEN',
+      billingStatus: row.billing_status || 'PENDING',
+      calculationStatus: row.calculation_status || '',
+      salesRep: row.sales_rep || '',
+      clientName: row.client_name || '',
+      division: row.division || 'Unassigned',
+      productCode: row.product_code || '',
+      productName: row.product_name || '',
+      category: row.category || '',
+      jobType: row.job_type || '',
+      jobReference: row.job_reference || '',
+      artworkNos: row.artwork_nos || '',
+      orderQty: _reportsSafeNumber_(row.order_qty),
+      orderUnit: row.order_unit || '',
+      grossBilledQty: _reportsSafeNumber_(row.gross_billed_qty),
+      creditedQty: _reportsSafeNumber_(row.credited_qty),
+      netBilledQty: _reportsSafeNumber_(row.net_billed_qty),
+      invoiceNos: row.invoice_nos || '',
+      creditNoteNos: row.credit_note_nos || '',
+      firstInvoiceDate: row.first_invoice_date || '',
+      lastInvoiceDate: row.last_invoice_date || '',
+      lastCreditNoteDate: row.last_credit_note_date || '',
+      woId: row.wo_id || '',
+      woNumber: row.wo_number || '',
+      woDate: row.wo_date || '',
+      woStatus: row.wo_status || '',
+      woJobQty: _reportsSafeNumber_(row.wo_job_qty),
+      woJobUnit: row.wo_job_unit || '',
+      jobUps: optionalNumber(row.job_ups),
+      jobRecordCount: _reportsSafeNumber_(row.job_record_count),
+      upsStatus: row.ups_status || '',
+      processWastageSheets: optionalNumber(row.process_wastage_sheets),
+      coreSheets: optionalNumber(row.core_sheets),
+      plannedInputSheets: optionalNumber(row.planned_input_sheets),
+      qtyWithWastagePcs: optionalNumber(row.qty_with_wastage_pcs),
+      printRoutingId: row.print_routing_id || '',
+      printProcess: row.print_process || '',
+      printSequenceNo: optionalNumber(row.print_sequence_no),
+      printRouteCount: _reportsSafeNumber_(row.print_route_count),
+      printMachines: row.print_machines || '',
+      productionEntryCount: _reportsSafeNumber_(row.production_entry_count),
+      productionUnit: row.production_unit || '',
+      productionGrossQty: _reportsSafeNumber_(row.production_gross_qty),
+      productionRejectedQty: _reportsSafeNumber_(row.production_rejected_qty),
+      productionOkQty: _reportsSafeNumber_(row.production_ok_qty),
+      printedGrossSheets: optionalNumber(row.printed_gross_sheets),
+      printedRejectedSheets: optionalNumber(row.printed_rejected_sheets),
+      printedOkSheets: optionalNumber(row.printed_ok_sheets),
+      printedInputPcs: optionalNumber(row.printed_input_pcs),
+      firstPrintDateTime: row.first_print_datetime || '',
+      lastPrintDateTime: row.last_print_datetime || '',
+      lastPrintDate: row.last_print_date || '',
+      soWoCount: _reportsSafeNumber_(row.so_wo_count),
+      soWoNumbers: row.so_wo_numbers || '',
+      soUpsList: row.so_ups_list || '',
+      soTotalWoJobQty: _reportsSafeNumber_(row.so_total_wo_job_qty),
+      soTotalProcessWastageSheets: optionalNumber(row.so_total_process_wastage_sheets),
+      soTotalCoreSheets: optionalNumber(row.so_total_core_sheets),
+      soTotalPlannedInputSheets: optionalNumber(row.so_total_planned_input_sheets),
+      soTotalQtyWithWastagePcs: optionalNumber(row.so_total_qty_with_wastage_pcs),
+      soTotalPrintedGrossSheets: optionalNumber(row.so_total_printed_gross_sheets),
+      soTotalPrintedRejectedSheets: optionalNumber(row.so_total_printed_rejected_sheets),
+      soTotalPrintedOkSheets: optionalNumber(row.so_total_printed_ok_sheets),
+      soTotalPrintedInputPcs: optionalNumber(row.so_total_printed_input_pcs),
+      wastageQtyPcs: optionalNumber(row.wastage_qty_pcs),
+      wastagePct: optionalNumber(row.wastage_pct),
+      soProductionEntryCount: _reportsSafeNumber_(row.so_production_entry_count),
+      soFirstPrintDateTime: row.so_first_print_datetime || '',
+      soLastPrintDateTime: row.so_last_print_datetime || '',
+      soLastPrintDate: row.so_last_print_date || ''
+    };
+  }).filter(function(row) {
+    return _reportsDatePasses_(row.lastInvoiceDate, filters) &&
+      _reportsTextPasses_(row, filters, [
+        'soNumber','lineNo','clientName','division','productCode','productName',
+        'jobType','jobReference','artworkNos','woNumber','printProcess','printMachines',
+        'invoiceNos','creditNoteNos'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'soLineStatus','billingStatus','calculationStatus','division','woStatus',
+        'upsStatus','printProcess','productionUnit'
+      ]);
+  });
+
+  const summaryByKey = {};
+  detailRows.forEach(function(row) {
+    const key = row.soLineKey || (row.soNumber + '||' + row.lineNo);
+    if (summaryByKey[key]) return;
+    summaryByKey[key] = {
+      soLineKey: key,
+      soNumber: row.soNumber,
+      lineNo: row.lineNo,
+      soDate: row.soDate,
+      soLineStatus: row.soLineStatus,
+      billingStatus: row.billingStatus,
+      calculationStatus: row.calculationStatus,
+      salesRep: row.salesRep,
+      clientName: row.clientName,
+      division: row.division,
+      productCode: row.productCode,
+      productName: row.productName,
+      category: row.category,
+      jobType: row.jobType,
+      jobReference: row.jobReference,
+      artworkNos: row.artworkNos,
+      orderQty: row.orderQty,
+      orderUnit: row.orderUnit,
+      woCount: row.soWoCount,
+      woNumbers: row.soWoNumbers,
+      upsList: row.soUpsList,
+      totalWoJobQty: row.soTotalWoJobQty,
+      totalProcessWastageSheets: row.soTotalProcessWastageSheets,
+      totalCoreSheets: row.soTotalCoreSheets,
+      totalPlannedInputSheets: row.soTotalPlannedInputSheets,
+      totalQtyWithWastagePcs: row.soTotalQtyWithWastagePcs,
+      totalPrintedGrossSheets: row.soTotalPrintedGrossSheets,
+      totalPrintedRejectedSheets: row.soTotalPrintedRejectedSheets,
+      totalPrintedOkSheets: row.soTotalPrintedOkSheets,
+      totalPrintedInputPcs: row.soTotalPrintedInputPcs,
+      grossBilledQty: row.grossBilledQty,
+      creditedQty: row.creditedQty,
+      netBilledQty: row.netBilledQty,
+      wastageQtyPcs: row.wastageQtyPcs,
+      wastagePct: row.wastagePct,
+      productionEntryCount: row.soProductionEntryCount,
+      firstPrintDateTime: row.soFirstPrintDateTime,
+      lastPrintDateTime: row.soLastPrintDateTime,
+      lastPrintDate: row.soLastPrintDate,
+      invoiceNos: row.invoiceNos,
+      creditNoteNos: row.creditNoteNos,
+      firstInvoiceDate: row.firstInvoiceDate,
+      lastInvoiceDate: row.lastInvoiceDate,
+      lastCreditNoteDate: row.lastCreditNoteDate
+    };
+  });
+
+  const summaryRows = Object.keys(summaryByKey).map(function(key) {
+    return summaryByKey[key];
+  }).sort(function(a, b) {
+    return String(b.lastInvoiceDate || '').localeCompare(String(a.lastInvoiceDate || '')) ||
+      String(b.soDate || '').localeCompare(String(a.soDate || '')) ||
+      String(b.soNumber || '').localeCompare(String(a.soNumber || '')) ||
+      _reportsSafeNumber_(a.lineNo) - _reportsSafeNumber_(b.lineNo);
+  });
+
+  const calculatedSummaryRows = summaryRows.filter(function(row) {
+    return row.totalPrintedInputPcs !== '' && _reportsSafeNumber_(row.totalPrintedInputPcs) > 0;
+  });
+  const totalPrintedInputPcs = calculatedSummaryRows.reduce(function(sum, row) {
+    return sum + _reportsSafeNumber_(row.totalPrintedInputPcs);
+  }, 0);
+  const totalNetBilledQty = calculatedSummaryRows.reduce(function(sum, row) {
+    return sum + _reportsSafeNumber_(row.netBilledQty);
+  }, 0);
+  const totalWastageQty = totalPrintedInputPcs - totalNetBilledQty;
+
+  return {
+    ok: true,
+    title: 'Job Wastage',
+    metrics: {
+      soLines: summaryRows.length,
+      workOrderRows: detailRows.length,
+      finalRows: summaryRows.filter(function(row){ return row.calculationStatus === 'FINAL'; }).length,
+      provisionalRows: summaryRows.filter(function(row){ return row.calculationStatus === 'PROVISIONAL'; }).length,
+      conversionPending: summaryRows.filter(function(row){ return row.calculationStatus === 'FLEXO_CONVERSION_PENDING'; }).length,
+      printedInputPcs: _reportsRoundNumber_(totalPrintedInputPcs, 2),
+      netBilledQty: _reportsRoundNumber_(totalNetBilledQty, 2),
+      wastageQtyPcs: _reportsRoundNumber_(totalWastageQty, 2),
+      weightedWastagePct: totalPrintedInputPcs > 0
+        ? _reportsRoundNumber_((totalWastageQty / totalPrintedInputPcs) * 100, 2)
+        : 0
+    },
+    tables: [{
+      key: 'jobWastageSummary',
+      title: 'SO Line Wastage Summary',
+      subtitle: 'One row per SO line. Date range is based on Last Billing Date. Wastage uses gross printed input PCS less posted billing quantity net of posted credit notes.',
+      minWidth: 5600,
+      columns: [
+        { key:'soNumber', label:'SO No' },
+        { key:'lineNo', label:'Line' },
+        { key:'soDate', label:'SO Date', type:'date' },
+        { key:'soLineStatus', label:'SO Line Status', type:'status' },
+        { key:'billingStatus', label:'Billing Status', type:'status' },
+        { key:'calculationStatus', label:'Calculation Status', type:'status' },
+        { key:'clientName', label:'Client' },
+        { key:'salesRep', label:'Sales Rep' },
+        { key:'division', label:'Division' },
+        { key:'productCode', label:'Product Code' },
+        { key:'productName', label:'Product' },
+        { key:'category', label:'Category' },
+        { key:'jobType', label:'Job Type' },
+        { key:'jobReference', label:'Job Ref' },
+        { key:'artworkNos', label:'Artwork Nos' },
+        { key:'orderQty', label:'SO Order Qty PCS', type:'number' },
+        { key:'orderUnit', label:'SO Unit' },
+        { key:'woCount', label:'WO Count', type:'number' },
+        { key:'woNumbers', label:'WO Nos' },
+        { key:'upsList', label:'UPS' },
+        { key:'totalWoJobQty', label:'WO Job Qty PCS', type:'number' },
+        { key:'totalProcessWastageSheets', label:'Job Card Wastage Sheets', type:'number' },
+        { key:'totalCoreSheets', label:'Core Sheets', type:'number' },
+        { key:'totalPlannedInputSheets', label:'Planned Input Sheets', type:'number' },
+        { key:'totalQtyWithWastagePcs', label:'Qty With Wastage PCS', type:'number' },
+        { key:'totalPrintedGrossSheets', label:'Printed Gross Sheets', type:'number' },
+        { key:'totalPrintedRejectedSheets', label:'Printed Reject Sheets', type:'number' },
+        { key:'totalPrintedOkSheets', label:'Printed OK Sheets', type:'number' },
+        { key:'totalPrintedInputPcs', label:'Printed Input PCS', type:'number' },
+        { key:'grossBilledQty', label:'Gross Billed Qty', type:'number' },
+        { key:'creditedQty', label:'Credit Note Qty', type:'number' },
+        { key:'netBilledQty', label:'Net Billed Qty', type:'number' },
+        { key:'wastageQtyPcs', label:'Actual Wastage PCS', type:'number' },
+        { key:'wastagePct', label:'Actual Wastage %', type:'number' },
+        { key:'productionEntryCount', label:'Print Entries', type:'number' },
+        { key:'firstPrintDateTime', label:'First Print Time', type:'datetime' },
+        { key:'lastPrintDateTime', label:'Last Print Time', type:'datetime' },
+        { key:'invoiceNos', label:'Invoice Nos' },
+        { key:'creditNoteNos', label:'Credit Note Nos' },
+        { key:'firstInvoiceDate', label:'First Billing Date', type:'date' },
+        { key:'lastInvoiceDate', label:'Last Billing Date', type:'date' },
+        { key:'lastCreditNoteDate', label:'Last Credit Note Date', type:'date' }
+      ],
+      rows: summaryRows
+    }, {
+      key: 'jobWastageDetails',
+      title: 'Job Card / Work Order Wastage Detail',
+      subtitle: 'One row per work order and SO line. Combined-sheet print entries are expanded using each job UPS. Flexo production remains in RM and is not converted to PCS.',
+      minWidth: 6800,
+      columns: [
+        { key:'soNumber', label:'SO No' },
+        { key:'lineNo', label:'Line' },
+        { key:'soDate', label:'SO Date', type:'date' },
+        { key:'soLineStatus', label:'SO Line Status', type:'status' },
+        { key:'billingStatus', label:'Billing Status', type:'status' },
+        { key:'calculationStatus', label:'Calculation Status', type:'status' },
+        { key:'clientName', label:'Client' },
+        { key:'division', label:'Division' },
+        { key:'productCode', label:'Product Code' },
+        { key:'productName', label:'Product' },
+        { key:'jobType', label:'Job Type' },
+        { key:'jobReference', label:'Job Ref' },
+        { key:'artworkNos', label:'Artwork Nos' },
+        { key:'orderQty', label:'SO Order Qty PCS', type:'number' },
+        { key:'orderUnit', label:'SO Unit' },
+        { key:'woNumber', label:'WO No' },
+        { key:'woDate', label:'WO Date', type:'date' },
+        { key:'woStatus', label:'WO Status', type:'status' },
+        { key:'woJobQty', label:'WO Job Qty PCS', type:'number' },
+        { key:'woJobUnit', label:'WO Unit' },
+        { key:'jobUps', label:'UPS', type:'number' },
+        { key:'upsStatus', label:'UPS Status', type:'status' },
+        { key:'processWastageSheets', label:'Job Card Wastage Sheets', type:'number' },
+        { key:'coreSheets', label:'Core Sheets', type:'number' },
+        { key:'plannedInputSheets', label:'Planned Input Sheets', type:'number' },
+        { key:'qtyWithWastagePcs', label:'Qty With Wastage PCS', type:'number' },
+        { key:'printProcess', label:'Printing Stage' },
+        { key:'printSequenceNo', label:'Print Seq', type:'number' },
+        { key:'printRouteCount', label:'Print Routes', type:'number' },
+        { key:'printMachines', label:'Printing Machine' },
+        { key:'productionEntryCount', label:'Print Entries', type:'number' },
+        { key:'productionUnit', label:'Production Unit' },
+        { key:'productionGrossQty', label:'Production Gross Qty', type:'number' },
+        { key:'productionRejectedQty', label:'Production Reject Qty', type:'number' },
+        { key:'productionOkQty', label:'Production OK Qty', type:'number' },
+        { key:'printedGrossSheets', label:'Printed Gross Sheets', type:'number' },
+        { key:'printedRejectedSheets', label:'Printed Reject Sheets', type:'number' },
+        { key:'printedOkSheets', label:'Printed OK Sheets', type:'number' },
+        { key:'printedInputPcs', label:'Printed Input PCS', type:'number' },
+        { key:'grossBilledQty', label:'SO Gross Billed Qty', type:'number' },
+        { key:'creditedQty', label:'SO Credit Note Qty', type:'number' },
+        { key:'netBilledQty', label:'SO Net Billed Qty', type:'number' },
+        { key:'firstPrintDateTime', label:'First Print Time', type:'datetime' },
+        { key:'lastPrintDateTime', label:'Last Print Time', type:'datetime' },
+        { key:'invoiceNos', label:'Invoice Nos' },
+        { key:'creditNoteNos', label:'Credit Note Nos' },
+        { key:'lastInvoiceDate', label:'Last Billing Date', type:'date' },
+        { key:'printRoutingId', label:'Print Routing ID' }
+      ],
+      rows: detailRows
     }]
   };
 }
@@ -45054,9 +46895,9 @@ function _reportsSectionSheetUtilization_(token, params) {
         { key:'sheetLength', label:'Sheet Length (in / legacy mm)', type:'number' },
         { key:'sheetWidth', label:'Sheet Width (in / legacy mm)', type:'number' },
         { key:'acrossWidth', label:'Flexo Across Width mm', type:'number' },
-        { key:'teeth', label:'Flexo Teeth / Repeat mm', type:'number' },
-        { key:'sheetBasisLengthMm', label:'Basis Length', type:'number' },
-        { key:'sheetBasisWidthMm', label:'Basis Width', type:'number' },
+        { key:'teeth', label:'Flexo Teeth', type:'number' },
+        { key:'sheetBasisLengthMm', label:'Basis Length mm', type:'number' },
+        { key:'sheetBasisWidthMm', label:'Basis Width / Flexo Repeat mm', type:'number' },
         { key:'sheetAreaSqIn', label:'Sheet Area sq.in', type:'number' },
         { key:'jobCount', label:'Jobs', type:'number' },
         { key:'jobsWithDimension', label:'Jobs With Size', type:'number' },
@@ -45076,7 +46917,7 @@ function _reportsSectionSheetUtilization_(token, params) {
       key: 'sheet-utilization-detail',
       title: 'Artwork Sheet Utilization Job Detail',
       subtitle: 'Line-level area contribution used by the summary report.',
-      minWidth: 3600,
+      minWidth: 3900,
       columns: [
         { key:'artworkNo', label:'Artwork No' },
         { key:'soNumber', label:'SO No' },
@@ -45101,8 +46942,10 @@ function _reportsSectionSheetUtilization_(token, params) {
         { key:'itemAreaSqIn', label:'Item Area sq.in', type:'number' },
         { key:'layoutUps', label:'Layout UPS', type:'number' },
         { key:'jobLayoutAreaSqIn', label:'Job Layout Area sq.in', type:'number' },
-        { key:'sheetBasisLengthMm', label:'Basis Length', type:'number' },
-        { key:'sheetBasisWidthMm', label:'Basis Width', type:'number' },
+        { key:'acrossWidth', label:'Flexo Across Width mm', type:'number' },
+        { key:'teeth', label:'Flexo Teeth', type:'number' },
+        { key:'sheetBasisLengthMm', label:'Basis Length mm', type:'number' },
+        { key:'sheetBasisWidthMm', label:'Basis Width / Flexo Repeat mm', type:'number' },
         { key:'sheetAreaSqIn', label:'Sheet Area sq.in', type:'number' },
         { key:'sheetUps', label:'Sheet UPS', type:'number' },
         { key:'acrossUps', label:'Across UPS', type:'number' },
@@ -45175,6 +47018,332 @@ function _reportsInventoryReceiptMetaByPrNo_(prNos) {
   });
 
   return out;
+}
+
+function _reportsSectionRepeatTooling_(token, params) {
+  _reportsRequireSession_(token);
+  const filters = _reportsNormalizeFilters_(params);
+  const queryFilters = filters.pendingOnly
+    ? { pending_qty: 'gt.0' }
+    : _reportsApplyDateFilterToQuery_(filters, 'po_date');
+
+  let sourceRows;
+  try {
+    sourceRows = _reportsSelectAll_('v_report_repeat_job_plate_die_procurement', {
+      filters: queryFilters,
+      order: 'po_date.desc,po_no.desc,po_line_no.asc',
+      throwOnError: true
+    });
+  } catch (err) {
+    const details = String((err && err.message) || err || 'Unknown Supabase error');
+    Logger.log('Repeat Plate/Die report load failed: ' + details);
+    const normalized = details.toLowerCase();
+    const viewMissing = normalized.indexOf('42p01') !== -1 ||
+      normalized.indexOf('pgrst205') !== -1 ||
+      normalized.indexOf('does not exist') !== -1 ||
+      normalized.indexOf('could not find the table') !== -1;
+    if (viewMissing) {
+      throw new Error(
+        'Repeat Plate/Die report view is not installed in Supabase. ' +
+        'Run supabase/repeat_job_plate_die_procurement_report.sql and reload the report.'
+      );
+    }
+    throw new Error('Repeat Plate/Die report could not be loaded. Supabase returned: ' + details);
+  }
+
+  const rows = sourceRows.map(function(row) {
+    return {
+      recordId: row.record_id || '',
+      poLineId: row.po_line_id || '',
+      poNo: row.po_no || '',
+      poDate: row.po_date || '',
+      poStatus: row.po_status || '',
+      poLineNo: row.po_line_no == null ? '' : String(row.po_line_no),
+      vendorName: row.vendor_name || '',
+      buyerName: row.buyer_name || '',
+      procurementType: row.procurement_type || '',
+      sourceType: row.source_type || '',
+      procurementSource: row.procurement_source || '',
+      linkageMethod: row.linkage_method || '',
+      jobTypeScope: row.job_type_scope || '',
+      repeatJobCount: _reportsSafeNumber_(row.repeat_job_count),
+      matchedJobCount: _reportsSafeNumber_(row.matched_job_count),
+      repeatSoRefs: row.repeat_so_refs || '',
+      matchedSoRefs: row.matched_so_refs || '',
+      artworkNo: row.artwork_no || '',
+      artworkProductType: row.artwork_product_type || '',
+      division: row.division || 'Unassigned',
+      divisionList: row.division_list || '',
+      clientNames: row.client_names || '',
+      productNames: row.product_names || '',
+      salesReps: row.sales_reps || '',
+      jobTypes: row.job_types || '',
+      plateStatus: row.plate_status || '',
+      dieStatus: row.die_status || '',
+      plateSize: row.plate_size || '',
+      plateCount: _reportsSafeNumber_(row.plate_count),
+      hybridPlateSize: row.hybrid_plate_size || '',
+      hybridPlateCount: _reportsSafeNumber_(row.hybrid_plate_count),
+      dieCount: _reportsSafeNumber_(row.die_count),
+      artworkRequiredQty: _reportsSafeNumber_(row.artwork_required_qty),
+      itemCode: row.item_code || '',
+      itemName: row.item_name || '',
+      poDepartment: row.po_department || '',
+      sourceRef: row.source_ref || '',
+      jobRef: row.job_ref || '',
+      orderedQty: _reportsSafeNumber_(row.ordered_qty),
+      receivedQty: _reportsSafeNumber_(row.received_qty),
+      shortClosedQty: _reportsSafeNumber_(row.short_closed_qty),
+      pendingQty: _reportsSafeNumber_(row.pending_qty),
+      poRate: _reportsSafeNumber_(row.po_rate),
+      taxPct: _reportsSafeNumber_(row.tax_pct),
+      orderedBasicValue: _reportsSafeNumber_(row.ordered_basic_value),
+      orderedTaxValue: _reportsSafeNumber_(row.ordered_tax_value),
+      orderedTotalValue: _reportsSafeNumber_(row.ordered_total_value),
+      receivedBasicValue: _reportsSafeNumber_(row.received_basic_value),
+      receivedTaxValue: _reportsSafeNumber_(row.received_tax_value),
+      receivedTotalValue: _reportsSafeNumber_(row.received_total_value),
+      pendingBasicValue: _reportsSafeNumber_(row.pending_basic_value),
+      pendingTaxValue: _reportsSafeNumber_(row.pending_tax_value),
+      pendingTotalValue: _reportsSafeNumber_(row.pending_total_value),
+      procurementStatus: row.procurement_status || '',
+      receiptCount: _reportsSafeNumber_(row.receipt_count),
+      firstReceiptDate: row.first_receipt_date || '',
+      lastReceiptDate: row.last_receipt_date || '',
+      receiptRefs: row.receipt_refs || '',
+      remarks: row.po_line_remarks || ''
+    };
+  }).filter(function(row) {
+    const datePass = filters.pendingOnly ? true : _reportsDatePasses_(row.poDate, filters);
+    return datePass &&
+      _reportsTextPasses_(row, filters, [
+        'poNo',
+        'vendorName',
+        'buyerName',
+        'procurementType',
+        'sourceType',
+        'procurementSource',
+        'linkageMethod',
+        'jobTypeScope',
+        'repeatSoRefs',
+        'matchedSoRefs',
+        'artworkNo',
+        'artworkProductType',
+        'division',
+        'divisionList',
+        'clientNames',
+        'productNames',
+        'salesReps',
+        'jobTypes',
+        'plateStatus',
+        'dieStatus',
+        'plateSize',
+        'hybridPlateSize',
+        'itemCode',
+        'itemName',
+        'poDepartment',
+        'sourceRef',
+        'jobRef',
+        'procurementStatus',
+        'receiptRefs',
+        'remarks'
+      ]) &&
+      _reportsStatusPasses_(row, filters, [
+        'procurementType',
+        'procurementStatus',
+        'poStatus',
+        'sourceType',
+        'procurementSource',
+        'linkageMethod',
+        'jobTypeScope',
+        'division',
+        'plateStatus',
+        'dieStatus'
+      ]);
+  });
+
+  const summaryMap = {};
+  const allRepeatJobs = {};
+  const allPOs = {};
+  rows.forEach(function(row) {
+    const division = String(row.division || 'Unassigned').trim() || 'Unassigned';
+    const type = String(row.procurementType || 'Unassigned').trim() || 'Unassigned';
+    const key = division + '||' + type;
+    if (!summaryMap[key]) {
+      summaryMap[key] = {
+        division: division,
+        procurementType: type,
+        poLines: 0,
+        poRefs: {},
+        repeatJobs: {},
+        vendors: {},
+        orderedQty: 0,
+        receivedQty: 0,
+        shortClosedQty: 0,
+        pendingQty: 0,
+        orderedBasicValue: 0,
+        orderedTotalValue: 0,
+        receivedBasicValue: 0,
+        receivedTotalValue: 0,
+        pendingBasicValue: 0,
+        pendingTotalValue: 0
+      };
+    }
+    const bucket = summaryMap[key];
+    bucket.poLines += 1;
+    if (row.poNo) {
+      bucket.poRefs[row.poNo] = true;
+      allPOs[row.poNo] = true;
+    }
+    if (row.vendorName) bucket.vendors[row.vendorName] = true;
+    String(row.repeatSoRefs || '').split(',').map(function(v) {
+      return String(v || '').trim();
+    }).filter(Boolean).forEach(function(ref) {
+      bucket.repeatJobs[ref] = true;
+      allRepeatJobs[ref] = true;
+    });
+    bucket.orderedQty += _reportsSafeNumber_(row.orderedQty);
+    bucket.receivedQty += _reportsSafeNumber_(row.receivedQty);
+    bucket.shortClosedQty += _reportsSafeNumber_(row.shortClosedQty);
+    bucket.pendingQty += _reportsSafeNumber_(row.pendingQty);
+    bucket.orderedBasicValue += _reportsSafeNumber_(row.orderedBasicValue);
+    bucket.orderedTotalValue += _reportsSafeNumber_(row.orderedTotalValue);
+    bucket.receivedBasicValue += _reportsSafeNumber_(row.receivedBasicValue);
+    bucket.receivedTotalValue += _reportsSafeNumber_(row.receivedTotalValue);
+    bucket.pendingBasicValue += _reportsSafeNumber_(row.pendingBasicValue);
+    bucket.pendingTotalValue += _reportsSafeNumber_(row.pendingTotalValue);
+  });
+
+  const summaryRows = Object.keys(summaryMap).map(function(key) {
+    const row = summaryMap[key];
+    return {
+      division: row.division,
+      procurementType: row.procurementType,
+      poCount: Object.keys(row.poRefs).length,
+      poLines: row.poLines,
+      repeatJobCount: Object.keys(row.repeatJobs).length,
+      vendorCount: Object.keys(row.vendors).length,
+      orderedQty: _reportsRoundNumber_(row.orderedQty, 4),
+      receivedQty: _reportsRoundNumber_(row.receivedQty, 4),
+      shortClosedQty: _reportsRoundNumber_(row.shortClosedQty, 4),
+      pendingQty: _reportsRoundNumber_(row.pendingQty, 4),
+      orderedBasicValue: _reportsRoundNumber_(row.orderedBasicValue, 2),
+      orderedTotalValue: _reportsRoundNumber_(row.orderedTotalValue, 2),
+      receivedBasicValue: _reportsRoundNumber_(row.receivedBasicValue, 2),
+      receivedTotalValue: _reportsRoundNumber_(row.receivedTotalValue, 2),
+      pendingBasicValue: _reportsRoundNumber_(row.pendingBasicValue, 2),
+      pendingTotalValue: _reportsRoundNumber_(row.pendingTotalValue, 2)
+    };
+  }).sort(function(a, b) {
+    return String(a.division || '').localeCompare(String(b.division || '')) ||
+      String(a.procurementType || '').localeCompare(String(b.procurementType || ''));
+  });
+
+  return {
+    ok: true,
+    title: 'Repeat Job Plate & Die Procurement',
+    metrics: {
+      poLines: rows.length,
+      poCount: Object.keys(allPOs).length,
+      repeatJobs: Object.keys(allRepeatJobs).length,
+      orderedQty: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + row.orderedQty; }, 0), 4),
+      receivedQty: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + row.receivedQty; }, 0), 4),
+      pendingQty: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + row.pendingQty; }, 0), 4),
+      orderedTotalValue: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + row.orderedTotalValue; }, 0), 2),
+      receivedTotalValue: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + row.receivedTotalValue; }, 0), 2),
+      pendingTotalValue: _reportsRoundNumber_(rows.reduce(function(sum, row){ return sum + row.pendingTotalValue; }, 0), 2)
+    },
+    tables: [{
+      key: 'repeatToolingSummary',
+      title: 'Division-wise Repeat Job Plate & Die Summary',
+      subtitle: 'PO-line totals for repeat jobs. Values show basic and GST-inclusive amounts; PO freight is not allocated.',
+      minWidth: 2350,
+      columns: [
+        { key:'division', label:'Division' },
+        { key:'procurementType', label:'Type', type:'status' },
+        { key:'poCount', label:'POs', type:'number' },
+        { key:'poLines', label:'PO Lines', type:'number' },
+        { key:'repeatJobCount', label:'Repeat Jobs', type:'number' },
+        { key:'vendorCount', label:'Vendors', type:'number' },
+        { key:'orderedQty', label:'Ordered Qty', type:'number' },
+        { key:'receivedQty', label:'Received Qty', type:'number' },
+        { key:'shortClosedQty', label:'Short Closed Qty', type:'number' },
+        { key:'pendingQty', label:'Pending Qty', type:'number' },
+        { key:'orderedBasicValue', label:'Ordered Basic Value', type:'money' },
+        { key:'orderedTotalValue', label:'Ordered Total Value', type:'money' },
+        { key:'receivedBasicValue', label:'Received Basic Value', type:'money' },
+        { key:'receivedTotalValue', label:'Received Total Value', type:'money' },
+        { key:'pendingBasicValue', label:'Pending Basic Value', type:'money' },
+        { key:'pendingTotalValue', label:'Pending Total Value', type:'money' }
+      ],
+      rows: summaryRows
+    }, {
+      key: 'repeatToolingLines',
+      title: 'Repeat Job Plate & Die PO Line Details',
+      subtitle: 'One row per plate/die PO line. Shared artwork references remain on one line to prevent duplicated quantity and value.',
+      minWidth: 5600,
+      columns: [
+        { key:'poNo', label:'PO No' },
+        { key:'poDate', label:'PO Date', type:'date' },
+        { key:'poStatus', label:'PO Status', type:'status' },
+        { key:'poLineNo', label:'PO Line' },
+        { key:'vendorName', label:'Vendor' },
+        { key:'buyerName', label:'Buyer' },
+        { key:'procurementType', label:'Type', type:'status' },
+        { key:'procurementSource', label:'PO Source', type:'status' },
+        { key:'sourceType', label:'Source Type', type:'status' },
+        { key:'linkageMethod', label:'Job Linkage', type:'status' },
+        { key:'jobTypeScope', label:'Job Type Scope', type:'status' },
+        { key:'repeatJobCount', label:'Repeat Jobs', type:'number' },
+        { key:'matchedJobCount', label:'Matched Repeat Jobs', type:'number' },
+        { key:'repeatSoRefs', label:'Repeat SO / Lines' },
+        { key:'matchedSoRefs', label:'Matched Repeat SO / Lines' },
+        { key:'artworkNo', label:'Artwork No' },
+        { key:'artworkProductType', label:'Artwork Type' },
+        { key:'division', label:'Division' },
+        { key:'divisionList', label:'Division List' },
+        { key:'clientNames', label:'Client' },
+        { key:'productNames', label:'Product' },
+        { key:'salesReps', label:'Sales Rep' },
+        { key:'jobTypes', label:'Job Types' },
+        { key:'plateStatus', label:'Plate Requirement', type:'status' },
+        { key:'dieStatus', label:'Die Requirement', type:'status' },
+        { key:'plateSize', label:'Plate Size' },
+        { key:'plateCount', label:'Plate Count', type:'number' },
+        { key:'hybridPlateSize', label:'Hybrid Plate Size' },
+        { key:'hybridPlateCount', label:'Hybrid Plate Count', type:'number' },
+        { key:'dieCount', label:'Die Count', type:'number' },
+        { key:'artworkRequiredQty', label:'Artwork Required Qty', type:'number' },
+        { key:'itemCode', label:'Item Code' },
+        { key:'itemName', label:'Item Name' },
+        { key:'poDepartment', label:'PO Division / Dept' },
+        { key:'sourceRef', label:'Artwork Source Ref' },
+        { key:'jobRef', label:'PO Job Ref' },
+        { key:'orderedQty', label:'Ordered Qty', type:'number' },
+        { key:'receivedQty', label:'Received Qty', type:'number' },
+        { key:'shortClosedQty', label:'Short Closed Qty', type:'number' },
+        { key:'pendingQty', label:'Pending Qty', type:'number' },
+        { key:'poRate', label:'Rate', type:'money' },
+        { key:'taxPct', label:'GST %', type:'number' },
+        { key:'orderedBasicValue', label:'Ordered Basic Value', type:'money' },
+        { key:'orderedTaxValue', label:'Ordered GST', type:'money' },
+        { key:'orderedTotalValue', label:'Ordered Total Value', type:'money' },
+        { key:'receivedBasicValue', label:'Received Basic Value', type:'money' },
+        { key:'receivedTaxValue', label:'Received GST', type:'money' },
+        { key:'receivedTotalValue', label:'Received Total Value', type:'money' },
+        { key:'pendingBasicValue', label:'Pending Basic Value', type:'money' },
+        { key:'pendingTaxValue', label:'Pending GST', type:'money' },
+        { key:'pendingTotalValue', label:'Pending Total Value', type:'money' },
+        { key:'procurementStatus', label:'Receipt Status', type:'status' },
+        { key:'receiptCount', label:'Receipts', type:'number' },
+        { key:'firstReceiptDate', label:'First Receipt Date', type:'date' },
+        { key:'lastReceiptDate', label:'Last Receipt Date', type:'date' },
+        { key:'receiptRefs', label:'Receipt Refs' },
+        { key:'remarks', label:'PO Line Remarks' }
+      ],
+      rows: rows
+    }]
+  };
 }
 
 function _reportsSectionPOLines_(token, params) {
@@ -46308,17 +48477,114 @@ function _reportsSectionTraceability_(token, params) {
       _reportsTextPasses_(row, filters, ['soNumber','clientName','productName','salesRep','woNumbers','artworkNo','state']) &&
       _reportsStatusPasses_(row, filters, ['state','accountsStatus','businessStatus','artworkStatus','plateStatus','dieStatus']);
   });
+  const batchRows = _reportsSelectAll_('v_purchase_to_dispatch_traceability', {
+    filters: _reportsApplyDateFilterToQuery_(filters, 'receipt_date'),
+    order: 'receipt_date.desc,rm_batch_no.asc,wo_number.asc,dispatch_date.desc'
+  }).map(function(row) {
+    return {
+      rmBatchNo: row.rm_batch_no || '',
+      rmItemCode: row.rm_item_code || '',
+      rmItemName: row.rm_item_name || '',
+      rmUom: row.rm_uom || '',
+      receiptDate: row.receipt_date || '',
+      receivedQty: _reportsSafeNumber_(row.rm_received_qty),
+      rmRate: _reportsSafeNumber_(row.rm_rate),
+      grnNo: row.grn_no || '',
+      grnDate: row.grn_date || '',
+      poNo: row.po_no || '',
+      supplierInvoiceNo: row.supplier_invoice_no || '',
+      supplierName: row.supplier_name || '',
+      issuedQty: _reportsSafeNumber_(row.rm_issued_qty_to_wo),
+      woNumber: row.wo_number || '',
+      woDate: row.wo_date || '',
+      fgBatchNo: row.fg_batch_no || '',
+      fgBatchQty: _reportsSafeNumber_(row.fg_batch_qty),
+      dispatchNo: row.dispatch_no || '',
+      dispatchDate: row.dispatch_date || '',
+      dispatchQty: _reportsSafeNumber_(row.dispatch_qty),
+      soNumber: row.so_number || '',
+      lineNo: row.line_no == null ? '' : String(row.line_no),
+      clientCode: row.client_code || '',
+      clientName: row.client_name || '',
+      productCode: row.product_code || '',
+      productName: row.product_name || '',
+      invoiceNo: row.invoice_no || '',
+      invoiceDate: row.invoice_date || '',
+      invoiceStatus: row.invoice_status || '',
+      invoiceDispatchQty: _reportsSafeNumber_(row.invoice_dispatch_qty),
+      invoiceLineQty: _reportsSafeNumber_(row.invoice_line_qty),
+      invoiceLineTotal: _reportsSafeNumber_(row.invoice_line_total),
+      traceStatus: row.trace_status || '',
+      traceConfidence: row.trace_confidence || 'UNTRACED'
+    };
+  }).filter(function(row) {
+    return _reportsDatePasses_(row.receiptDate, filters) &&
+      _reportsTextPasses_(row, filters, [
+        'rmBatchNo','rmItemCode','rmItemName','grnNo','poNo','supplierInvoiceNo','supplierName',
+        'woNumber','fgBatchNo','dispatchNo','soNumber','clientName',
+        'productCode','productName','invoiceNo','traceConfidence'
+      ]) &&
+      _reportsStatusPasses_(row, filters, ['traceStatus','traceConfidence','invoiceStatus']);
+  });
   return {
     ok: true,
-    title: 'SO Line Traceability',
+    title: 'Purchase to Invoice Traceability',
     metrics: {
       totalRows: rows.length,
       approvalPending: rows.filter(function(r){ return r.state === 'SALES_APPROVAL'; }).length,
       artworkPending: rows.filter(function(r){ return r.state === 'ARTWORK'; }).length,
       woPending: rows.filter(function(r){ return r.state === 'WO_PENDING'; }).length,
-      unbilledLines: rows.filter(function(r){ return r.state === 'BILLING'; }).length
+      unbilledLines: rows.filter(function(r){ return r.state === 'BILLING'; }).length,
+      batchTraceRows: batchRows.length,
+      traceReviewRows: batchRows.filter(function(r) {
+        return String(r.traceConfidence || '').indexOf('UNTRACED') !== -1 ||
+          String(r.traceStatus || '').indexOf('REVIEW') !== -1 ||
+          String(r.traceConfidence || '') === 'RM_TO_WO_ONLY';
+      }).length
     },
     tables: [{
+      key: 'purchaseDispatchTrace',
+      title: 'Purchase Batch to Dispatch and Invoice',
+      subtitle: 'RM lot issue is exact. WO-to-FG rows marked WO_GENEALOGY are inferred from the unique work order; invoice-to-dispatch quantity uses FIFO commercial allocation.',
+      minWidth: 4300,
+      columns: [
+        { key:'traceConfidence', label:'Trace Confidence', type:'status' },
+        { key:'traceStatus', label:'Trace Status', type:'status' },
+        { key:'rmBatchNo', label:'RM Batch' },
+        { key:'rmItemCode', label:'RM Item Code' },
+        { key:'rmItemName', label:'RM Item' },
+        { key:'receiptDate', label:'Receipt Date', type:'date' },
+        { key:'receivedQty', label:'Received Qty', type:'number' },
+        { key:'rmUom', label:'RM UOM' },
+        { key:'rmRate', label:'RM Rate', type:'money' },
+        { key:'grnNo', label:'GRN No' },
+        { key:'grnDate', label:'GRN Date', type:'date' },
+        { key:'poNo', label:'PO No' },
+        { key:'supplierInvoiceNo', label:'Supplier Invoice' },
+        { key:'supplierName', label:'Supplier' },
+        { key:'issuedQty', label:'Issued to WO', type:'number' },
+        { key:'woNumber', label:'WO No' },
+        { key:'woDate', label:'WO Date', type:'date' },
+        { key:'fgBatchNo', label:'FG / Pack Batch' },
+        { key:'fgBatchQty', label:'FG Batch Qty', type:'number' },
+        { key:'dispatchNo', label:'Dispatch No' },
+        { key:'dispatchDate', label:'Dispatch Date', type:'date' },
+        { key:'dispatchQty', label:'Dispatch Qty', type:'number' },
+        { key:'soNumber', label:'SO No' },
+        { key:'lineNo', label:'SO Line' },
+        { key:'clientCode', label:'Client Code' },
+        { key:'clientName', label:'Client' },
+        { key:'productCode', label:'Product Code' },
+        { key:'productName', label:'Product' },
+        { key:'invoiceNo', label:'Invoice No' },
+        { key:'invoiceDate', label:'Invoice Date', type:'date' },
+        { key:'invoiceStatus', label:'Invoice Status', type:'status' },
+        { key:'invoiceDispatchQty', label:'Invoice / Dispatch Qty', type:'number' },
+        { key:'invoiceLineQty', label:'Invoice Line Qty', type:'number' },
+        { key:'invoiceLineTotal', label:'Invoice Line Total', type:'money' }
+      ],
+      rows: batchRows
+    }, {
       key: 'traceability',
       title: 'Order Line Traceability',
       subtitle: 'One row per sales order line with approval, artwork, work order, dispatch, and billing position.',
@@ -47467,7 +49733,9 @@ function _reportsSectionInventory_(token, params) {
       totalItems: (snapshot.rows || []).length,
       belowMslItems: belowMsl.length,
       nonMovingItems: nonMoving.length,
-      stockValue: (snapshot.rows || []).reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.value); }, 0)
+      stockBasicValue: (snapshot.rows || []).reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.basicValue || row.value); }, 0),
+      stockGstValue: (snapshot.rows || []).reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.gstValue); }, 0),
+      stockValue: (snapshot.rows || []).reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.gstInclusiveValue || row.value); }, 0)
     },
     tables: [{
       key: 'belowMsl',
@@ -47490,7 +49758,9 @@ function _reportsSectionInventory_(token, params) {
         { key:'itemCode', label:'Item Code' },
         { key:'itemName', label:'Item Name' },
         { key:'category', label:'Category' },
-        { key:'value', label:'Value', type:'money' },
+        { key:'basicValue', label:'Basic Value', type:'money' },
+        { key:'gstValue', label:'GST Value', type:'money' },
+        { key:'gstInclusiveValue', label:'Value Incl. GST', type:'money' },
         { key:'ageingDays', label:'Ageing Days', type:'number' },
         { key:'nextBatchNo', label:'Batch' }
       ],
@@ -48311,7 +50581,9 @@ function reportsGetOverviewData(params, token) {
 function reportsGetSectionData(section, params, token) {
   _reportsRequireSession_(token);
   const key = String(section || '').trim().toLowerCase();
-  const sectionCacheVersion = key === 'jobprofitability' ? 'V3' : 'V1';
+  const sectionCacheVersion = key === 'jobprofitability'
+    ? 'V3'
+    : (key === 'repeattooling' ? 'V2' : 'V1');
   const cacheKey = _reportsCacheKey_('SECTION_' + key + '_' + sectionCacheVersion, { params: params || {} });
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
@@ -48319,12 +50591,14 @@ function reportsGetSectionData(section, params, token) {
   if (key === 'planning') result = _reportsSectionPlanning_(token, params);
   else if (key === 'wipageing') result = _reportsSectionWipAgeing_(token, params);
   else if (key === 'jobprofitability') result = _reportsSectionJobProfitability_(token, params);
+  else if (key === 'jobwastage') result = _reportsSectionJobWastage_(token, params);
   else if (key === 'otif') result = _reportsSectionOTIF_(token, params);
   else if (key === 'salesorders') result = _reportsSectionSalesOrders_(token, params);
   else if (key === 'sheetutilization') result = _reportsSectionSheetUtilization_(token, params);
   else if (key === 'dispatchdiscrepancy') result = _reportsSectionDispatchDiscrepancy_(token, params);
   else if (key === 'shortexcessdispatch') result = _reportsSectionShortExcessDispatch_(token, params);
   else if (key === 'polines') result = _reportsSectionPOLines_(token, params);
+  else if (key === 'repeattooling') result = _reportsSectionRepeatTooling_(token, params);
   else if (key === 'prlifecycle') result = _reportsSectionPRLifecycle_(token, params);
   else if (key === 'departmentpurchases') result = _reportsSectionDepartmentPurchases_(token, params);
   else if (key === 'departmentissues') result = _reportsSectionDepartmentMaterialIssues_(token, params);
