@@ -19077,7 +19077,15 @@ function doPost(e) {
       return renderLoginPage((res && res.msg) || 'Invalid credentials.');
     }
 
-    return renderPostLoginRedirectPage(res.token);
+    // The login form already posts to the top-level web app URL with p=menu.
+    // Render the authenticated menu in this response instead of returning an
+    // intermediate page that must perform a second client-side navigation.
+    return doGet({
+      parameter: {
+        p: 'menu',
+        token: res.token
+      }
+    });
   } catch (err) {
     return renderLoginPage(err && err.message ? err.message : 'Login failed.');
   }
@@ -27073,12 +27081,22 @@ function invListKraftReelsJSON(params, token) {
 
   let rows;
   try {
-    rows = supabaseSelect_('v_kraft_reel_register', {
-      select: '*',
-      filters: filters,
-      order: 'created_at.desc',
-      limit: Math.min(Math.max(Number(input.limit || 1500), 1), 5000)
-    }) || [];
+    try {
+      rows = supabaseSelect_('v_kraft_reel_register_v2', {
+        select: '*',
+        filters: filters,
+        order: 'created_at.desc',
+        limit: Math.min(Math.max(Number(input.limit || 1500), 1), 5000)
+      }) || [];
+    } catch (v2Err) {
+      if (!_supabaseRelationMissing_(v2Err, 'v_kraft_reel_register_v2')) throw v2Err;
+      rows = supabaseSelect_('v_kraft_reel_register', {
+        select: '*',
+        filters: filters,
+        order: 'created_at.desc',
+        limit: Math.min(Math.max(Number(input.limit || 1500), 1), 5000)
+      }) || [];
+    }
   } catch (err) {
     if (_supabaseRelationMissing_(err, 'v_kraft_reel_register')) {
       throw new Error('Run supabase/kraft_reel_tracking_20260724.sql before opening Kraft Reel Control.');
@@ -27129,6 +27147,7 @@ function invListKraftReelsJSON(params, token) {
       productionConsumedKg: Number(row.production_consumed_kg || 0),
       currentWoProductionConsumedKg: Number(row.current_wo_production_consumed_kg || 0),
       widthMm: row.master_width_mm == null ? '' : Number(row.master_width_mm),
+      widthIn: row.master_width_mm == null ? '' : Number((Number(row.master_width_mm) / 25.4).toFixed(3)),
       gsm: row.master_gsm == null ? '' : Number(row.master_gsm),
       status: row.reel_status || '',
       assignedWoNo: row.assigned_wo_no || '',
@@ -27157,7 +27176,9 @@ function invListKraftReelsJSON(params, token) {
         ? ''
         : Number(row.cycle_return_variance_kg),
       cycleMaterialKey: row.cycle_material_key || '',
-      cycleStatus: row.cycle_status || ''
+      cycleStatus: row.cycle_status || '',
+      issueEligible: row.issue_eligible === true,
+      issueBlockReason: row.issue_block_reason || ''
     };
   });
 
@@ -27489,6 +27510,112 @@ function invIssueKraftReelToFloor(payload, token) {
   return result || { ok: true };
 }
 
+function invSearchKraftAssignmentWorkOrders(query, token) {
+  _invRequireReelAccess_(token, false);
+  const q = String(query || '').trim();
+  if (q.length < 2) return { ok: true, rows: [] };
+
+  const safe = q.replace(/[%*,()]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (safe.length < 2) return { ok: true, rows: [] };
+
+  const source = supabaseSelect_('work_orders', {
+    select: 'id,wo_number,wo_date,status,snapshot_json',
+    filters: { wo_number: 'ilike.*' + safe + '*' },
+    order: 'wo_date.desc,wo_number.desc',
+    limit: 12
+  }) || [];
+
+  const jobsByWo = {};
+  const woIds = source.map(function(row) { return row.id; }).filter(Boolean);
+  if (woIds.length) {
+    try {
+      const jobRows = _selectInBatches_(
+        'work_order_jobs',
+        'wo_id,so_number,client_name,product_name,category',
+        'wo_id',
+        woIds,
+        'so_number.asc'
+      ) || [];
+      jobRows.forEach(function(job) {
+        const key = String(job.wo_id || '');
+        if (!jobsByWo[key]) jobsByWo[key] = [];
+        jobsByWo[key].push(job);
+      });
+    } catch (err) {
+      Logger.log('Kraft assignment WO search detail fallback: ' + String(err && err.message || err || ''));
+    }
+  }
+
+  const upperQuery = safe.toUpperCase();
+  const rows = source.filter(function(row) {
+    return _invIsWorkOrderIssueCandidate_(row);
+  }).map(function(row) {
+    const snap = row.snapshot_json || {};
+    const jobs = (Array.isArray(snap.jobs) ? snap.jobs : []).concat(jobsByWo[String(row.id || '')] || []);
+    const unique = function(values) {
+      return [...new Set(values.map(function(value) {
+        return String(value || '').trim();
+      }).filter(Boolean))];
+    };
+    const clients = unique(jobs.map(function(job) {
+      return job.client || job.clientName || job.client_name || '';
+    }));
+    const products = unique(jobs.map(function(job) {
+      return job.productName || job.product_name || job.product || '';
+    }));
+    const salesOrders = unique(jobs.map(function(job) {
+      return job.so || job.soNumber || job.so_number || '';
+    }));
+    const woNo = String(row.wo_number || '').trim();
+    const upperWo = woNo.toUpperCase();
+    return {
+      woId: row.id || '',
+      woNo: woNo,
+      woDate: row.wo_date || '',
+      status: String(row.status || '').trim(),
+      department: resolveWOIssueDepartment_(snap),
+      client: clients.join(', '),
+      product: products.join(' / '),
+      salesOrders: salesOrders.join(', '),
+      matchRank: upperWo === upperQuery ? 0 : (upperWo.indexOf(upperQuery) === 0 ? 1 : 2)
+    };
+  }).sort(function(a, b) {
+    if (a.matchRank !== b.matchRank) return a.matchRank - b.matchRank;
+    const aDate = Date.parse(String(a.woDate || '')) || 0;
+    const bDate = Date.parse(String(b.woDate || '')) || 0;
+    if (aDate !== bDate) return bDate - aDate;
+    return String(b.woNo || '').localeCompare(String(a.woNo || ''), undefined, {
+      numeric: true,
+      sensitivity: 'base'
+    });
+  }).map(function(row) {
+    delete row.matchRank;
+    return row;
+  });
+
+  return { ok: true, rows: rows };
+}
+
+function invAssignKraftReelToWorkOrder(payload, token) {
+  const p = payload || {};
+  const user = _invRequireReelAccess_(_authTokenFromPayload_(p, token), true);
+  const lotId = String(p.lotId || '').trim();
+  const woNo = String(p.woNo || '').trim();
+  const materialKey = String(p.materialKey || '').trim();
+  if (!lotId) throw new Error('Select an issued reel to assign');
+  if (!woNo) throw new Error('Work order no is required');
+  if (!materialKey) throw new Error('Work-order material key is required');
+  const result = supabaseRpc_('assign_active_kraft_reel_to_work_order', {
+    p_lot_id: lotId,
+    p_wo_no: woNo,
+    p_material_key: materialKey,
+    p_actor: _authActorName_(user)
+  });
+  _invBumpStockSnapshotVersion_();
+  _prodBumpQueueVersion_();
+  return result || { ok: true };
+}
+
 function invScrapKraftReel(payload, token) {
   const p = payload || {};
   const user = _invRequireReelAccess_(_authTokenFromPayload_(p, token), true);
@@ -27506,12 +27633,88 @@ function invScrapKraftReel(payload, token) {
 }
 
 function invListIssuedKraftReelsForWOJSON(woNo, token) {
-  const result = invListKraftReelsJSON({
-    woNo: String(woNo || '').trim(),
-    status: 'ISSUED',
-    limit: 500
-  }, token);
-  return { ok: true, rows: result.rows || [] };
+  _requireModuleAccess_(token, 'PRODUCTION', 'can_view');
+  const key = String(woNo || '').trim();
+  if (!key) throw new Error('Work order no is required to load issued reels');
+  const source = supabaseSelect_('v_kraft_reel_register', {
+    select: 'lot_id,internal_reel_no,item_code,item_name,rm_type,master_width_mm,master_gsm,reel_status,assigned_wo_no,location,current_issue_cycle_id,issued_gross_qty,cycle_issued_qty_kg,cycle_production_consumed_kg,cycle_process_waste_kg,cycle_status',
+    filters: {
+      reel_status: 'eq.ISSUED',
+      assigned_wo_no: 'eq.' + key
+    },
+    order: 'internal_reel_no.asc',
+    limit: 1000
+  }) || [];
+  const rows = source.filter(function(row) {
+    return String(row.location || '').trim().toUpperCase() === 'CORRUGATION FLOOR' &&
+      String(row.current_issue_cycle_id || '').trim() &&
+      String(row.cycle_status || '').trim().toUpperCase() === 'ACTIVE';
+  }).map(function(row) {
+    const issued = Number(row.issued_gross_qty || row.cycle_issued_qty_kg || 0);
+    const consumed = Number(row.cycle_production_consumed_kg || 0);
+    const waste = Number(row.cycle_process_waste_kg || 0);
+    return {
+      lotId: row.lot_id || '',
+      reelNo: row.internal_reel_no || '',
+      itemCode: row.item_code || '',
+      itemName: row.item_name || '',
+      rmType: row.rm_type || '',
+      widthMm: row.master_width_mm == null ? '' : Number(row.master_width_mm),
+      gsm: row.master_gsm == null ? '' : Number(row.master_gsm),
+      status: row.reel_status || '',
+      assignedWoNo: row.assigned_wo_no || '',
+      location: row.location || '',
+      currentIssueCycleId: row.current_issue_cycle_id || '',
+      issuedGrossQty: issued,
+      cycleProductionConsumedKg: consumed,
+      remainingFloorQtyKg: Math.max(issued - consumed - waste, 0)
+    };
+  });
+  return { ok: true, woNo: key, rows: rows };
+}
+
+function prodResolveIssuedKraftReelForEntryJSON(reelNo, woNo, fallbackItemCode, allowUnregistered, token) {
+  _requireModuleAccess_(token, 'PRODUCTION', 'can_view');
+  const number = String(reelNo || '').trim().toUpperCase();
+  const key = String(woNo || '').trim();
+  if (!number) throw new Error('Enter an internal kraft reel number');
+  if (!key) throw new Error('Work order no is required to validate the reel');
+  const wo = (supabaseSelect_('work_orders', {
+    select: 'id,wo_number',
+    filters: { wo_number: 'eq.' + key },
+    limit: 1
+  }) || [])[0];
+  if (!wo) throw new Error('Work order ' + key + ' was not found');
+  const reel = _prodResolveIssuedKraftReel_(number, wo.id, 'Selected', {
+    itemCode: String(fallbackItemCode || '').trim(),
+    allowUnregistered: allowUnregistered === true
+  });
+  let itemCode = String(reel.item_code || '').trim();
+  let itemName = '';
+  if (reel.item_id) {
+    const item = (supabaseSelect_('inv_items', {
+      select: 'item_code,item_name',
+      filters: { id: 'eq.' + String(reel.item_id) },
+      limit: 1
+    }) || [])[0];
+    itemCode = item && item.item_code || itemCode;
+    itemName = item && item.item_name || '';
+  }
+  return {
+    ok: true,
+    reel: {
+      lotId: reel.id || '',
+      reelNo: reel.batch_no || number,
+      itemCode: itemCode || String(fallbackItemCode || '').trim(),
+      itemName: itemName,
+      widthMm: Number(reel.master_width_mm || 0),
+      gsm: Number(reel.master_gsm || 0),
+      assignedWoNo: reel.assigned_wo_no || key,
+      location: reel.location || 'CORRUGATION FLOOR',
+      currentIssueCycleId: reel.current_issue_cycle_id || '',
+      legacyAlignmentPending: reel.legacy_alignment_pending === true
+    }
+  };
 }
 
 function invListIssuedKraftReelsForFloorJSON(token) {
@@ -27566,20 +27769,129 @@ function invListAvailableLotsJSON(itemCode, location) {
   const itemId = item.id || '';
   const itemCodeNorm = String(item.item_code || code).trim();
   const itemDepartment = String(item.department || '').trim();
-  const rows = supabaseSelect_('inv_lots', {
-    select: 'id,batch_no,receipt_date,qty_received,qty_available,rate,location,department,is_reel,reel_status,assigned_wo_no,gross_weight_kg,master_width_mm,master_gsm',
-    filters: {
-      ...(itemId ? { item_id: 'eq.' + itemId } : { item_code: 'eq.' + itemCodeNorm }),
-      location: 'eq.' + (location || DEFAULT_LOCATION),
-      qty_available: 'gt.0'
-    },
-    order: 'receipt_date.desc,created_at.desc',
-    limit: 200
-  }) || [];
+  const itemCodeKey = itemCodeNorm.toUpperCase();
+  let registeredReelRows;
+  try {
+    // Use the same source as Kraft Reel Control so an "Issue ready" register
+    // row cannot disappear because a second query follows different rules.
+    registeredReelRows = (supabaseSelect_('v_kraft_reel_register_v2', {
+      select: 'lot_id,item_id,item_code,internal_reel_no,receipt_date,qty_received,qty_available,rate,location,department,reel_status,assigned_wo_no,gross_weight_kg,master_width_mm,master_gsm,created_at,issue_eligible,issue_block_reason',
+      order: 'receipt_date.desc,created_at.desc',
+      limit: 5000
+    }) || []).map(function(row) {
+      return {
+        id: row.lot_id,
+        item_id: row.item_id,
+        item_code: row.item_code,
+        batch_no: row.internal_reel_no,
+        receipt_date: row.receipt_date,
+        qty_received: row.qty_received,
+        qty_available: row.qty_available,
+        rate: row.rate,
+        location: row.location,
+        department: row.department,
+        is_reel: true,
+        reel_status: row.reel_status,
+        assigned_wo_no: row.assigned_wo_no,
+        gross_weight_kg: row.gross_weight_kg,
+        master_width_mm: row.master_width_mm,
+        master_gsm: row.master_gsm,
+        issue_eligible: row.issue_eligible,
+        issue_block_reason: row.issue_block_reason
+      };
+    });
+  } catch (viewErr) {
+    if (!_supabaseRelationMissing_(viewErr, 'v_kraft_reel_register_v2')) throw viewErr;
+    registeredReelRows = supabaseSelect_('inv_lots', {
+      select: 'id,item_id,item_code,batch_no,receipt_date,qty_received,qty_available,rate,location,department,is_reel,reel_status,assigned_wo_no,gross_weight_kg,master_width_mm,master_gsm,created_at',
+      filters: { is_reel: 'eq.true' },
+      order: 'receipt_date.desc,created_at.desc',
+      limit: 5000
+    }) || [];
+  }
+  const matchingRegisteredReels = registeredReelRows.filter(function(row) {
+    return String(row.item_id || '') === String(itemId || '') ||
+      String(row.item_code || '').trim().toUpperCase() === itemCodeKey;
+  });
+  const masterRequiresReelTracking = _invItemRequiresReelTracking_(item);
+  let reelTracked = masterRequiresReelTracking || matchingRegisteredReels.length > 0;
+  if (masterRequiresReelTracking && item.id && item.reel_tracking_enabled !== true) {
+    // Keep the persisted flag aligned because the atomic SQL issue function
+    // uses it to route the row through the kraft-reel transaction path.
+    reelTracked = _invReconcileItemReelTracking_(item);
+  }
+  const normalizedLocation = String(location || DEFAULT_LOCATION).trim().toUpperCase();
+  let sourceRows;
+  let reelEligibilityMessage = '';
+  if (reelTracked) {
+    sourceRows = matchingRegisteredReels;
+
+    const itemLinkedRows = sourceRows.filter(function(row) {
+      return String(row.item_id || '') === String(itemId || '');
+    });
+    const statusEligibleRows = sourceRows.filter(function(row) {
+      const status = String(row.reel_status || '').trim().toUpperCase();
+      return status === 'AVAILABLE' || status === 'RETURNED';
+    });
+    const locationEligibleRows = statusEligibleRows.filter(function(row) {
+      return String(row.location || '').trim().toUpperCase() === normalizedLocation;
+    });
+    const balanceEligibleRows = locationEligibleRows.filter(function(row) {
+      return Number(row.qty_available || 0) > 0 && row.issue_eligible !== false;
+    });
+    if (!balanceEligibleRows.length && sourceRows.length) {
+      if (!itemLinkedRows.length) {
+        reelEligibilityMessage = sourceRows.length +
+          ' registered reel(s) use this item code but are linked to another item-master record.';
+      } else if (!statusEligibleRows.length) {
+        reelEligibilityMessage = sourceRows.length +
+          ' registered reel(s) are not AVAILABLE or RETURNED.';
+      } else if (!locationEligibleRows.length) {
+        const locations = statusEligibleRows.map(function(row) {
+          return String(row.location || 'Blank').trim() || 'Blank';
+        }).filter(function(value, index, values) { return values.indexOf(value) === index; });
+        reelEligibilityMessage = statusEligibleRows.length +
+          ' registered reel(s) are outside ' + normalizedLocation + ' (' + locations.join(', ') + ').';
+      } else {
+        const blockReasons = locationEligibleRows.map(function(row) {
+          return String(row.issue_block_reason || '').trim();
+        }).filter(function(value, index, values) {
+          return value && values.indexOf(value) === index;
+        });
+        reelEligibilityMessage = blockReasons.length
+          ? ('Registered reel blocked: ' + blockReasons.join(', ') + '.')
+          : (locationEligibleRows.length + ' registered reel(s) have no positive available balance.');
+      }
+    }
+  } else {
+    sourceRows = supabaseSelect_('inv_lots', {
+      select: 'id,batch_no,receipt_date,qty_received,qty_available,rate,location,department,is_reel,reel_status,assigned_wo_no,gross_weight_kg,master_width_mm,master_gsm',
+      filters: {
+        ...(itemId ? { item_id: 'eq.' + itemId } : { item_code: 'eq.' + itemCodeNorm }),
+        location: 'eq.' + (location || DEFAULT_LOCATION),
+        qty_available: 'gt.0'
+      },
+      order: 'receipt_date.desc,created_at.desc',
+      limit: 200
+    }) || [];
+  }
+  const rows = reelTracked ? sourceRows.filter(function(row) {
+    const status = String(row.reel_status || '').trim().toUpperCase();
+    const rowLocation = String(row.location || '').trim().toUpperCase();
+    return row.is_reel === true &&
+      (status === 'AVAILABLE' || status === 'RETURNED') &&
+      rowLocation === normalizedLocation &&
+      Number(row.qty_available || 0) > 0 &&
+      row.issue_eligible !== false;
+  }) : sourceRows.filter(function(row) {
+    return row.is_reel !== true;
+  });
 
   if (rows.length) {
     return {
       ok: true,
+      reelTracked: reelTracked,
+      eligibilityMessage: '',
       rows: rows.map(function(row) {
         const receiptDate = row.receipt_date || '';
         const ageingDays = receiptDate
@@ -27588,6 +27900,8 @@ function invListAvailableLotsJSON(itemCode, location) {
         return {
           id: row.id,
           batchNo: row.batch_no || '',
+          reelNo: row.is_reel === true ? (row.batch_no || '') : '',
+          displayNo: row.batch_no || '',
           receiptDate: receiptDate,
           qtyReceived: Number(row.qty_received || 0),
           qtyAvailable: Number(row.qty_available || 0),
@@ -27608,7 +27922,10 @@ function invListAvailableLotsJSON(itemCode, location) {
 
   return {
     ok: true,
+    reelTracked: reelTracked,
+    eligibilityMessage: reelEligibilityMessage,
     rows: (function() {
+      if (reelTracked) return [];
       const legacyQty = Number(invGetCurrentQty_(itemCodeNorm, location || DEFAULT_LOCATION) || 0);
       const legacyRate = Number(invGetCurrentAvgRate(itemCodeNorm, location || DEFAULT_LOCATION) || 0);
       return [
@@ -30184,6 +30501,7 @@ function invBuildWorkOrdersForIssueFromPreparedRows_(preparedRows) {
     grouped[woNo].requirements.push({
       materialKey: row.material_key || row.materialKey || '',
       itemLabel: row.item_label || row.itemLabel || '',
+      itemCode: row.item_code || row.itemCode || '',
       gsm: row.gsm || '',
       deckleMm: Number(row.deckle_mm ?? row.deckleMm ?? 0),
       cutMm: Number(row.cut_mm ?? row.cutMm ?? 0),
@@ -31096,28 +31414,42 @@ function _invPostIssueAuthorized_(payload) {
     throw new Error('materialKey required for WO issue');
   }
 
-  if (_invItemRequiresReelTracking_(resolvedItem)) {
-    throw new Error(
-      'Issue kraft reels from Inventory > Kraft Reels > Issue to Floor. ' +
-      'A floor-issued reel is not owned by one work order.'
-    );
-    /* Legacy WO reel-issue implementation retained below for source compatibility.
-       This branch is intentionally unreachable for new transactions. */
+  const requestedReelLotId = String(payload.reelLotId || '').trim();
+  const reelIssueRequested = _invItemRequiresReelTracking_(resolvedItem) || !!requestedReelLotId;
+  if (reelIssueRequested) {
+    if (resolvedItem.id && resolvedItem.reel_tracking_enabled !== true) {
+      supabaseUpdateMinimal_('inv_items', { id: 'eq.' + resolvedItem.id }, {
+        reel_tracking_enabled: true
+      });
+      resolvedItem.reel_tracking_enabled = true;
+    }
     if (isDirect) throw new Error('Use Kraft Reel Control to issue this reel');
     const reelNo = String(payload.batchNo || '').trim();
     if (!reelNo) {
       throw new Error('Select the internal reel number before issuing kraft paper');
     }
     const reel = (supabaseSelect_('inv_lots', {
-      select: 'id,batch_no,qty_available,is_reel,reel_status,location',
-      filters: {
-        item_id: 'eq.' + resolvedItem.id,
-        batch_no: 'eq.' + reelNo
-      },
+      select: 'id,item_id,item_code,batch_no,qty_available,is_reel,reel_status,location',
+      filters: requestedReelLotId
+        ? { id: 'eq.' + requestedReelLotId }
+        : { item_id: 'eq.' + resolvedItem.id, batch_no: 'eq.' + reelNo },
       limit: 1
     }) || [])[0];
     if (!reel || reel.is_reel !== true) {
-      throw new Error('Selected batch is not an internal kraft reel');
+      throw new Error('Selected number is not an internal kraft reel');
+    }
+    const reelMatchesItem = String(reel.item_id || '') === String(resolvedItem.id || '') ||
+      String(reel.item_code || '').trim().toUpperCase() ===
+        String(resolvedItem.item_code || '').trim().toUpperCase();
+    if (!reelMatchesItem) {
+      throw new Error('Reel ' + reelNo + ' is linked to another item master. Correct the reel registration before issue.');
+    }
+    const reelStatus = String(reel.reel_status || '').trim().toUpperCase();
+    if (reelStatus !== 'AVAILABLE' && reelStatus !== 'RETURNED') {
+      throw new Error('Kraft reel ' + reelNo + ' is not available for issue');
+    }
+    if (String(reel.location || '').trim().toUpperCase() !== 'MAIN') {
+      throw new Error('Kraft reel ' + reelNo + ' must be in Main Stores before issue');
     }
     const reelQty = Number(reel.qty_available || 0);
     if (Math.abs(qty - reelQty) > 0.0001) {
@@ -31402,29 +31734,43 @@ function invPostIssueBulk(input, token) {
     const location = String(row.location || DEFAULT_LOCATION).trim() || DEFAULT_LOCATION;
     const itemCode = String(row.itemCode || '').trim();
     const itemKey = itemCode.toUpperCase();
+    const batchNo = String(row.batchNo || '').trim();
+    const requestedReelLotId = String(row.reelLotId || '').trim();
     if (!itemCache[itemKey]) {
       itemCache[itemKey] = ensureInventoryItemExists_(itemCode, {
         requireActive: true,
         allowAutoCreate: false
       });
     }
-    const reelTracked = _invItemRequiresReelTracking_(itemCache[itemKey]);
-    const batchNo = String(row.batchNo || '').trim();
+    const reelTracked = _invItemRequiresReelTracking_(itemCache[itemKey]) || !!requestedReelLotId;
+    if (reelTracked && itemCache[itemKey].reel_tracking_enabled !== true) {
+      // Selecting a registered reel is authoritative for legacy item rows whose
+      // synchronized category/flag predates reel tracking.
+      supabaseUpdateMinimal_('inv_items', { id: 'eq.' + itemCache[itemKey].id }, {
+        reel_tracking_enabled: true
+      });
+      itemCache[itemKey].reel_tracking_enabled = true;
+    }
     let reelLotId = '';
     if (reelTracked && !batchNo) {
       throw new Error('Select an internal reel number for ' + itemCode);
     }
     if (reelTracked) {
       const reel = (supabaseSelect_('inv_lots', {
-        select: 'id,batch_no,qty_available,is_reel,reel_status,location',
-        filters: {
-          item_id: 'eq.' + itemCache[itemKey].id,
-          batch_no: 'eq.' + batchNo
-        },
+        select: 'id,item_id,item_code,batch_no,qty_available,is_reel,reel_status,location',
+        filters: requestedReelLotId
+          ? { id: 'eq.' + requestedReelLotId }
+          : { item_id: 'eq.' + itemCache[itemKey].id, batch_no: 'eq.' + batchNo },
         limit: 1
       }) || [])[0];
       if (!reel || reel.is_reel !== true) {
         throw new Error('Selected batch ' + batchNo + ' is not an internal kraft reel');
+      }
+      const reelMatchesItem = String(reel.item_id || '') === String(itemCache[itemKey].id || '') ||
+        String(reel.item_code || '').trim().toUpperCase() ===
+          String(itemCache[itemKey].item_code || itemCode).trim().toUpperCase();
+      if (!reelMatchesItem) {
+        throw new Error('Kraft reel ' + batchNo + ' is linked to another item master. Correct the reel registration before issue.');
       }
       if (String(reel.reel_status || '').toUpperCase() !== 'AVAILABLE' &&
           String(reel.reel_status || '').toUpperCase() !== 'RETURNED') {
@@ -31464,8 +31810,15 @@ function invPostIssueBulk(input, token) {
     const itemCode = String(parts[0] || '').trim();
     const location = parts[1] || DEFAULT_LOCATION;
     const batchNo = String(parts[2] || '').trim();
+    const allocationItem = itemCache[itemCode.toUpperCase()];
+    if (batchNo && allocationItem && allocationItem.reel_tracking_enabled === true) {
+      // The reel RPC locks and validates the selected physical lot atomically.
+      // An ordinary item-id allocation preflight is both redundant and wrong
+      // for historical reels that retained a previous item-master UUID.
+      return;
+    }
     invAllocateLots_({
-      item: itemCache[itemCode.toUpperCase()],
+      item: allocationItem,
       itemCode: itemCode,
       qty: grouped[key],
       location: location,
@@ -33914,7 +34267,7 @@ function _fgGetDetailRowsFromView_(fromDate, toDate) {
       openingQty: _fgQty_(row.opening_qty),
       inwardQty: _fgQty_(row.inward_qty),
       packedQty: String(row.source_type || '').toUpperCase() === 'PACKED' ? _fgQty_(row.inward_qty) : 0,
-      dispatchQty: _fgQty_(row.dispatch_qty),
+      billingQty: _fgQty_(row.billing_qty),
       adjustedQty: _fgQty_(row.adjustment_qty),
       outwardQty: _fgQty_(row.outward_qty),
       closingQty: closingQty,
@@ -34251,17 +34604,14 @@ function fgSaveStockAdjustment(payload, token) {
       : _fgSafeSelect_('packing_records', {
           select: 'packed_qty', filters: { so_line_id: 'eq.' + soLineId }, limit: 5000
         }).reduce(function(sum, row) { return sum + _fgQty_(row.packed_qty); }, 0);
-    const totalDispatched = _fgSafeSelect_('dispatch_records', {
-      select: 'dispatch_qty,status', filters: { so_line_id: 'eq.' + soLineId }, limit: 5000
-    }).reduce(function(sum, row) {
-      return String(row.status || '').toUpperCase() === 'CANCELLED' ? sum : sum + _fgQty_(row.dispatch_qty);
-    }, 0);
+    const billedUsage = _billingGetInvoiceUsageByLineIds_([soLineId]);
+    const totalBilled = _fgQty_((billedUsage[soLineId] || {}).billedQty);
     const priorAdjustments = _fgSafeSelect_('fg_stock_adjustments', {
       select: 'adjustment_qty',
       filters: { so_line_id: 'eq.' + soLineId },
       limit: 5000
     }).reduce(function(sum, row) { return sum + _fgQty_(row.adjustment_qty); }, 0);
-    const available = Math.max(totalPacked - totalDispatched - priorAdjustments, 0);
+    const available = Math.max(totalPacked - totalBilled - priorAdjustments, 0);
     if (qty > available) throw new Error('Adjustment qty cannot exceed available FG balance.');
     supabaseInsert_('fg_stock_adjustments', {
       source_type: 'PACKED',
@@ -40559,15 +40909,31 @@ function _prodValidateMachineOperator_(machineName, operatorName) {
 function prodGetCorrugationInventoryItems(token) {
   _requireModuleAccess_(token, 'PRODUCTION', 'can_view');
   const cache = CacheService.getScriptCache();
-  const cacheKey = _prodCacheKey_('corr_inventory_items');
+  const cacheKey = _prodCacheKey_('corr_inventory_items_v3');
   const cached = cache.get(cacheKey);
   if (cached) return JSON.parse(cached);
-  const rows = supabaseSelect_('inv_items', {
-    select: 'item_code,item_name,uom,department,category',
+  const itemSelect = 'item_code,item_name,uom,department,category,reel_tracking_enabled,width_mm,gsm,active';
+  const departmentRows = supabaseSelect_('inv_items', {
+    select: itemSelect,
     filters: { department: 'ilike.*CORRUGATION*' },
     order: 'item_name.asc',
     limit: 500
   }) || [];
+  const kraftRows = supabaseSelect_('inv_items', {
+    select: itemSelect,
+    filters: { category: 'eq.KRAFT PAPER', uom: 'eq.KG' },
+    order: 'item_name.asc',
+    limit: 1000
+  }) || [];
+  const seenItemCodes = {};
+  const rows = departmentRows.concat(kraftRows).filter(function(row) {
+    const key = String(row.item_code || '').trim().toUpperCase();
+    if (!key || seenItemCodes[key]) return false;
+    seenItemCodes[key] = true;
+    return true;
+  }).sort(function(a, b) {
+    return String(a.item_name || '').localeCompare(String(b.item_name || ''));
+  });
   const result = rows.map(function(row) {
     return {
       itemCode: row.item_code || '',
@@ -40575,6 +40941,10 @@ function prodGetCorrugationInventoryItems(token) {
       uom: row.uom || '',
       department: row.department || '',
       category: row.category || ''
+      ,reelTrackingEnabled: row.reel_tracking_enabled === true
+      ,widthMm: row.width_mm == null ? '' : Number(row.width_mm)
+      ,gsm: row.gsm == null ? '' : Number(row.gsm)
+      ,isActive: row.active !== false
     };
   }).filter(function(row) {
     return row.itemCode || row.itemName;
@@ -41393,14 +41763,27 @@ function _prodResolveIssuedKraftReel_(reelNo, woId, materialRole, legacyContext)
       throw bridgeErr;
     }
     const context = legacyContext || {};
+    if (context.allowUnregistered !== true) {
+      throw new Error(
+        role + ' reel ' + number + ' is not registered. Select “Reel is not registered” and enter its kraft details if it was previously issued.'
+      );
+    }
+    if (!/^KR-[A-Z0-9]+(?:-[A-Z0-9]+)*$/.test(number) || number.length > 34) {
+      throw new Error(role + ' unregistered reel ' + number + ' must use a valid KR- internal reel number');
+    }
     const itemCode = String(context.itemCode || '').trim();
     if (!itemCode) throw new Error(role + ' inventory item is required for legacy reel ' + number);
-    const item = ensureInventoryItemExists_(itemCode, { requireActive: true, allowAutoCreate: false });
+    // A reel issued before reel tracking may belong to a Kraft item that has
+    // since been made inactive. Keep the historical continuity path usable,
+    // but never auto-create a missing inventory master from production.
+    const item = ensureInventoryItemExists_(itemCode, { requireActive: false, allowAutoCreate: false });
     if (!_invItemRequiresReelTracking_(item)) {
       throw new Error(role + ' legacy reel ' + number + ' must use a reel-tracked Kraft Paper item');
     }
-    if (!(Number(item.width_mm || 0) > 0) || !(Number(item.gsm || 0) > 0)) {
-      throw new Error(role + ' Kraft Paper item is missing master width/GSM');
+    const legacyWidthMm = Number(context.widthMm || item.width_mm || 0);
+    const legacyGsm = Number(context.gsm || item.gsm || 0);
+    if (!(legacyWidthMm > 0) || !(legacyGsm > 0)) {
+      throw new Error(role + ' width and GSM are required for unregistered reel ' + number);
     }
     const conflicts = supabaseSelect_('inv_legacy_reel_alignment_requests', {
       select: 'id,wo_id,item_id,status',
@@ -41421,8 +41804,8 @@ function _prodResolveIssuedKraftReel_(reelNo, woId, materialRole, legacyContext)
       reel_status: 'LEGACY_PENDING',
       assigned_wo_no: wo.wo_number,
       issued_gross_qty: 0,
-      master_width_mm: Number(item.width_mm),
-      master_gsm: Number(item.gsm),
+      master_width_mm: legacyWidthMm,
+      master_gsm: legacyGsm,
       current_issue_cycle_id: null,
       legacy_alignment_pending: true
     };
@@ -41444,6 +41827,22 @@ function _prodResolveIssuedKraftReel_(reelNo, woId, materialRole, legacyContext)
   }
   if (!String(reel.current_issue_cycle_id || '').trim()) {
     throw new Error(role + ' reel ' + number + ' has no active issue cycle. Run the kraft reel hardening migration.');
+  }
+  const cycle = (supabaseSelect_('inv_reel_issue_cycles', {
+    select: 'id,wo_id,wo_no,status,custody_scope,custody_location',
+    filters: { id: 'eq.' + String(reel.current_issue_cycle_id).trim() },
+    limit: 1
+  }) || [])[0];
+  if (!cycle || String(cycle.status || '').trim().toUpperCase() !== 'ACTIVE') {
+    throw new Error(role + ' reel ' + number + ' has no active issue cycle');
+  }
+  if (String(cycle.custody_scope || '').trim().toUpperCase() !== 'WORK_ORDER' ||
+      String(cycle.wo_id || '') !== String(wo.id || '')) {
+    const assigned = String(cycle.wo_no || reel.assigned_wo_no || '').trim() || '(unassigned)';
+    throw new Error(
+      role + ' reel ' + number + ' is assigned to WO ' + assigned +
+      '. Stores must return or assign it to WO ' + wo.wo_number + ' before production entry.'
+    );
   }
   return reel;
 }
@@ -42496,10 +42895,16 @@ function saveProductionBulk(entries, token) {
       if (!String(d.linerReelNo || '').trim()) throw new Error('Enter liner reel no for 2 Ply entry');
       if (!String(d.flutingReelNo || '').trim()) throw new Error('Enter fluting reel no for 2 Ply entry');
       const linerReel = _prodResolveIssuedKraftReel_(d.linerReelNo, routing.wo_id, 'Liner', {
-        itemCode: d.linerActualItemCode
+        itemCode: d.linerActualItemCode,
+        allowUnregistered: d.linerManualReel === true,
+        widthMm: d.linerReelWidthMm,
+        gsm: d.linerActualGsm
       });
       const flutingReel = _prodResolveIssuedKraftReel_(d.flutingReelNo, routing.wo_id, 'Fluting', {
-        itemCode: d.flutingActualItemCode
+        itemCode: d.flutingActualItemCode,
+        allowUnregistered: d.flutingManualReel === true,
+        widthMm: d.flutingReelWidthMm,
+        gsm: d.flutingActualGsm
       });
       if (String(linerReel.batch_no || '').trim().toUpperCase() === String(flutingReel.batch_no || '').trim().toUpperCase()) {
         throw new Error('Liner and fluting must use different issued reels');
@@ -43616,6 +44021,8 @@ this.invPostPurchaseReceiptBulk = invPostPurchaseReceiptBulk;
 this.invPostDirectReceipt = invPostDirectReceipt;
 this.invPostIssue = invPostIssue;
 this.invPostIssueBulk = invPostIssueBulk;
+this.invSearchKraftAssignmentWorkOrders = invSearchKraftAssignmentWorkOrders;
+this.invAssignKraftReelToWorkOrder = invAssignKraftReelToWorkOrder;
 this.invListKraftReelOpeningSourcesJSON = invListKraftReelOpeningSourcesJSON;
 this.invRegisterOpeningKraftReels = invRegisterOpeningKraftReels;
 this.invListLegacyReelAlignmentRequestsJSON = invListLegacyReelAlignmentRequestsJSON;
