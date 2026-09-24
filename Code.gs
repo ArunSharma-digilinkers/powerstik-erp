@@ -951,9 +951,7 @@ const PAGE_MODULE_MAP = {
   'printadjustment':'BILLING',
   'planning':'PLANNING',
   'commitmentplanning':'MASTERADMIN',
-  'commitmentplanningadvanced':'MASTERADMIN',
   'printingplanning':'MASTERADMIN',
-  'dispatchplanning':'MASTERADMIN',
   'reports':'REPORTS',
   'salesdashboard':'REPORTS',
   'salestargets':'MASTERADMIN',
@@ -22142,9 +22140,7 @@ const ROUTES = {
   printadjustment: 'AdjustmentNotePrint',
   planning: 'Planning',
   commitmentplanning: 'PPCPending',
-  commitmentplanningadvanced: 'CommitmentPlanning',
   printingplanning: 'PrintingPlanning',
-  dispatchplanning: 'DispatchPlanning',
   reports: 'Reports',
   salesdashboard: 'SalesDashboard',
   salestargets: 'SalesTargetsAdmin',
@@ -23634,11 +23630,53 @@ function getArtworkWorkbench(fromDate, toDate, pendingOnly) {
   };
 }
 
+function _getArtworkWorkbenchFastPage_(fromDate, toDate, pendingOnly) {
+  try {
+    let data = supabaseRpc_('erp_artwork_workbench_page_v2', {
+      p_from_date: fromDate || null,
+      p_to_date: toDate || null,
+      p_pending_only: pendingOnly === true,
+      p_search: null,
+      p_allowed_divisions: [],
+      p_offset: 0,
+      p_limit: 200
+    });
+    if (Array.isArray(data) && data.length === 1 && data[0] && typeof data[0] === 'object') data = data[0];
+    if (!data || typeof data !== 'object' || !Array.isArray(data.rows)) return null;
+
+    const jobs = data.rows.map(function(row) {
+      const job = _artworkRowToWorkbenchJob_(row || {});
+      job.revision = row && (row.revision || row.updated_at) || '';
+      return job;
+    });
+    const groups = _artworkGroupRowsFromJobs_(jobs);
+    groups.forEach(function(group) {
+      const revisions = (group.jobs || []).map(function(job) { return String(job.revision || ''); }).filter(Boolean).sort();
+      group.revision = revisions.length ? revisions[revisions.length - 1] : '';
+    });
+    return {
+      allJobs: jobs,
+      jobs: jobs,
+      groups: groups,
+      meta: {
+        totalJobs: Number(data.total || jobs.length),
+        totalJobsIsEstimate: data.totalIsEstimate === true || data.total_is_estimate === true,
+        totalGroups: groups.length,
+        unassignedJobs: jobs.filter(function(job) { return !job.artworkNo; }).length,
+        source: 'bounded-rpc'
+      },
+      hasMore: data.hasMore === true || data.has_more === true
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
 function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly, forceRefresh) {
   const version = PropertiesService.getScriptProperties().getProperty('ARTWORK_WORKBENCH_VERSION') || '0';
   const cacheKey = _cacheKeyHash_('ARTWORK_WORKBENCH', JSON.stringify({
     v: version,
-    schema: 'ARTWORK_WORKBENCH_DETAIL_ROWS_V5_SO_TIME_UTC',
+    schema: 'ARTWORK_WORKBENCH_DETAIL_ROWS_V6_BOUNDED_RPC',
     fromDate: fromDate || '',
     toDate: toDate || '',
     pendingOnly: pendingOnly === true
@@ -23647,7 +23685,10 @@ function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly, forceRefresh) {
   const cached = forceRefresh === true ? null : cache.get(cacheKey);
   if (cached) return cached;
 
-  const payload = JSON.stringify(getArtworkWorkbench(fromDate, toDate, pendingOnly));
+  const payload = JSON.stringify(
+    _getArtworkWorkbenchFastPage_(fromDate, toDate, pendingOnly) ||
+    getArtworkWorkbench(fromDate, toDate, pendingOnly)
+  );
   try { cache.put(cacheKey, payload, 180); } catch (e) {}
   return payload;
 }
@@ -23655,6 +23696,21 @@ function getArtworkWorkbenchJson(fromDate, toDate, pendingOnly, forceRefresh) {
 function getArtworkGroupJobs(artworkNo) {
   const no = String(artworkNo || '').trim();
   if (!no) throw new Error('Missing artwork no');
+  const version = PropertiesService.getScriptProperties().getProperty('ARTWORK_WORKBENCH_VERSION') || '0';
+  const cacheKey = _cacheKeyHash_('ARTWORK_GROUP_JOBS', JSON.stringify({
+    v: version,
+    schema: 'ARTWORK_GROUP_JOBS_V1',
+    artworkNo: no
+  }));
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    try {
+      return JSON.parse(cached);
+    } catch (e) {
+      cache.remove(cacheKey);
+    }
+  }
   const baseSelect = 'id,so_number,so_date,so_created_at,so_time,sales_rep,line_no,client_name,product_code,product_name,category,division,job_type,qty,unit,artwork_no,product_type,plate_status,die_status,plate_size,plate_count,has_hybrid_plate,hybrid_plate_size,hybrid_plate_count,die_count,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,teeth,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,artwork_at,approved_at,accounts_status,business_status';
   const rows = _decorateArtworkRowsWithOrderStatus_(_filterSalesServiceOnlyItems_(selectArtworkJobsView_({
     select: baseSelect,
@@ -23665,7 +23721,9 @@ function getArtworkGroupJobs(artworkNo) {
   rows.forEach(function(row){
     row.fg_stock_qty = Number(fgStockMap[String(row.product_code || '').trim()] || 0);
   });
-  return rows.map(_artworkRowToWorkbenchJob_);
+  const jobs = rows.map(_artworkRowToWorkbenchJob_);
+  try { cache.put(cacheKey, JSON.stringify(jobs), 300); } catch (e) {}
+  return jobs;
 }
 
 function _artworkSearchSafe_(value) {
@@ -24334,6 +24392,79 @@ function unapproveArtworkGroup(artworkNo, token) {
   PropertiesService.getScriptProperties().setProperty('ARTWORK_WORKBENCH_VERSION', String(Date.now()));
   _opsBumpDatasetVersion_();
   return { ok: true, artworkNo: no };
+}
+
+/**
+ * Removes a saved or approved artwork assignment without deleting the
+ * underlying sales-order artwork rows. Released jobs return to NO_ART and can
+ * be assigned to a completely different artwork. A generated work order is a
+ * hard stop because it already carries the approved artwork snapshot.
+ */
+function deleteArtworkGroup(payload, token) {
+  const request = payload && typeof payload === 'object'
+    ? payload
+    : { artworkNo: payload };
+  _requireArtworkMutationAccess_(token, request);
+
+  const no = String(request.artworkNo || '').trim();
+  if (!no) throw new Error('Missing artwork number');
+
+  const rows = supabaseSelect_('artworks', {
+    filters: { artwork_no: 'eq.' + no }
+  }) || [];
+  if (!rows.length) throw new Error('Artwork group not found');
+
+  const workOrderRows = supabaseSelect_('work_order_jobs', {
+    select: 'id,wo_id,so_number,line_no,artwork_no',
+    filters: { artwork_no: 'eq.' + no },
+    limit: 1
+  }) || [];
+  if (workOrderRows.length) {
+    throw new Error('WORK_ORDER_EXISTS_FOR_ARTWORK: Delete the work order before deleting artwork ' + no + '.');
+  }
+
+  const expectedRevision = String(request.expectedRevision || '').trim();
+  if (expectedRevision) {
+    const revisions = rows.map(function(row) { return String(row.updated_at || ''); }).filter(Boolean).sort();
+    const currentRevision = revisions.length ? revisions[revisions.length - 1] : '';
+    if (currentRevision && new Date(currentRevision).getTime() !== new Date(expectedRevision).getTime()) {
+      throw new Error('STALE_REVISION: Artwork changed after it was opened.');
+    }
+  }
+
+  const update = {
+    artwork_no: null,
+    product_type: null,
+    plate_status: null,
+    die_status: null,
+    plate_size: null,
+    plate_count: null,
+    has_hybrid_plate: null,
+    hybrid_plate_size: null,
+    hybrid_plate_count: null,
+    die_count: null,
+    sheet_length: null,
+    sheet_width: null,
+    sheet_ups: null,
+    printing_colors: null,
+    across_ups: null,
+    along_ups: null,
+    total_ups: null,
+    across_width: null,
+    teeth: null,
+    across_gap_mm: null,
+    along_gap_mm: null,
+    stock_qty_to_bill: 0,
+    status: 'NO_ART',
+    artwork_at: null,
+    approved_at: null
+  };
+  if (_artworkSourceArtworkNoColumnAvailable_()) update.source_artwork_no = null;
+
+  supabaseUpdateMinimal_('artworks', { artwork_no: 'eq.' + no }, update);
+  PropertiesService.getScriptProperties().setProperty('ARTWORK_WORKBENCH_VERSION', String(Date.now()));
+  _opsBumpDatasetVersion_();
+  return { ok: true, artworkNo: no, releasedJobs: rows.length };
 }
 
 /******************************************************
@@ -51572,7 +51703,7 @@ function _reportsOtifStageRows_(rows, filters, dateBasis) {
   const stages = [
     { key: 'soApproval', label: 'SO to SO Approval', status: 'soApprovalStatus', targetField: 'soApprovalTargetDate', actualField: 'soApprovalActualDate', order: 1 },
     { key: 'artworkApproval', label: 'SO to Artwork Approval', status: 'artworkApprovalStatus', targetField: 'artworkApprovalTargetDate', actualField: 'artworkApprovalActualDate', order: 2 },
-    { key: 'materialProduction', label: 'Material Receipt / Stock Artwork to Production', status: 'materialProductionStatus', targetField: 'materialProductionTargetDate', actualField: 'materialProductionActualDate', order: 3 },
+    { key: 'materialProduction', label: 'Material Ready (Batch Receipt / Artwork) to Production', status: 'materialProductionStatus', targetField: 'materialProductionTargetDate', actualField: 'materialProductionActualDate', order: 3 },
     { key: 'production', label: 'Artwork Approval to Production', status: 'productionStatus', targetField: 'productionTargetDate', actualField: 'productionCompletedDate', order: 4 },
     { key: 'dispatchBilling', label: 'Production to Billing', status: 'dispatchBillingStatus', targetField: 'dispatchBillingTargetDate', actualField: 'dispatchBillingActualDate', order: 5 },
     { key: 'finalOtif', label: 'SO to Final Billing', status: 'finalOtifStatus', targetField: 'finalOtifTargetDate', actualField: 'finalOtifActualDate', order: 6 }
@@ -51712,8 +51843,14 @@ function _reportsSectionOTIF_(token, params) {
       artworkApprovalActualDate: row.artwork_approval_actual_date || '',
       artworkApprovalStatus: row.artwork_approval_otif_status || 'NOT_APPLICABLE',
       materialReceiptCount: _reportsSafeNumber_(row.material_receipt_count),
+      materialIssueCount: _reportsSafeNumber_(row.material_issue_count),
       materialReceiptFirstDate: row.material_receipt_first_date || '',
       materialReceiptDate: row.material_receipt_date || '',
+      materialPurchaseDate: row.material_purchase_date || '',
+      hasPurchaseBatch: row.has_purchase_batch === true ? 'YES' : 'NO',
+      materialIssueFirstAt: row.material_issue_first_at || '',
+      materialIssueLastAt: row.material_issue_last_at || '',
+      materialBatchNos: row.material_batch_nos || '',
       materialReceiptPoNos: row.material_receipt_po_nos || '',
       materialReceiptGrnNos: row.material_receipt_grn_nos || '',
       materialDemandCount: _reportsSafeNumber_(row.material_demand_count),
@@ -51771,6 +51908,7 @@ function _reportsSectionOTIF_(token, params) {
         'artworkApprovalStatus',
         'materialReadyBasis',
         'materialReadinessQuality',
+        'materialBatchNos',
         'materialReceiptPoNos',
         'materialReceiptGrnNos',
         'materialProductionStatus',
@@ -51800,28 +51938,32 @@ function _reportsSectionOTIF_(token, params) {
     return row.department === 'Grand Total' && row.stage === 'SO to Final Billing';
   })[0] || {};
   const materialSummary = summaryRows.filter(function(row) {
-    return row.department === 'Grand Total' && row.stage === 'Material Receipt / Stock Artwork to Production';
+    return row.department === 'Grand Total' && row.stage === 'Material Ready (Batch Receipt / Artwork) to Production';
   })[0] || {};
   const materialLinkExceptions = _reportsTrySelect_('v_report_otif_material_link_exceptions', {
-    filters: _reportsApplyDateFilterToQuery_(filters, 'receipt_date'),
-    order: 'receipt_date.desc,po_no.desc',
+    filters: _reportsApplyDateFilterToQuery_(filters, 'issue_date'),
+    order: 'issue_date.desc,wo_number.desc',
     limit: 200
   }).map(function(row) {
     return {
-      receiptId: row.receipt_id || '',
+      exceptionId: row.exception_id || '',
+      issueId: row.issue_id || '',
+      issueDate: row.issue_date || '',
+      issueReference: row.issue_reference || '',
+      woId: row.wo_id || '',
+      woNumber: row.wo_number || '',
+      allocationId: row.allocation_id || '',
+      lotId: row.lot_id || '',
+      batchNo: row.batch_no || '',
       receiptDate: row.receipt_date || '',
-      poNo: row.po_no || '',
-      poLineId: row.po_line_id || '',
-      grnNo: row.grn_no || '',
-      jobRef: row.job_ref || '',
-      soRefs: row.so_refs || '',
-      directSoLineId: row.direct_so_line_id || '',
-      planningSoLineId: row.planning_so_line_id || '',
+      ledgerSoLineId: row.ledger_so_line_id || '',
+      lotSoLineId: row.lot_so_line_id || '',
+      candidateSoLineIds: row.candidate_so_line_ids || '',
       exceptionCode: row.exception_code || 'UNCLASSIFIED'
     };
   }).filter(function(row) {
     return _reportsTextPasses_(row, filters, [
-      'poNo','grnNo','jobRef','soRefs','directSoLineId','planningSoLineId','exceptionCode'
+      'issueReference','woNumber','batchNo','ledgerSoLineId','lotSoLineId','candidateSoLineIds','exceptionCode'
     ]) && _reportsStatusPasses_(row, filters, ['exceptionCode']);
   });
 
@@ -51866,7 +52008,7 @@ function _reportsSectionOTIF_(token, params) {
     }, {
       key: 'otifJobDetail',
       title: 'Job-wise OTIF Detail',
-      subtitle: 'Line-wise OTIF with separate artwork-based and material-based production clocks. Purchased jobs start from the linked GRN date; stock-supplied jobs start from artwork approval.',
+      subtitle: 'Line-wise OTIF with separate artwork-based and batch-verified material clocks. Material OTIF starts on the later of artwork approval and the latest PO receipt date among batches actually issued to the job; older or non-PO stock starts at artwork approval.',
       minWidth: 6100,
       columns: [
         { key:'soNumber', label:'SO No' },
@@ -51905,16 +52047,17 @@ function _reportsSectionOTIF_(token, params) {
         { key:'artworkApprovalStatus', label:'Artwork OTIF', type:'status' },
         { key:'materialReadyBasis', label:'Material OTIF Basis', type:'status' },
         { key:'materialReadinessQuality', label:'Material Evidence Quality', type:'status' },
-        { key:'materialDemandCount', label:'Material Demands', type:'number' },
-        { key:'materialAllocatedDemandCount', label:'Ready Material Demands', type:'number' },
-        { key:'allMaterialDemandsReady', label:'All Materials Ready', type:'status' },
-        { key:'hasPurchaseDemand', label:'Has Purchase Demand', type:'status' },
         { key:'materialLinkExceptionCount', label:'Material Link Exceptions', type:'number' },
-        { key:'materialReceiptCount', label:'Linked GRN Lines', type:'number' },
-        { key:'materialReceiptFirstDate', label:'First Material Receipt', type:'date' },
-        { key:'materialReceiptDate', label:'Material Received / Ready', type:'date' },
-        { key:'materialReceiptPoNos', label:'Material PO Nos' },
-        { key:'materialReceiptGrnNos', label:'Material GRN Nos' },
+        { key:'materialReceiptCount', label:'Material Batches Used', type:'number' },
+        { key:'materialIssueCount', label:'Material Issues', type:'number' },
+        { key:'materialReceiptFirstDate', label:'Earliest Batch Receipt', type:'date' },
+        { key:'materialReceiptDate', label:'Latest Batch Receipt', type:'date' },
+        { key:'materialPurchaseDate', label:'Latest Purchased Batch Receipt', type:'date' },
+        { key:'hasPurchaseBatch', label:'Purchased Batch Used', type:'status' },
+        { key:'materialIssueFirstAt', label:'First Material Issue', type:'datetime' },
+        { key:'materialIssueLastAt', label:'Last Material Issue', type:'datetime' },
+        { key:'materialBatchNos', label:'Issued Batch Nos' },
+        { key:'materialReceiptPoNos', label:'Batch Source / PO Nos' },
         { key:'materialProductionStartDate', label:'After Material Start', type:'date' },
         { key:'materialProductionTargetDate', label:'After Material Production Target', type:'date' },
         { key:'materialProductionActualDate', label:'After Material Production Actual', type:'date' },
@@ -51952,19 +52095,22 @@ function _reportsSectionOTIF_(token, params) {
     }, {
       key: 'otifMaterialLinkExceptions',
       title: 'Material OTIF Link Exceptions',
-      subtitle: 'GRN rows excluded from material OTIF because the job link conflicts with the planning demand or a job reference has no exact SO-line link.',
-      minWidth: 1650,
+      subtitle: 'Inventory issue/batch rows excluded from material OTIF because their job attribution is missing, shared, conflicting, or lacks a lot allocation.',
+      minWidth: 1900,
       columns: [
+        { key:'issueDate', label:'Issue Date', type:'datetime' },
+        { key:'issueReference', label:'Issue Reference' },
+        { key:'woNumber', label:'WO No' },
+        { key:'batchNo', label:'Batch No' },
         { key:'receiptDate', label:'Receipt Date', type:'date' },
-        { key:'poNo', label:'PO No' },
-        { key:'grnNo', label:'GRN / Challan' },
-        { key:'jobRef', label:'Job Ref' },
-        { key:'soRefs', label:'SO Refs' },
-        { key:'directSoLineId', label:'Direct SO Line ID' },
-        { key:'planningSoLineId', label:'Planning SO Line ID' },
+        { key:'ledgerSoLineId', label:'Issue SO Line ID' },
+        { key:'lotSoLineId', label:'Batch SO Line ID' },
+        { key:'candidateSoLineIds', label:'WO Candidate SO Lines' },
         { key:'exceptionCode', label:'Exception', type:'status' },
-        { key:'poLineId', label:'PO Line ID' },
-        { key:'receiptId', label:'Receipt ID' }
+        { key:'allocationId', label:'Allocation ID' },
+        { key:'lotId', label:'Lot ID' },
+        { key:'issueId', label:'Issue ID' },
+        { key:'exceptionId', label:'Exception ID' }
       ],
       rows: materialLinkExceptions
     }]
@@ -58141,9 +58287,11 @@ function _ppcBuildJobStates_(pendingRows,eventByLine,actor) {
     const materialDates=materials.reduce(function(out,x){
       [x.availabilityDate,x.plannerAvailableDate,x.supplierPromisedDate].forEach(function(value){if(_commitmentDateKey_(value))out.push(value);});return out;
     },[]);
-    const manualRmDate=_commitmentDateKey_(control.manual_rm_available_date);
+    const manualRmAvailable=control.manual_rm_available===true;
+    const manualRmDate=manualRmAvailable?'':_commitmentDateKey_(control.manual_rm_available_date);
     let rmStatus='READY',rmReadyDate=today;
-    if(!materials.length){rmStatus='MATERIAL_NOT_DEFINED';rmReadyDate=processes.some(function(x){return Number(x.productionEntryCount||0)>0;})?today:manualRmDate;}
+    if(manualRmAvailable){rmStatus='MANUAL_AVAILABLE';rmReadyDate=today;}
+    else if(!materials.length){rmStatus='MATERIAL_NOT_DEFINED';rmReadyDate=processes.some(function(x){return Number(x.productionEntryCount||0)>0;})?today:manualRmDate;}
     else if(rmShortage>0){rmReadyDate=manualRmDate||_ppcLaterDate_(materialDates);rmStatus=rmReadyDate?'SHORT_READY_BY_DATE':'SHORT_DATE_REQUIRED';}
     else if(materials.some(function(x){return Number(x.incomingQty||0)>0;})){rmStatus='INCOMING_CONFIRMED';rmReadyDate=manualRmDate||_ppcLaterDate_(materialDates)||today;}
     const rmDetail=materials.filter(function(x){return Number(x.shortageQty||0)>0||Number(x.balanceQty||0)>0;}).slice(0,6)
@@ -58194,33 +58342,38 @@ function _ppcBuildJobStates_(pendingRows,eventByLine,actor) {
 
     let risk='NONE',riskCode='',advice='',action='',owner='PPC';
     if(rmStatus==='MATERIAL_NOT_DEFINED'&&!hasProductionEvidence){risk=dueDate&&dueDate<=today?'CRITICAL':'HIGH';riskCode='RM_NOT_DEFINED';advice='Raw-material requirements are not defined for this job. Complete the BOM/job-card material list or enter a verified RM availability date.';action='DEFINE_OR_CONFIRM_RM';owner='MATERIAL';}
-    else if(rmShortage>0&&!rmReadyDate){risk=dueDate&&dueDate<=today?'CRITICAL':'HIGH';riskCode='RM_DATE_REQUIRED';advice='RM short by '+rmShortage.toFixed(3)+'. Enter or obtain a reliable material availability date. '+rmDetail;action='CONFIRM_RM_DATE';owner='MATERIAL';}
-    else if(rmShortage>0){risk=variance>2?'HIGH':'MEDIUM';riskCode='RM_SHORT';advice='RM short by '+rmShortage.toFixed(3)+'; current readiness is '+rmReadyDate+'. '+(variance>0?'Expedite supply to protect delivery.':'Monitor the confirmed supply date.');action=variance>0?'EXPEDITE_MATERIAL':'MONITOR_MATERIAL';owner='MATERIAL';}
+    else if(!manualRmAvailable&&rmShortage>0&&!rmReadyDate){risk=dueDate&&dueDate<=today?'CRITICAL':'HIGH';riskCode='RM_DATE_REQUIRED';advice='RM short by '+rmShortage.toFixed(3)+'. Enter or obtain a reliable material availability date. '+rmDetail;action='CONFIRM_RM_DATE';owner='MATERIAL';}
+    else if(!manualRmAvailable&&rmShortage>0){risk=variance>2?'HIGH':'MEDIUM';riskCode='RM_SHORT';advice='RM short by '+rmShortage.toFixed(3)+'; current readiness is '+rmReadyDate+'. '+(variance>0?'Expedite supply to protect delivery.':'Monitor the confirmed supply date.');action=variance>0?'EXPEDITE_MATERIAL':'MONITOR_MATERIAL';owner='MATERIAL';}
     else if(otherStatus!=='READY'&&!otherReadyDate){risk=dueDate&&dueDate<=today?'CRITICAL':'HIGH';riskCode=otherStatus;advice=otherDetail+' Confirm its availability date before dispatch can be predicted.';action='CONFIRM_CONSTRAINT_DATE';owner='PPC';}
     else if(!Number(info.woCount||0)){risk=variance>0?'HIGH':'MEDIUM';riskCode='WO_NOT_CREATED';advice='Material position is known, but the Work Order/routing is not created. Release the job card and routing.';action='CREATE_WORK_ORDER';owner='PPC';}
     else if(Number(row.dispatched_qty||0)>=Number(row.order_qty||0)&&Number(row.pending_qty||0)>0){risk=dueDate&&dueDate<today?'HIGH':'MEDIUM';riskCode='BILLING_PENDING';advice='Dispatch appears complete but billing quantity remains pending. Review invoice posting.';action='COMPLETE_BILLING';owner='BILLING';}
     else if(current){risk=variance>5?'CRITICAL':variance>2?'HIGH':variance>0?'MEDIUM':'NONE';riskCode=variance>0?'PRODUCTION_DELAY':'PRODUCTION_RUNNING';advice='Next process: '+String(current.processName||'production')+(current.plannedMachine?' on '+current.plannedMachine:'')+'. Balance '+Number(current.balanceQty||0).toFixed(3)+'. Predicted dispatch '+(predicted||'awaiting constraint date')+'.';action=variance>0?'PRIORITIZE_PROCESS':'CONTINUE_PLAN';owner=String(current.department||'PRODUCTION');}
     else {risk=variance>2?'HIGH':variance>0?'MEDIUM':'NONE';riskCode=variance>0?'DISPATCH_RISK':'READY_FOR_NEXT_STAGE';advice=predicted?'Current evidence supports dispatch by '+predicted+'.':'Awaiting sufficient planning evidence.';action=Number(info.packedQty||0)>=Number(row.pending_qty||0)?'DISPATCH_READY':'CONTINUE_PLAN';owner=action==='DISPATCH_READY'?'DISPATCH':'PPC';}
     const confidence=(!predicted||rmStatus==='MATERIAL_NOT_DEFINED'||otherStatus.indexOf('DATE_REQUIRED')!==-1)?'LOW':
-      (manualRmDate||manualOtherDate||!hasProductionEvidence)?'MEDIUM':'HIGH';
+      (manualRmAvailable||manualRmDate||manualOtherDate||!hasProductionEvidence)?'MEDIUM':'HIGH';
     const lastEvent=eventByLine[lineId]||{};
-    const stable={soLineId:lineId,rmStatus:rmStatus,rmReadyDate:rmReadyDate,rmShortage:rmShortage,otherStatus:otherStatus,
+    const includeInDeliveryPlan=control.include_in_delivery_plan===true,dispatchPlanDate=_commitmentDateKey_(control.dispatch_plan_date),deliveryPlanSequence=Number(control.delivery_plan_sequence||0),deliveryPlanRemarks=String(control.delivery_plan_remarks||'');
+    const stable={soLineId:lineId,orderBookingAt:row.order_created_at||row.order_date||'',manualRmAvailable:manualRmAvailable,rmStatus:rmStatus,rmReadyDate:rmReadyDate,rmShortage:rmShortage,otherStatus:otherStatus,
       otherReadyDate:otherReadyDate,currentProcess:current&&current.processName||'',progress:progress,predicted:predicted,risk:risk,riskCode:riskCode,
-      advice:advice,remark:control.planner_remark||'',event:lastEvent.event_type||''};
+      advice:advice,remark:control.planner_remark||'',includeInDeliveryPlan:includeInDeliveryPlan,dispatchPlanDate:dispatchPlanDate,
+      deliveryPlanSequence:deliveryPlanSequence,deliveryPlanRemarks:deliveryPlanRemarks,event:lastEvent.event_type||''};
     const state={
       so_line_id:row.so_line_id,so_id:row.so_id,plan_id:row.plan_id||null,so_number:row.so_number,line_no:Number(row.line_no||0),
       division:row.division||'',client_code:row.client_code||'',client_name:row.client_name||'',product_code:row.product_code||'',product_name:row.product_name||'',
       job_reference:row.job_reference||'',artwork_nos:info.artworkNos||'',artwork_status:info.artworkStatuses||'',wo_numbers:info.woNumbers||'',wo_status:info.woStatuses||'',
       job_size:info.jobSizes||'',order_uom:row.order_uom||'',order_qty:Number(row.order_qty||0),billed_qty:Number(row.billed_qty||0),
       packed_qty:Number(info.packedQty||0),dispatched_qty:Number(row.dispatched_qty||0),pending_qty:Number(row.pending_qty||0),pending_value:Number(row.pending_value||0),
+      order_booking_at:row.order_created_at||row.order_date||null,
       requested_delivery:_commitmentDateKey_(row.requested_delivery)||null,committed_delivery:_commitmentDateKey_(row.committed_delivery)||null,
       rm_status:rmStatus,rm_required_qty:rmRequired,rm_available_qty:rmAvailable,rm_shortage_qty:rmShortage,rm_ready_date:rmReadyDate||null,rm_detail:rmDetail,
       other_status:otherStatus,other_ready_date:otherReadyDate||null,other_detail:otherDetail,current_process:current&&current.processName||'',
       current_machine:current&&(current.plannedMachine||current.actualMachines)||'',production_progress_pct:Number(progress.toFixed(3)),production_balance_qty:productionBalance,
       production_ready_date:productionReady||null,predicted_dispatch_date:predicted||null,variance_days:variance,risk_severity:risk,risk_code:riskCode,
       confidence:confidence,ai_advice:advice,recommended_action:action,action_owner:owner,
-      planner_priority:control.planner_priority||row.job_priority||'',planner_remark:control.planner_remark||'',manual_rm_available_date:manualRmDate||null,
+      planner_priority:control.planner_priority||row.job_priority||'',planner_remark:control.planner_remark||'',manual_rm_available:manualRmAvailable,manual_rm_available_date:manualRmDate||null,
       other_constraint:control.other_constraint||'',other_available_date:manualOtherDate||null,dispatch_buffer_days:bufferDays,
+      include_in_delivery_plan:includeInDeliveryPlan,dispatch_plan_date:dispatchPlanDate||null,
+      delivery_plan_sequence:deliveryPlanSequence||null,delivery_plan_remarks:deliveryPlanRemarks,
       last_event_type:lastEvent.event_type||'',last_event_at:lastEvent.occurred_at||null,state_hash:_cacheKeyHash_('PPCSTATE',JSON.stringify(stable)),
       evaluated_at:new Date().toISOString(),evaluated_by:actor||'SYSTEM AI PLANNER',updated_at:new Date().toISOString()
     };
@@ -58237,7 +58390,7 @@ function _ppcProcessPendingEvents_(options) {
     const latestByLine={};
     events.forEach(function(row){const key=String(row.so_line_id);if(!latestByLine[key]||String(row.occurred_at||'')>String(latestByLine[key].occurred_at||''))latestByLine[key]=row;});
     const lineIds=Object.keys(latestByLine);
-    const pendingRows=lineIds.length?_supabaseSelectByKeyInBatches_('v_order_commitment_pending_export','*','so_line_id',lineIds,'requested_delivery.asc',25):[];
+    const pendingRows=lineIds.length?_supabaseSelectByKeyInBatches_('v_order_commitment_pending_export','*','so_line_id',lineIds,'order_created_at.asc.nullslast,order_date.asc,so_number.asc,line_no.asc',25):[];
     const openIds={};(pendingRows||[]).forEach(function(row){openIds[String(row.so_line_id)]=true;});
     const closedIds=lineIds.filter(function(id){return !openIds[id];});
     if(closedIds.length)supabaseDeleteMinimal_('ppc_job_state',{so_line_id:_supabaseInFilter_(closedIds)});
@@ -58292,7 +58445,7 @@ function _ppcRecoverEmptyQueue_(limit){
   const active=supabaseSelect_('ppc_planning_events',{select:'id',filters:{status:'in.(PENDING,PROCESSING)'},limit:1})||[];
   if(active.length)return 0;
   let candidates=supabaseSelect_('ppc_planning_events',{select:'so_line_id',filters:{status:'eq.FAILED'},order:'occurred_at.asc',limit:size})||[];
-  if(!candidates.length)candidates=supabaseSelect_('v_order_commitment_pending_export',{select:'so_line_id',order:'requested_delivery.asc.nullslast',limit:size})||[];
+  if(!candidates.length)candidates=supabaseSelect_('v_order_commitment_pending_export',{select:'so_line_id',order:'order_created_at.asc.nullslast,order_date.asc,so_number.asc,line_no.asc',limit:size})||[];
   const lineIds=[...new Set(candidates.map(function(row){return row.so_line_id;}).filter(Boolean))];
   if(!lineIds.length)return 0;
   supabaseBulkInsertMinimal_('ppc_planning_events',lineIds.map(function(id){return{so_line_id:id,event_type:'RECOVERY_RETRY',source_table:'PPC_LIVE_SHEET',source_id:String(id),payload:{reason:'Automatic queue recovery'}};}));
@@ -58315,33 +58468,35 @@ function ppcAdminGetLiveSheet(params,token){
   _commitmentRequireAdmin_(token);const p=params||{};
   try{
     const triggerEnabled=_ppcEnsureAutomaticTrigger_();
-    const all=_supabaseSelectAll_('ppc_job_state',{select:'*',filters:{pending_qty:'gt.0'},order:'risk_severity.desc,predicted_dispatch_date.asc.nullslast,requested_delivery.asc.nullslast,so_number.asc,line_no.asc'},1000,50000)||[];
+    const all=_supabaseSelectAll_('ppc_job_state',{select:'*',filters:{pending_qty:'gt.0'},order:'order_booking_at.asc.nullslast,so_number.asc,line_no.asc'},1000,50000)||[];
     const division=String(p.division||'').trim(),risk=String(p.risk||'').trim().toUpperCase(),q=String(p.q||'').trim().toLowerCase();
     const visible=all.filter(function(row){if(division&&row.division!==division)return false;if(risk&&row.risk_severity!==risk)return false;if(!q)return true;return[
       row.so_number,row.client_name,row.product_code,row.product_name,row.job_reference,row.artwork_nos,row.wo_numbers,row.job_size,row.rm_detail,row.current_process,row.ai_advice,row.planner_remark
     ].join(' ').toLowerCase().indexOf(q)!==-1;});
-    const riskRank={CRITICAL:4,HIGH:3,MEDIUM:2,LOW:1,NONE:0},priorityRank={URGENT:3,HIGH:2,NORMAL:1,HOLD:-1};
     visible.sort(function(a,b){
-      const riskDelta=Number(riskRank[b.risk_severity]||0)-Number(riskRank[a.risk_severity]||0);if(riskDelta)return riskDelta;
-      const priorityDelta=Number(priorityRank[String(b.planner_priority||'').toUpperCase()]||0)-Number(priorityRank[String(a.planner_priority||'').toUpperCase()]||0);if(priorityDelta)return priorityDelta;
-      return String(a.predicted_dispatch_date||a.requested_delivery||'9999-12-31').localeCompare(String(b.predicted_dispatch_date||b.requested_delivery||'9999-12-31'));
+      return String(a.order_booking_at||'9999-12-31T23:59:59Z').localeCompare(String(b.order_booking_at||'9999-12-31T23:59:59Z'))||
+        String(a.so_number||'').localeCompare(String(b.so_number||''))||Number(a.line_no||0)-Number(b.line_no||0);
     });
     const props=PropertiesService.getScriptProperties(),queue=_ppcQueueHealth_();
     return {ok:true,rows:visible.map(function(row){return{
-      soLineId:row.so_line_id,soNumber:row.so_number,lineNo:Number(row.line_no||0),division:row.division||'',clientName:row.client_name||'',
+      soLineId:row.so_line_id,planId:row.plan_id||'',soNumber:row.so_number,lineNo:Number(row.line_no||0),division:row.division||'',clientName:row.client_name||'',
       productCode:row.product_code||'',productName:row.product_name||'',jobReference:row.job_reference||'',artworkNos:row.artwork_nos||'',artworkStatus:row.artwork_status||'',
       woNumbers:row.wo_numbers||'',woStatus:row.wo_status||'',jobSize:row.job_size||'',uom:row.order_uom||'',orderQty:Number(row.order_qty||0),
       billedQty:Number(row.billed_qty||0),packedQty:Number(row.packed_qty||0),dispatchedQty:Number(row.dispatched_qty||0),pendingQty:Number(row.pending_qty||0),
-      requestedDelivery:row.requested_delivery||'',committedDelivery:row.committed_delivery||'',rmStatus:row.rm_status||'',rmRequiredQty:Number(row.rm_required_qty||0),
+      orderBookingAt:row.order_booking_at||'',requestedDelivery:row.requested_delivery||'',committedDelivery:row.committed_delivery||'',rmStatus:row.rm_status||'',rmRequiredQty:Number(row.rm_required_qty||0),
       rmAvailableQty:Number(row.rm_available_qty||0),rmShortageQty:Number(row.rm_shortage_qty||0),rmReadyDate:row.rm_ready_date||'',rmDetail:row.rm_detail||'',
       otherStatus:row.other_status||'',otherReadyDate:row.other_ready_date||'',otherDetail:row.other_detail||'',currentProcess:row.current_process||'',currentMachine:row.current_machine||'',
       productionProgressPct:Number(row.production_progress_pct||0),productionBalanceQty:Number(row.production_balance_qty||0),predictedDispatch:row.predicted_dispatch_date||'',
       varianceDays:Number(row.variance_days||0),riskSeverity:row.risk_severity||'NONE',riskCode:row.risk_code||'',confidence:row.confidence||'LOW',
       advice:row.ai_advice||'',recommendedAction:row.recommended_action||'',actionOwner:row.action_owner||'',priority:row.planner_priority||'',remark:row.planner_remark||'',
-      manualRmAvailableDate:row.manual_rm_available_date||'',otherConstraint:row.other_constraint||'',manualOtherDate:row.other_available_date||'',
+      materialAvailable:row.manual_rm_available===true,manualRmAvailableDate:row.manual_rm_available_date||'',otherConstraint:row.other_constraint||'',manualOtherDate:row.other_available_date||'',
+      includeInDeliveryPlan:row.include_in_delivery_plan===true,dispatchPlanDate:row.dispatch_plan_date||'',
+      deliveryPlanSequence:Number(row.delivery_plan_sequence||0),deliveryPlanRemarks:row.delivery_plan_remarks||'',
+      unbilledDispatchQty:Math.max(0,Number(row.dispatched_qty||0)-Number(row.billed_qty||0)),
       lastEventType:row.last_event_type||'',lastEventAt:row.last_event_at||'',evaluatedAt:row.evaluated_at||''};}),
       divisions:[...new Set(all.map(function(row){return String(row.division||'').trim();}).filter(Boolean))].sort(),
-      metrics:{total:all.length,rmAttention:all.filter(function(row){return Number(row.rm_shortage_qty||0)>0||row.rm_status==='SHORT_DATE_REQUIRED';}).length,
+      metrics:{total:all.length,inDeliveryPlan:all.filter(function(row){return row.include_in_delivery_plan===true;}).length,
+        rmAttention:all.filter(function(row){return row.manual_rm_available!==true&&(Number(row.rm_shortage_qty||0)>0||row.rm_status==='SHORT_DATE_REQUIRED');}).length,
         atRisk:all.filter(function(row){return ['HIGH','CRITICAL'].indexOf(row.risk_severity)!==-1;}).length,
         dueToday:all.filter(function(row){return (row.committed_delivery||row.requested_delivery)===_commitmentToday_();}).length},
       automatic:{enabled:triggerEnabled,fallbackEnabled:true,lastRunAt:props.getProperty('PPC_AUTOMATIC_LAST_RUN_AT')||'',
@@ -58354,10 +58509,25 @@ function ppcAdminGetLiveSheet(params,token){
 function ppcAdminSaveInlineControl(payload,token){
   const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),p=payload||{},lineId=String(p.soLineId||'').trim();
   if(!lineId)throw new Error('Sales Order line is required.');
+  const state=(supabaseSelect_('ppc_job_state',{select:'so_line_id,plan_id,committed_delivery',filters:{so_line_id:'eq.'+lineId},limit:1})||[])[0]||{};
+  if(p.committedDelivery!==undefined){
+    const committedDate=_commitmentDateKey_(p.committedDelivery),reason=String(p.commitmentReason||'').trim();
+    if(!committedDate)throw new Error('Committed delivery date is required.');
+    if(reason.length<3)throw new Error('Enter the basis or reason for the delivery commitment.');
+    const plan=state.plan_id?_commitmentPlanById_(state.plan_id):(supabaseSelect_('order_commitment_plans',{select:'*',filters:{so_line_id:'eq.'+lineId},limit:1})||[])[0];
+    if(!plan)throw new Error('Delivery commitment plan was not found for this order line.');
+    if(_commitmentDateKey_(plan.committed_delivery)!==committedDate){
+      if(plan.committed_delivery)commitmentAdminReviseDeliveryDate({planId:plan.id,committedDelivery:committedDate,reason:reason},token);
+      else commitmentAdminFinalize({planId:plan.id,committedDelivery:committedDate,notes:reason,overrideReason:String(p.overrideReason||reason).trim()},token);
+      supabaseUpdateMinimal_('ppc_job_state',{so_line_id:'eq.'+lineId},{committed_delivery:committedDate,updated_at:new Date().toISOString()});
+    }
+  }
   const existing=(supabaseSelect_('ppc_job_control',{select:'*',filters:{so_line_id:'eq.'+lineId},limit:1})||[])[0]||{};
+  const materialAvailable=p.materialAvailable===undefined?existing.manual_rm_available===true:p.materialAvailable===true;
   const row={so_line_id:lineId,planner_priority:String(p.priority==null?existing.planner_priority||'':p.priority).trim(),
     planner_remark:String(p.remark==null?existing.planner_remark||'':p.remark).trim(),
-    manual_rm_available_date:p.manualRmAvailableDate===undefined?(existing.manual_rm_available_date||null):(_commitmentDateKey_(p.manualRmAvailableDate)||null),
+    manual_rm_available:materialAvailable,
+    manual_rm_available_date:materialAvailable?null:(p.manualRmAvailableDate===undefined?(existing.manual_rm_available_date||null):(_commitmentDateKey_(p.manualRmAvailableDate)||null)),
     other_constraint:String(p.otherConstraint==null?existing.other_constraint||'':p.otherConstraint).trim(),
     other_available_date:p.manualOtherDate===undefined?(existing.other_available_date||null):(_commitmentDateKey_(p.manualOtherDate)||null),
     production_lead_override_days:existing.production_lead_override_days==null?null:Number(existing.production_lead_override_days),
@@ -58365,9 +58535,19 @@ function ppcAdminSaveInlineControl(payload,token){
     override_reason:existing.override_reason||'',updated_at:new Date().toISOString(),updated_by:actor};
   if(row.planner_remark&&row.planner_remark!==String(existing.planner_remark||''))supabaseInsertMinimal_('ppc_job_notes',{so_line_id:lineId,note_text:row.planner_remark,created_by:actor});
   supabaseUpsertMinimal_('ppc_job_control',row,{onConflict:'so_line_id'});
-  supabaseUpdateMinimal_('ppc_job_state',{so_line_id:'eq.'+lineId},{planner_priority:row.planner_priority,planner_remark:row.planner_remark,
+  const statePatch={planner_priority:row.planner_priority,planner_remark:row.planner_remark,manual_rm_available:materialAvailable,
     manual_rm_available_date:row.manual_rm_available_date,other_constraint:row.other_constraint,other_available_date:row.other_available_date,
-    updated_at:new Date().toISOString()});
+    updated_at:new Date().toISOString()};
+  if(p.materialAvailable!==undefined){statePatch.rm_status=materialAvailable?'MANUAL_AVAILABLE':'PENDING_REEVALUATION';statePatch.rm_ready_date=materialAvailable?_commitmentToday_():null;}
+  supabaseUpdateMinimal_('ppc_job_state',{so_line_id:'eq.'+lineId},statePatch);
+  if(p.includeInDeliveryPlan!==undefined||p.dispatchPlanDate!==undefined||p.deliveryPlanSequence!==undefined||p.deliveryPlanRemarks!==undefined){
+    const included=p.includeInDeliveryPlan===undefined?(existing.include_in_delivery_plan===true):p.includeInDeliveryPlan===true;
+    const dispatchDate=p.dispatchPlanDate===undefined?_commitmentDateKey_(existing.dispatch_plan_date):_commitmentDateKey_(p.dispatchPlanDate);
+    const sequence=p.deliveryPlanSequence===undefined?Number(existing.delivery_plan_sequence||0):Math.max(0,Math.round(Number(p.deliveryPlanSequence||0)));
+    const remarks=String(p.deliveryPlanRemarks===undefined?existing.delivery_plan_remarks||'':p.deliveryPlanRemarks).trim();
+    supabaseRpc_('save_ppc_delivery_plan_position',{p_so_line_id:lineId,p_include:included,p_dispatch_plan_date:dispatchDate||null,
+      p_sequence:sequence||null,p_remarks:remarks,p_actor:actor});
+  }
   return {ok:true,queued:true};
 }
 
@@ -58397,6 +58577,11 @@ function commitmentAdminExportPendingOrders(params, token) {
   }
   if (rows.length > 50000) throw new Error('Pending-order export exceeds 50,000 lines. Select a division or narrower filter and retry.');
   const ppc = _commitmentLoadPendingPpcContext_(rows);
+  const exportLineIds=[...new Set(rows.map(function(row){return row.so_line_id;}).filter(Boolean))];
+  const deliveryControls=exportLineIds.length?_supabaseSelectByKeyInBatches_('ppc_job_control',
+    'so_line_id,include_in_delivery_plan,dispatch_plan_date,delivery_plan_sequence,delivery_plan_remarks',
+    'so_line_id',exportLineIds,null,30):[],deliveryControlByLine={};
+  deliveryControls.forEach(function(row){deliveryControlByLine[String(row.so_line_id)]=row;});
 
   function number(value) {
     const parsed = Number(value || 0);
@@ -58440,6 +58625,7 @@ function commitmentAdminExportPendingOrders(params, token) {
 
   const detailRows = rows.map(function(row){
     const info = ppc.identifiersByLine[String(row.so_line_id)] || {};
+    const deliveryControl=deliveryControlByLine[String(row.so_line_id)]||{};
     const readiness = [];
     if (!info.artworkNos) readiness.push('ARTWORK_NOT_LINKED');
     if (!Number(info.woCount || 0)) readiness.push('WO_NOT_CREATED');
@@ -58455,7 +58641,8 @@ function commitmentAdminExportPendingOrders(params, token) {
     row.order_uom || '',number(row.order_qty),number(info.packedQty),number(row.dispatched_qty),number(row.billed_qty),
     number(row.credited_rebill_qty),number(row.pending_qty),number(row.unbilled_dispatch_qty),number(row.rate),number(row.discount_pct),
     number(row.gst_pct),number(row.order_value),number(row.billed_value),number(row.pending_value),row.requested_delivery || '',
-    row.committed_delivery || '',row.projected_delivery || '',number(row.overdue_days),row.plan_status || '',row.material_status || '',
+    row.committed_delivery || '',deliveryControl.include_in_delivery_plan===true,deliveryControl.dispatch_plan_date||'',number(deliveryControl.delivery_plan_sequence),deliveryControl.delivery_plan_remarks||'',
+    row.projected_delivery || '',number(row.overdue_days),row.plan_status || '',row.material_status || '',
     row.capacity_status || '',row.execution_status || '',row.risk_severity || '',row.risk_code || '',row.linked_wo_number || '',
     row.current_operation || '',row.current_machine || '',row.next_control_action || '',row.advisor_top_action || '',
     row.mode_of_transport || '',row.transport_preference || '',row.transport_payment || '',row.advance_payment_required === true,row.advance_payment_received === true,
@@ -58513,7 +58700,8 @@ function commitmentAdminExportPendingOrders(params, token) {
           {label:'Billed Qty',type:'number'},{label:'Credit/Rebill Release Qty',type:'number'},{label:'Pending Qty',type:'number'},
           {label:'Dispatched Not Billed Qty',type:'number'},{label:'Rate',type:'money'},{label:'Discount %',type:'number'},{label:'GST %',type:'number'},
           {label:'Order Value (Incl Tax)',type:'money'},{label:'Billed Value (Incl Tax)',type:'money'},{label:'Pending Value (Incl Tax)',type:'money'},
-          {label:'Requested Delivery',type:'text'},{label:'Committed Delivery',type:'text'},{label:'Projected Delivery',type:'text'},
+          {label:'Requested Delivery',type:'text'},{label:'Committed Delivery',type:'text'},{label:'In Delivery Plan',type:'text'},
+          {label:'Dispatch Plan Date',type:'text'},{label:'Delivery Plan Sequence',type:'number'},{label:'Delivery Plan Remarks',type:'text'},{label:'Projected Delivery',type:'text'},
           {label:'Overdue Days',type:'number'},{label:'Plan Status',type:'text'},{label:'Material Status',type:'text'},
           {label:'Capacity Status',type:'text'},{label:'Execution Status',type:'text'},{label:'Risk Severity',type:'text'},
           {label:'Risk Code',type:'text'},{label:'Work Order',type:'text'},{label:'Current Operation',type:'text'},
@@ -58564,6 +58752,20 @@ function commitmentAdminExportPendingOrders(params, token) {
   });
 }
 
+function _commitmentHydrateCommercialPosition_(plan) {
+  const mapped=_commitmentMapPlanRow_(plan),lineId=plan&&plan.so_line_id;
+  if(!lineId)return mapped;
+  let billing={};
+  try{billing=(supabaseSelect_('v_billing_net_invoice_usage',{select:'so_line_id,net_posted_billed_qty,invoice_draft_qty',filters:{so_line_id:'eq.'+lineId},limit:1})||[])[0]||{};}
+  catch(err){if(!_supabaseRelationMissing_(err,'v_billing_net_invoice_usage'))throw err;}
+  const dispatchRows=supabaseSelect_('dispatch_records',{select:'dispatch_qty,status',filters:{so_line_id:'eq.'+lineId},limit:1000})||[];
+  const dispatched=dispatchRows.reduce(function(sum,row){return ['CANCELLED','CANCELED','VOID','DELETED'].indexOf(String(row.status||'DISPATCHED').toUpperCase())===-1?sum+Math.max(0,Number(row.dispatch_qty||0)):sum;},0);
+  const billed=Math.max(0,Number(billing.net_posted_billed_qty||0));
+  mapped.dispatchedQty=dispatched;mapped.billedQty=billed;mapped.pendingQty=Math.max(0,Number(mapped.orderQty||0)-billed);
+  mapped.unbilledDispatchQty=Math.max(0,dispatched-billed);mapped.draftBilledQty=Math.max(0,Number(billing.invoice_draft_qty||0));
+  return mapped;
+}
+
 function commitmentAdminGetPlan(planId, token) {
   _commitmentRequireAdmin_(token);
   const plan = _commitmentPlanById_(planId);
@@ -58589,7 +58791,7 @@ function commitmentAdminGetPlan(planId, token) {
     if (!_commitmentSchemaMissing_(err) && String(err && err.message || err).indexOf('corrugation_finite_runs') === -1) throw err;
   }
   return {
-    ok:true,plan:_commitmentMapPlanRow_(plan),
+    ok:true,plan:_commitmentHydrateCommercialPosition_(plan),
     demands:demands.map(function(row){
       return {
         id:row.id,lineNo:Number(row.line_no || 0),itemId:row.material_item_id || '',itemCode:row.material_item_code || '',
@@ -59858,6 +60060,25 @@ function commitmentAdminFinalize(payload, token) {
   return { ok:true,committedDelivery:committedDate,confidence:confidence };
 }
 
+function commitmentAdminReviseDeliveryDate(payload,token) {
+  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),p=payload||{},plan=_commitmentPlanById_(p.planId);
+  const date=_commitmentDateKey_(p.committedDelivery),reason=String(p.reason||'').trim();
+  if(!date)throw new Error('Revised committed delivery date is required.');
+  if(reason.length<3)throw new Error('Enter a meaningful reason for revising the committed delivery date.');
+  if(!plan.committed_delivery)throw new Error('Finalize the initial commitment before using date revision.');
+  if(_commitmentDateKey_(plan.committed_delivery)===date)throw new Error('The revised delivery date must be different from the current commitment.');
+  const result=supabaseRpc_('revise_order_commitment_delivery_date',{p_plan_id:plan.id,p_committed_delivery:date,p_reason:reason,p_actor:actor});
+  PropertiesService.getScriptProperties().setProperty('COMMITMENT_FINITE_DIRTY_AT',new Date().toISOString());
+  return result||{ok:true,planId:plan.id,committedDelivery:date};
+}
+
+function commitmentAdminShortCloseBilledLine(payload,token) {
+  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),p=payload||{},lineId=String(p.soLineId||'').trim(),reason=String(p.reason||'').trim();
+  if(!lineId)throw new Error('Sales Order line is required for short closing.');
+  if(reason.length<3)throw new Error('Enter a meaningful reason for short closing the billed order balance.');
+  return supabaseRpc_('short_close_billed_order_line_from_ppc',{p_so_line_id:lineId,p_reason:reason,p_actor:actor});
+}
+
 // ===== PRINTING FINITE PLANNING =====
 function _printingPlanningSchemaMissing_(err) {
   return _supabaseRelationMissing_(err, 'printing_plan_runs') ||
@@ -60440,6 +60661,53 @@ function printingAdminReleasePlan(payload,token) {
   return{ok:true,planId:plan.id};
 }
 
+function _printingReopenRpcMissing_(err) {
+  const message=String(err&&err.message||err||'').toLowerCase();
+  return message.indexOf('reopen_printing_plan_as_draft')!==-1&&(
+    message.indexOf('pgrst202')!==-1||message.indexOf('could not find')!==-1||
+    message.indexOf('does not exist')!==-1||message.indexOf('schema cache')!==-1
+  );
+}
+
+function _printingReopenPlanFallback_(plan,actor) {
+  const lines=supabaseSelect_('printing_plan_runs',{select:'*',filters:{plan_id:'eq.'+plan.id},limit:1000})||[];
+  const progressed=lines.filter(function(line){return ['IN_PROGRESS','COMPLETED','CARRIED_FORWARD'].indexOf(String(line.status||'').toUpperCase())!==-1;});
+  if(progressed.length)throw new Error('This plan has execution or carry-forward history and cannot be reopened. Create a new plan for the remaining work.');
+  const releasedLines=lines.filter(function(line){return String(line.status||'').toUpperCase()==='RELEASED';});
+  if(!releasedLines.length)throw new Error('This released plan has no editable released jobs.');
+  const releasedAt=plan.released_at||plan.updated_at;
+  if(!releasedAt)throw new Error('The release timestamp is missing, so execution safety cannot be verified.');
+  const routingIds=[...new Set(releasedLines.map(function(line){return line.routing_id;}).filter(Boolean))];
+  let productionAfterRelease=null;
+  _supabaseChunkValuesByFilterLength_(routingIds,1200,40).some(function(chunk){
+    const rows=supabaseSelect_('production_entries',{select:'id,routing_id,created_at,entry_datetime',filters:{routing_id:_supabaseInFilter_(chunk),created_at:'gt.'+releasedAt},limit:1})||[];
+    if(rows.length){productionAfterRelease=rows[0];return true;}return false;
+  });
+  if(productionAfterRelease)throw new Error('Production has already been entered after this plan was released. It cannot be reopened; create or carry forward a plan for the remaining work.');
+  const now=new Date().toISOString();
+  supabaseUpdateMinimal_('printing_plan_runs',{plan_id:'eq.'+plan.id,status:'eq.RELEASED'},{status:'DRAFT',updated_by:actor,updated_at:now});
+  supabaseUpdateMinimal_('printing_plans',{id:'eq.'+plan.id,status:'eq.RELEASED'},{status:'DRAFT',released_at:null,released_by:null,updated_by:actor,updated_at:now});
+  supabaseBulkInsert_('printing_plan_history',releasedLines.map(function(line){return{printing_run_id:line.id,wo_id:line.wo_id,action:'REOPEN_PRINT_PLAN_TO_DRAFT',before_json:{planStatus:'RELEASED',runStatus:line.status,releasedAt:releasedAt},after_json:{planStatus:'DRAFT',runStatus:'DRAFT',reopenedAt:now},changed_by:actor};}));
+  return{ok:true,planId:plan.id,status:'DRAFT',reopenedRuns:releasedLines.length};
+}
+
+function printingAdminReopenPlan(payload,token) {
+  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),planId=String(payload&&payload.planId||'').trim(),lock=LockService.getScriptLock();
+  if(!planId)throw new Error('Printing plan is required.');
+  lock.waitLock(30000);
+  try{
+    const plan=_printingPlanById_(planId);
+    if(String(plan.status||'').toUpperCase()!=='RELEASED')throw new Error('Only a released printing plan can be reopened as Draft.');
+    try{
+      const result=supabaseRpc_('reopen_printing_plan_as_draft',{p_plan_id:plan.id,p_actor:actor});
+      return Array.isArray(result)?(result[0]||{ok:true,planId:plan.id,status:'DRAFT'}):(result||{ok:true,planId:plan.id,status:'DRAFT'});
+    }catch(err){
+      if(!_printingReopenRpcMissing_(err))throw err;
+      return _printingReopenPlanFallback_(plan,actor);
+    }
+  }finally{lock.releaseLock();}
+}
+
 function _printingRescheduleMachineDay_(machine, planDate, actor) {
   if (!machine || !planDate) return;
   const rows = supabaseSelect_('printing_plan_runs', { select:'*', filters:{machine_name:'eq.'+machine,plan_date:'eq.'+planDate,status:'not.in.(CANCELLED,COMPLETED,CARRIED_FORWARD)'}, order:'sequence_no.asc,created_at.asc' }) || [];
@@ -60492,337 +60760,6 @@ function printingAdminSetMaterialSubstitute(payload, token) {
   });
 }
 
-// ===== DISPATCH PLANNING PHASE 1 =====
-// Planning is deliberately separate from dispatch_records. A released plan is
-// an operating instruction; only the existing Dispatch entry posts stock movement.
-function _dispatchPlanningSchemaMissing_(err) {
-  return _supabaseRelationMissing_(err,'dispatch_plans') ||
-    _supabaseRelationMissing_(err,'dispatch_plan_lines') ||
-    _supabaseRelationMissing_(err,'dispatch_plan_events') ||
-    _supabaseRelationMissing_(err,'v_dispatch_plan_open_jobs');
-}
-
-function _dispatchPlanNumber_() {
-  const stamp=Utilities.formatDate(new Date(),Session.getScriptTimeZone()||'Asia/Kolkata','yyyyMMdd-HHmmss');
-  return 'DSP-' + stamp + '-' + Utilities.getUuid().slice(0,4).toUpperCase();
-}
-
-function _dispatchPlanById_(planId) {
-  const id=String(planId||'').trim();
-  if(!id)throw new Error('Dispatch plan is required.');
-  const row=(supabaseSelect_('dispatch_plans',{select:'*',filters:{id:'eq.'+id},limit:1})||[])[0];
-  if(!row)throw new Error('Dispatch plan was not found.');
-  return row;
-}
-
-function _dispatchPlanSnapshot_(value) {
-  if(value&&typeof value==='object')return value;
-  try{return JSON.parse(String(value||'{}'));}catch(ignore){return {};}
-}
-
-function _dispatchPlanAddress_(row) {
-  return [row.destination_address,row.destination_city,row.destination_state,row.destination_pincode]
-    .map(function(value){return String(value||'').trim();}).filter(Boolean).join(', ');
-}
-
-function _dispatchPlanMapOpenRow_(row) {
-  const packed=Number(row.packed_qty||0),weight=Number(row.packed_weight_kg||0),available=Number(row.available_to_plan_qty||0);
-  return {
-    soId:row.so_id||'',soLineId:row.so_line_id||'',soNumber:row.so_number||'',soDate:row.so_date||'',lineNo:row.line_no||'',
-    clientCode:row.client_code||'',clientName:row.client_name||'',salesRep:row.sales_rep||'',poNumber:row.po_number||'',poDate:row.po_date||'',
-    productCode:row.product_code||'',productName:row.product_name||'',category:row.category||'',unit:row.unit||'',
-    orderQty:Number(row.order_qty||0),packedQty:packed,dispatchedQty:Number(row.dispatched_qty||0),orderBalanceQty:Number(row.order_balance_qty||0),
-    dispatchBalanceQty:Number(row.dispatch_balance_qty||0),readyDispatchQty:Number(row.ready_dispatch_qty||0),readinessStatus:row.readiness_status||'ENTRY_PENDING',
-    activePlannedQty:Number(row.active_planned_qty||0),availableToPlanQty:available,packedWeightKg:weight,boxCount:Number(row.box_count||0),packageSummary:row.package_summary||'',
-    estimatedAvailableWeightKg:packed>0?weight*available/packed:0,readyToDispatch:row.ready_to_dispatch===true||String(row.ready_to_dispatch).toLowerCase()==='true',
-    latestPackedAt:row.latest_packed_at||'',latestDispatchDate:row.latest_dispatch_date||'',priority:row.job_priority||'',jobReference:row.job_reference||'',
-    division:row.division||'',quoteNo:row.quote_no||'',pmCode:row.pm_code||'',expectedDelivery:row.expected_delivery||'',finalDelivery:row.final_delivery||'',
-    productRemarks:row.product_remarks||'',prepressRemarks:row.prepress_remarks||'',soRemarks:row.so_remarks||'',billingRemarks:row.billing_remarks||'',
-    transportMode:row.mode_of_transport||'',transportPreference:row.transport_preference||'',transportPayment:row.transport_payment||'',
-    woNumbers:row.wo_numbers||'',artworkNos:row.artwork_nos||'',destinationPartyId:row.destination_party_id||'',destinationLabel:row.destination_label||'',
-    destinationName:row.destination_name||row.client_name||'',destinationAddress:row.destination_address||'',destinationCity:row.destination_city||'',
-    destinationState:row.destination_state||'',destinationPincode:row.destination_pincode||'',destinationContact:row.destination_contact||'',destinationPhone:row.destination_phone||'',
-    destinationFullAddress:_dispatchPlanAddress_(row),activePlanLineId:row.active_plan_line_id||'',activePlanId:row.active_plan_id||'',
-    activePlanNo:row.active_plan_no||'',activePlanDate:row.active_plan_date||'',activePlanLineStatus:row.active_plan_line_status||''
-  };
-}
-
-function _dispatchPlanMapPlan_(row) {
-  return {id:row.id,revision:row.updated_at||'',planNo:row.plan_no||'',planDate:row.plan_date||'',sourceLocation:row.source_location||'',
-    routeTrip:row.route_trip||'',transporter:row.transporter||'',vehicleType:row.vehicle_type||'',vehicleNo:row.vehicle_no||'',
-    loadingStart:row.loading_start_time||'',loadingEnd:row.loading_end_time||'',status:row.status||'',remarks:row.remarks||'',
-    releasedAt:row.released_at||'',releasedBy:row.released_by||'',startedAt:row.started_at||'',startedBy:row.started_by||'',
-    completedAt:row.completed_at||'',completedBy:row.completed_by||''};
-}
-
-function _dispatchPlanOpenRows_() {
-  const rows=[],pageSize=1000,maxRows=5000,order='final_delivery.asc.nullslast,expected_delivery.asc.nullslast,so_date.asc,so_number.asc,line_no.asc';
-  for(let offset=0;offset<maxRows;offset+=pageSize){
-    const page=supabaseSelect_('v_dispatch_plan_open_jobs',{select:'*',order:order,limit:pageSize,offset:offset})||[];
-    if(!page.length)break;rows.push.apply(rows,page);if(page.length<pageSize)break;
-  }
-  return rows;
-}
-
-function dispatchPlanningAdminGetBoard(params,token) {
-  _commitmentRequireAdmin_(token);const p=params||{};
-  try{
-    const raw=_dispatchPlanOpenRows_();
-    const openRows=raw.map(_dispatchPlanMapOpenRow_);
-    const plans=supabaseSelect_('dispatch_plans',{select:'*',filters:{status:'not.in.(CANCELLED)'},order:'plan_date.desc,created_at.desc',limit:250})||[];
-    const planId=String(p.planId||'').trim(),plan=planId?(plans.find(function(row){return row.id===planId;})||null):null;
-    const sourceByLine={};openRows.forEach(function(row){sourceByLine[row.soLineId]=row;});
-    const planRows=planId?(supabaseSelect_('dispatch_plan_lines',{select:'*',filters:{plan_id:'eq.'+planId,status:'not.in.(CANCELLED)'},order:'sequence_no.asc,created_at.asc',limit:1000})||[]):[];
-    const selected=planRows.map(function(line){
-      const source=sourceByLine[line.so_line_id]||{},snapshot=_dispatchPlanSnapshot_(line.source_snapshot),live=Object.assign({},snapshot,source);
-      const planned=Number(line.planned_dispatch_qty||0);
-      const packed=Number(live.packedQty||0),plannedWeight=line.planned_weight_kg==null?(packed>0?Number(live.packedWeightKg||0)*planned/packed:0):Number(line.planned_weight_kg||0);
-      const dispatchedAtSelection=Number(snapshot.dispatchedQty||0),executedQty=Math.min(planned,Math.max(0,Number(live.dispatchedQty||0)-dispatchedAtSelection));
-      const remainingPlanQty=Math.max(0,planned-executedQty),storedStatus=String(line.status||''),effectiveStatus=remainingPlanQty<=0&&planned>0?'DISPATCHED':(executedQty>0?'PARTIALLY_DISPATCHED':storedStatus);
-      const availableNow=Math.max(0,Number(live.dispatchBalanceQty||0)-Math.max(0,Number(live.activePlannedQty||0)-remainingPlanQty));
-      return Object.assign({},live,{
-        planLineId:line.id,planId:line.plan_id,soId:line.so_id,soLineId:line.so_line_id,sequenceNo:Number(line.sequence_no||0),
-        availableAtSelection:Number(line.available_qty_at_selection||0),plannedDispatchQty:planned,availableIncludingThisPlanQty:availableNow,
-        plannedBoxCount:Number(line.planned_box_count||0),plannedWeightKg:plannedWeight,estimatedPlannedWeightKg:plannedWeight,
-        loadedQty:Number(line.loaded_qty||0),loadedBoxCount:Number(line.loaded_box_count||0),loadedWeightKg:Number(line.loaded_weight_kg||0),
-        loadedAt:line.loaded_at||'',loadedBy:line.loaded_by||'',executedDispatchQty:Math.max(executedQty,Number(line.actual_dispatch_qty||0)),
-        remainingPlanQty:Math.min(remainingPlanQty,Number(line.remaining_plan_qty==null?remainingPlanQty:line.remaining_plan_qty)),reconciledAt:line.reconciled_at||'',
-        lineStatus:effectiveStatus,storedLineStatus:storedStatus,remarks:line.remarks||'',
-        destinationPartyId:line.destination_party_id||live.destinationPartyId||'',destinationLabel:line.destination_label||live.destinationLabel||'',
-        destinationName:line.destination_name||live.destinationName||'',destinationAddress:line.destination_address||live.destinationAddress||'',
-        destinationCity:line.destination_city||live.destinationCity||'',destinationState:line.destination_state||live.destinationState||'',
-        destinationPincode:line.destination_pincode||live.destinationPincode||'',destinationContact:line.destination_contact||live.destinationContact||'',
-        destinationPhone:line.destination_phone||live.destinationPhone||''
-      });
-    });
-    const planEvents=planId?(supabaseSelect_('dispatch_plan_events',{select:'*',filters:{plan_id:'eq.'+planId,status:'in.(OPEN,ACKNOWLEDGED)'},order:'severity.desc,occurred_at.desc',limit:500})||[]):[];
-    const globalEvents=supabaseSelect_('dispatch_plan_events',{select:'*',filters:{plan_id:'is.null',status:'in.(OPEN,ACKNOWLEDGED)'},order:'severity.desc,occurred_at.desc',limit:100})||[];
-    const events=planEvents.concat(globalEvents);
-    const mappedEvents=events.map(function(row){return{id:row.id,eventKey:row.event_key||'',planId:row.plan_id||'',planLineId:row.dispatch_plan_line_id||'',soLineId:row.so_line_id||'',
-      code:row.event_code||'',severity:row.severity||'WARNING',message:row.message||'',status:row.status||'OPEN',context:row.context_json||{},occurredAt:row.occurred_at||'',
-      acknowledgedAt:row.acknowledged_at||'',acknowledgedBy:row.acknowledged_by||'',acknowledgementNote:row.acknowledgement_note||''};}).sort(function(a,b){
-        const rank={CRITICAL:3,WARNING:2,INFO:1},severity=(rank[b.severity]||0)-(rank[a.severity]||0);
-        return severity||String(b.occurredAt||'').localeCompare(String(a.occurredAt||''));
-      });
-    return {ok:true,rows:openRows,candidates:openRows,selected:selected,plans:plans.map(_dispatchPlanMapPlan_),plan:plan?_dispatchPlanMapPlan_(plan):null,events:mappedEvents,
-      metrics:{open:openRows.length,readyQty:openRows.reduce(function(sum,row){return sum+Number(row.dispatchBalanceQty||0);},0),
-        availableQty:openRows.reduce(function(sum,row){return sum+Number(row.availableToPlanQty||0);},0),selected:selected.length,
-        selectedQty:selected.reduce(function(sum,row){return sum+Number(row.plannedDispatchQty||0);},0),loadedQty:selected.reduce(function(sum,row){return sum+Number(row.loadedQty||0);},0),
-        dispatchedQty:selected.reduce(function(sum,row){return sum+Number(row.executedDispatchQty||0);},0),openEvents:mappedEvents.filter(function(row){return row.status==='OPEN';}).length}};
-  }catch(err){if(_dispatchPlanningSchemaMissing_(err))throw new Error('Dispatch planning schema is incomplete. Apply Phase 1 and supabase/dispatch_planning_phase2_execution_20260914.sql.');throw err;}
-}
-
-function _dispatchPlanHeaderPayload_(payload) {
-  const p=payload||{},planDate=_commitmentDateKey_(p.planDate),sourceLocation=String(p.sourceLocation||'').trim();
-  if(!planDate)throw new Error('Plan date is required.');
-  if(!sourceLocation)throw new Error('Source plant / warehouse is required.');
-  let loadingStart='',loadingEnd='';
-  if(String(p.loadingStart||'').trim())loadingStart=_printingClockText_(p.loadingStart,'',true);
-  if(String(p.loadingEnd||'').trim())loadingEnd=_printingClockText_(p.loadingEnd,'',true);
-  return {plan_date:planDate,source_location:sourceLocation,route_trip:String(p.routeTrip||'').trim(),transporter:String(p.transporter||'').trim(),
-    vehicle_type:String(p.vehicleType||'').trim(),vehicle_no:String(p.vehicleNo||'').trim(),loading_start_time:loadingStart||null,
-    loading_end_time:loadingEnd||null,remarks:String(p.remarks||'').trim()};
-}
-
-function _dispatchPlanSaveHeader_(payload,actor) {
-  const p=payload||{},values=_dispatchPlanHeaderPayload_(p),planId=String(p.planId||'').trim();let plan;
-  if(planId){
-    plan=_dispatchPlanById_(planId);if(String(plan.status||'').toUpperCase()!=='DRAFT')throw new Error('Only a draft dispatch plan can be changed.');
-    values.updated_by=actor;values.updated_at=new Date().toISOString();supabaseUpdateMinimal_('dispatch_plans',{id:'eq.'+planId},values);
-    plan=Object.assign({},plan,values);
-  }else{
-    values.plan_no=_dispatchPlanNumber_();values.status='DRAFT';values.created_by=actor;values.updated_by=actor;
-    plan=(supabaseInsert_('dispatch_plans',values)||[])[0];if(!plan)throw new Error('Dispatch plan could not be created.');
-  }
-  if(planId){
-    const affected=supabaseSelect_('dispatch_plan_lines',{select:'so_line_id',filters:{plan_id:'eq.'+planId,status:'not.in.(CANCELLED,CARRIED_FORWARD)'},limit:1000})||[];
-    const affectedIds=[...new Set(affected.map(function(row){return row.so_line_id;}).filter(Boolean))];
-    if(affectedIds.length)supabaseRpc_('reconcile_dispatch_plan_lines',{p_so_line_ids:affectedIds,p_actor:actor});
-  }
-  return {ok:true,planId:plan.id,plan:_dispatchPlanMapPlan_(plan)};
-}
-
-function dispatchPlanningAdminSaveHeader(payload,token) {
-  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin);
-  return _dispatchPlanSaveHeader_(payload,actor);
-}
-
-function dispatchPlanningAdminAddSelected(payload,token) {
-  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),lock=LockService.getScriptLock();
-  lock.waitLock(30000);
-  try{return _dispatchPlanningAdminAddSelectedLocked_(payload,actor);}finally{lock.releaseLock();}
-}
-
-function _dispatchPlanningAdminAddSelectedLocked_(payload,actor) {
-  const p=payload||{};
-  const lineIds=[...new Set((p.soLineIds||[]).map(function(id){return String(id||'').trim();}).filter(Boolean))];
-  if(!lineIds.length)throw new Error('Select at least one open dispatch job.');
-  const saved=_dispatchPlanSaveHeader_(p,actor),plan=_dispatchPlanById_(saved.planId);
-  const existing=_supabaseSelectByKeyInBatches_('dispatch_plan_lines','*','so_line_id',lineIds,'created_at.asc',40)||[];
-  const planMap={};(supabaseSelect_('dispatch_plans',{select:'id,plan_no,plan_date,status',filters:{status:'in.(DRAFT,RELEASED,IN_PROGRESS)'},limit:1000})||[]).forEach(function(row){planMap[row.id]=row;});
-  const preRaw=_supabaseSelectByKeyInBatches_('v_dispatch_plan_open_jobs','*','so_line_id',lineIds,null,40)||[],preById={};preRaw.forEach(function(row){preById[row.so_line_id]=_dispatchPlanMapOpenRow_(row);});
-  const carryCandidates=[],carried=[];
-  existing.forEach(function(line){
-    if(line.plan_id===plan.id||['CANCELLED','DISPATCHED','CARRIED_FORWARD'].indexOf(String(line.status||'').toUpperCase())!==-1)return;
-    const live=preById[line.so_line_id],snapshot=_dispatchPlanSnapshot_(line.source_snapshot),planned=Number(line.planned_dispatch_qty||0);
-    const executed=Math.min(planned,Math.max(0,Number(live&&live.dispatchedQty||0)-Number(snapshot.dispatchedQty||0)));
-    if(planned>0&&executed>=planned)return;
-    const oldPlan=planMap[line.plan_id];
-    if(!oldPlan)return;
-    if(String(oldPlan.plan_date||'').slice(0,10)>String(plan.plan_date||'').slice(0,10))throw new Error('SO '+(_dispatchPlanSnapshot_(line.source_snapshot).soNumber||'line')+' is already reserved in '+oldPlan.plan_no+'. Select the same or a later plan date to move its remaining quantity.');
-    if(Number(line.loaded_qty||0)>executed+0.0001)throw new Error('SO '+(_dispatchPlanSnapshot_(line.source_snapshot).soNumber||'line')+' has quantity loaded in '+oldPlan.plan_no+'. Correct or complete that loading before moving the job.');
-    carryCandidates.push({line:line,oldPlan:oldPlan});
-  });
-  let inserts=[];
-  try{
-    carryCandidates.forEach(function(item){
-      supabaseUpdateMinimal_('dispatch_plan_lines',{id:'eq.'+item.line.id},{status:'CARRIED_FORWARD',updated_by:actor,updated_at:new Date().toISOString()});
-      carried.push(item);
-    });
-    const raw=_supabaseSelectByKeyInBatches_('v_dispatch_plan_open_jobs','*','so_line_id',lineIds,'final_delivery.asc.nullslast,so_number.asc,line_no.asc',40)||[];
-    const byId={};raw.forEach(function(row){byId[row.so_line_id]=row;});
-    const already={};existing.filter(function(row){return row.plan_id===plan.id&&String(row.status||'').toUpperCase()!=='CANCELLED';}).forEach(function(row){already[row.so_line_id]=true;});
-    const missing=lineIds.filter(function(id){return !byId[id]&&!already[id];});
-    if(missing.length)throw new Error('Some selected job-card lines are no longer open or have no order balance. Refresh and select again.');
-    let sequence=(supabaseSelect_('dispatch_plan_lines',{select:'sequence_no',filters:{plan_id:'eq.'+plan.id,status:'not.in.(CANCELLED,CARRIED_FORWARD)'},order:'sequence_no.desc',limit:1})||[]).reduce(function(max,row){return Math.max(max,Number(row.sequence_no||0));},0);
-    lineIds.forEach(function(id){if(already[id])return;const rawRow=byId[id],source=rawRow&&_dispatchPlanMapOpenRow_(rawRow),available=source&&Number(source.availableToPlanQty||0);
-      if(!source||!(available>0))throw new Error('SO '+(source&&source.soNumber||'line')+' has no unreserved open quantity available for advance dispatch planning.');sequence++;
-      inserts.push({plan_id:plan.id,so_id:source.soId,so_line_id:source.soLineId,sequence_no:sequence,available_qty_at_selection:available,
-      planned_dispatch_qty:available,remaining_plan_qty:available,planned_box_count:source.packedQty>0?Math.ceil(Number(source.boxCount||0)*available/Number(source.packedQty)):0,
-      planned_weight_kg:source.packedQty>0?Number(source.packedWeightKg||0)*available/Number(source.packedQty):0,
-      destination_party_id:source.destinationPartyId||null,destination_label:source.destinationLabel||'',
-        destination_name:source.destinationName||source.clientName||'',destination_address:source.destinationAddress||'',destination_city:source.destinationCity||'',
-        destination_state:source.destinationState||'',destination_pincode:source.destinationPincode||'',destination_contact:source.destinationContact||'',
-        destination_phone:source.destinationPhone||'',status:'DRAFT',remarks:'',source_snapshot:source,selected_at:new Date().toISOString(),created_by:actor,updated_by:actor});
-    });
-    if(inserts.length)supabaseBulkInsert_('dispatch_plan_lines',inserts);
-    if(inserts.length)supabaseRpc_('reconcile_dispatch_plan_lines',{p_so_line_ids:inserts.map(function(row){return row.so_line_id;}),p_actor:actor});
-  }catch(err){
-    carried.slice().reverse().forEach(function(item){try{supabaseUpdateMinimal_('dispatch_plan_lines',{id:'eq.'+item.line.id},{status:item.line.status,updated_by:actor,updated_at:new Date().toISOString()});}catch(ignore){}});
-    throw err;
-  }
-  carried.forEach(function(item){supabaseInsertMinimal_('dispatch_plan_history',{plan_id:item.line.plan_id,dispatch_plan_line_id:item.line.id,so_line_id:item.line.so_line_id,
-    action:'CARRY_FORWARD_TO_NEXT_PLAN',before_json:{status:item.line.status,planNo:item.oldPlan.plan_no,planDate:item.oldPlan.plan_date},
-    after_json:{status:'CARRIED_FORWARD',planNo:plan.plan_no,planDate:plan.plan_date},changed_by:actor});});
-  return {ok:true,planId:plan.id,addedCount:inserts.length,carriedForwardCount:carried.length};
-}
-
-function dispatchPlanningAdminSaveLine(payload,token) {
-  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),p=payload||{},id=String(p.planLineId||'').trim();
-  const line=(supabaseSelect_('dispatch_plan_lines',{select:'*',filters:{id:'eq.'+id},limit:1})||[])[0];if(!line)throw new Error('Dispatch-plan line was not found.');
-  if(String(line.status||'').toUpperCase()==='CARRIED_FORWARD')throw new Error('A carried-forward line is retained as read-only history.');
-  const plan=_dispatchPlanById_(line.plan_id);if(String(plan.status||'').toUpperCase()!=='DRAFT')throw new Error('Only a draft dispatch plan can be changed.');
-  const liveRaw=(supabaseSelect_('v_dispatch_plan_open_jobs',{select:'*',filters:{so_line_id:'eq.'+line.so_line_id},limit:1})||[])[0];
-  if(!liveRaw)throw new Error('This job-card line is no longer open or has no order balance. Refresh the plan.');
-  const live=_dispatchPlanMapOpenRow_(liveRaw),currentPlanned=Number(line.planned_dispatch_qty||0),baseline=Number(_dispatchPlanSnapshot_(line.source_snapshot).dispatchedQty||0);
-  const executed=Math.min(currentPlanned,Math.max(0,Number(live.dispatchedQty||0)-baseline)),currentRemaining=Math.max(0,currentPlanned-executed);
-  const maxQty=executed+Math.max(0,Number(live.orderBalanceQty||0)-Math.max(0,Number(live.activePlannedQty||0)-currentRemaining));
-  const qty=p.plannedDispatchQty==null?Number(line.planned_dispatch_qty||0):Number(p.plannedDispatchQty||0);
-  if(!(qty>0))throw new Error('Planned dispatch quantity must be greater than zero.');
-  if(qty+0.0001<executed)throw new Error('Planned quantity cannot be lower than the quantity already dispatched against this plan.');
-  if(qty>maxQty+0.0001)throw new Error('Planned quantity exceeds the current unreserved open order balance of '+maxQty+'.');
-  const qtyChanged=p.plannedDispatchQty!=null&&Number(line.planned_dispatch_qty||0)!==qty,packedQty=Number(live.packedQty||0);
-  const defaultBoxes=packedQty>0?Math.ceil(Number(live.boxCount||0)*qty/packedQty):0,defaultWeight=packedQty>0?Number(live.packedWeightKg||0)*qty/packedQty:0;
-  const plannedBoxes=p.plannedBoxCount==null?(qtyChanged?defaultBoxes:Number(line.planned_box_count||0)):Math.max(0,Math.round(Number(p.plannedBoxCount||0)));
-  const plannedWeight=p.plannedWeightKg==null?(qtyChanged?defaultWeight:Number(line.planned_weight_kg||0)):Math.max(0,Number(p.plannedWeightKg||0));
-  const update={planned_dispatch_qty:qty,planned_box_count:plannedBoxes,planned_weight_kg:plannedWeight,remarks:String(p.remarks==null?line.remarks||'':p.remarks).trim(),
-    destination_label:String(p.destinationLabel==null?line.destination_label||'':p.destinationLabel).trim(),destination_name:String(p.destinationName==null?line.destination_name||'':p.destinationName).trim(),
-    destination_address:String(p.destinationAddress==null?line.destination_address||'':p.destinationAddress).trim(),destination_city:String(p.destinationCity==null?line.destination_city||'':p.destinationCity).trim(),
-    destination_state:String(p.destinationState==null?line.destination_state||'':p.destinationState).trim(),destination_pincode:String(p.destinationPincode==null?line.destination_pincode||'':p.destinationPincode).trim(),
-    destination_contact:String(p.destinationContact==null?line.destination_contact||'':p.destinationContact).trim(),destination_phone:String(p.destinationPhone==null?line.destination_phone||'':p.destinationPhone).trim(),
-    updated_by:actor,updated_at:new Date().toISOString()};
-  supabaseUpdateMinimal_('dispatch_plan_lines',{id:'eq.'+id},update);
-  supabaseInsertMinimal_('dispatch_plan_history',{plan_id:plan.id,dispatch_plan_line_id:line.id,so_line_id:line.so_line_id,action:'PLAN_LINE_UPDATE',before_json:line,after_json:Object.assign({},line,update),changed_by:actor});
-  supabaseRpc_('reconcile_dispatch_plan_line',{p_so_line_id:line.so_line_id,p_actor:actor});
-  return {ok:true};
-}
-
-function dispatchPlanningAdminMoveLine(payload,token) {
-  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),p=payload||{},plan=_dispatchPlanById_(p.planId);
-  if(String(plan.status||'').toUpperCase()!=='DRAFT')throw new Error('Only a draft dispatch plan can be resequenced.');
-  const ids=[...new Set((p.orderedLineIds||[]).map(function(id){return String(id||'').trim();}).filter(Boolean))];
-  const current=supabaseSelect_('dispatch_plan_lines',{select:'id',filters:{plan_id:'eq.'+plan.id,status:'not.in.(CANCELLED,CARRIED_FORWARD)'},limit:1000})||[];
-  const valid={};current.forEach(function(row){valid[row.id]=true;});
-  if(ids.length!==current.length||ids.some(function(id){return !valid[id];}))throw new Error('The plan changed while resequencing. Refresh and try again.');
-  ids.forEach(function(id,index){supabaseUpdateMinimal_('dispatch_plan_lines',{id:'eq.'+id},{sequence_no:index+1,updated_by:actor,updated_at:new Date().toISOString()});});
-  supabaseUpdateMinimal_('dispatch_plans',{id:'eq.'+plan.id},{updated_by:actor,updated_at:new Date().toISOString()});
-  return {ok:true};
-}
-
-function dispatchPlanningAdminRemoveLine(payload,token) {
-  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),id=String(payload&&payload.planLineId||'').trim();
-  const line=(supabaseSelect_('dispatch_plan_lines',{select:'*',filters:{id:'eq.'+id},limit:1})||[])[0];if(!line)throw new Error('Dispatch-plan line was not found.');
-  const plan=_dispatchPlanById_(line.plan_id);if(String(plan.status||'').toUpperCase()!=='DRAFT')throw new Error('Only a draft dispatch plan can be changed.');
-  supabaseInsertMinimal_('dispatch_plan_history',{plan_id:plan.id,dispatch_plan_line_id:line.id,so_line_id:line.so_line_id,action:'REMOVE_FROM_DISPATCH_PLAN',before_json:line,after_json:{planId:plan.id},changed_by:actor});
-  supabaseDeleteMinimal_('dispatch_plan_lines',{id:'eq.'+line.id});return {ok:true};
-}
-
-function dispatchPlanningAdminReleasePlan(payload,token) {
-  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),lock=LockService.getScriptLock();
-  lock.waitLock(30000);
-  try{return _dispatchPlanningAdminReleasePlanLocked_(payload,actor);}finally{lock.releaseLock();}
-}
-
-function _dispatchPlanningAdminReleasePlanLocked_(payload,actor) {
-  const plan=_dispatchPlanById_(payload&&payload.planId);
-  if(String(plan.status||'').toUpperCase()!=='DRAFT')throw new Error('Only a draft dispatch plan can be released.');
-  const lines=supabaseSelect_('dispatch_plan_lines',{select:'*',filters:{plan_id:'eq.'+plan.id,status:'not.in.(CANCELLED,CARRIED_FORWARD)'},order:'sequence_no.asc',limit:1000})||[];
-  if(!lines.length)throw new Error('Add at least one dispatch job before releasing the plan.');
-  const raw=_supabaseSelectByKeyInBatches_('v_dispatch_plan_open_jobs','so_line_id,dispatched_qty,order_balance_qty,active_planned_qty','so_line_id',lines.map(function(line){return line.so_line_id;}),null,40)||[],byId={};raw.forEach(function(row){byId[row.so_line_id]=row;});
-  lines.forEach(function(line){if(!byId[line.so_line_id])throw new Error('A selected job-card line is no longer open or has no order balance. Refresh the plan.');const source=byId[line.so_line_id],planned=Number(line.planned_dispatch_qty||0),baseline=Number(_dispatchPlanSnapshot_(line.source_snapshot).dispatchedQty||0),executed=Math.min(planned,Math.max(0,Number(source.dispatched_qty||0)-baseline)),remaining=Math.max(0,planned-executed),available=executed+Math.max(0,Number(source.order_balance_qty||0)-Math.max(0,Number(source.active_planned_qty||0)-remaining));
-    if(!(Number(line.planned_dispatch_qty||0)>0)||Number(line.planned_dispatch_qty||0)>available+0.0001)throw new Error('A selected line is no longer fully available. Refresh the plan and correct its quantity.');});
-  const now=new Date().toISOString();supabaseUpdateMinimal_('dispatch_plan_lines',{plan_id:'eq.'+plan.id,status:'not.in.(CANCELLED,CARRIED_FORWARD)'},{status:'RELEASED',updated_by:actor,updated_at:now});
-  supabaseUpdateMinimal_('dispatch_plans',{id:'eq.'+plan.id},{status:'RELEASED',released_at:now,released_by:actor,updated_by:actor,updated_at:now});
-  supabaseInsertMinimal_('dispatch_plan_history',{plan_id:plan.id,dispatch_plan_line_id:null,so_line_id:null,action:'RELEASE_DISPATCH_PLAN',before_json:plan,after_json:{status:'RELEASED',releasedAt:now},changed_by:actor});
-  supabaseRpc_('reconcile_dispatch_plan_lines',{p_so_line_ids:lines.map(function(line){return line.so_line_id;}),p_actor:actor});
-  return {ok:true,planId:plan.id};
-}
-
-function dispatchPlanningAdminStartLoading(payload,token) {
-  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),planId=String(payload&&payload.planId||'').trim();
-  if(!planId)throw new Error('Dispatch plan is required.');
-  return supabaseRpc_('dispatch_plan_start_loading',{p_plan_id:planId,p_actor:actor});
-}
-
-function dispatchPlanningAdminSaveLoading(payload,token) {
-  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),p=payload||{},lineId=String(p.planLineId||'').trim();
-  if(!lineId)throw new Error('Dispatch-plan line is required.');
-  return supabaseRpc_('dispatch_plan_save_loading',{p_plan_line_id:lineId,p_loaded_qty:Math.max(0,Number(p.loadedQty||0)),
-    p_loaded_box_count:Math.max(0,Math.round(Number(p.loadedBoxCount||0))),p_loaded_weight_kg:Math.max(0,Number(p.loadedWeightKg||0)),p_actor:actor});
-}
-
-function dispatchPlanningAdminAcknowledgeEvent(payload,token) {
-  const admin=_commitmentRequireAdmin_(token),actor=_commitmentActor_(admin),p=payload||{},eventId=String(p.eventId||'').trim(),note=String(p.note||'').trim();
-  if(!eventId)throw new Error('Dispatch-plan event is required.');
-  if(note.length<3)throw new Error('Enter a meaningful acknowledgement note.');
-  const event=(supabaseSelect_('dispatch_plan_events',{select:'*',filters:{id:'eq.'+eventId},limit:1})||[])[0];
-  if(!event)throw new Error('Dispatch-plan event was not found.');
-  if(String(event.status||'').toUpperCase()==='RESOLVED')return {ok:true,status:'RESOLVED'};
-  const now=new Date().toISOString();
-  supabaseUpdateMinimal_('dispatch_plan_events',{id:'eq.'+event.id},{status:'ACKNOWLEDGED',acknowledged_at:now,acknowledged_by:actor,acknowledgement_note:note});
-  supabaseInsertMinimal_('dispatch_plan_history',{plan_id:event.plan_id||null,dispatch_plan_line_id:event.dispatch_plan_line_id||null,so_line_id:event.so_line_id||null,
-    action:'ACKNOWLEDGE_EXECUTION_EVENT',before_json:event,after_json:{status:'ACKNOWLEDGED',note:note,acknowledgedAt:now},changed_by:actor});
-  return {ok:true,status:'ACKNOWLEDGED'};
-}
-
-function dispatchPlanningAdminExportPlan(payload,token) {
-  _commitmentRequireAdmin_(token);const plan=_dispatchPlanById_(payload&&payload.planId),board=dispatchPlanningAdminGetBoard({planId:plan.id},token),rows=board.selected||[];
-  const columns=[
-    ['Seq','number'],['SO No.','text'],['SO Date','date'],['Line','number'],['Client','text'],['Job / Product','text'],['Salesperson','text'],['PO No.','text'],['PO Date','date'],
-    ['Artwork','text'],['Work Order','text'],['Division','text'],['UOM','text'],['Order Qty','number'],['Packed Qty','number'],['Dispatched Qty','number'],
-    ['Order Balance','number'],['Ready Now','number'],['Readiness','text'],['Planned Qty','number'],['Planned Boxes','number'],['Package Details','text'],['Planned Weight Kg','number'],
-    ['Loaded Qty','number'],['Loaded Boxes','number'],['Loaded Weight Kg','number'],['Actual Against Plan','number'],['Remaining Plan Qty','number'],['Execution Status','text'],['Open Alerts','number'],['Destination','text'],
-    ['Destination Address','text'],['Contact','text'],['Committed Delivery','date'],['Priority','text'],['Transport Mode','text'],['Transport Preference','text'],['Transport Payment','text'],['Remarks','text']
-  ].map(function(col){return {label:col[0],type:col[1]};});
-  const data=rows.map(function(row){return [row.sequenceNo,row.soNumber,row.soDate,row.lineNo,row.clientName,row.productName,row.salesRep,row.poNumber,row.poDate,row.artworkNos,row.woNumbers,row.division,row.unit,
-    row.orderQty,row.packedQty,row.dispatchedQty,row.orderBalanceQty,row.readyDispatchQty,row.readinessStatus,row.plannedDispatchQty,row.plannedBoxCount,row.packageSummary,row.plannedWeightKg,
-    row.loadedQty,row.loadedBoxCount,row.loadedWeightKg,row.executedDispatchQty,row.remainingPlanQty,row.lineStatus,(board.events||[]).filter(function(event){return event.planLineId===row.planLineId&&event.status==='OPEN';}).length,
-    row.destinationName,[row.destinationAddress,row.destinationCity,row.destinationState,row.destinationPincode].filter(Boolean).join(', '),[row.destinationContact,row.destinationPhone].filter(Boolean).join(' / '),
-    row.finalDelivery||row.expectedDelivery,row.priority,row.transportMode,row.transportPreference,row.transportPayment,row.remarks];});
-  return _reportsExportWorkbookXlsx_({fileName:'Dispatch-Plan-'+plan.plan_no+'-'+plan.plan_date+'.xlsx',sheets:[{name:'Dispatch Plan',title:'Dispatch Plan '+plan.plan_no,
-    subtitle:'Plan date: '+plan.plan_date+' | Source: '+plan.source_location+' | Route/Trip: '+(plan.route_trip||'-')+' | Vehicle: '+(plan.vehicle_no||'-'),columns:columns,rows:data}]});
-}
-
 this.commitmentAdminSyncOpenOrders = commitmentAdminSyncOpenOrders;
 this.commitmentAdminGetDashboard = commitmentAdminGetDashboard;
 this.commitmentAdminExportPendingOrders = commitmentAdminExportPendingOrders;
@@ -60852,6 +60789,8 @@ this.commitmentAdminGetPlanningAdvisor = commitmentAdminGetPlanningAdvisor;
 this.commitmentAdminDecideAdvisorRecommendation = commitmentAdminDecideAdvisorRecommendation;
 this.commitmentAdminApplyAdvisorRecommendation = commitmentAdminApplyAdvisorRecommendation;
 this.commitmentAdminFinalize = commitmentAdminFinalize;
+this.commitmentAdminReviseDeliveryDate = commitmentAdminReviseDeliveryDate;
+this.commitmentAdminShortCloseBilledLine = commitmentAdminShortCloseBilledLine;
 this.printingAdminGetBoard = printingAdminGetBoard;
 this.printingAdminGetSubstitutes = printingAdminGetSubstitutes;
 this.printingAdminSavePlanHeader = printingAdminSavePlanHeader;
@@ -60861,19 +60800,9 @@ this.printingAdminMovePlanLine = printingAdminMovePlanLine;
 this.printingAdminRemovePlanLine = printingAdminRemovePlanLine;
 this.printingAdminShortCloseJob = printingAdminShortCloseJob;
 this.printingAdminReleasePlan = printingAdminReleasePlan;
+this.printingAdminReopenPlan = printingAdminReopenPlan;
 this.printingAdminSavePlanRow = printingAdminSavePlanRow;
 this.printingAdminSetMaterialSubstitute = printingAdminSetMaterialSubstitute;
-this.dispatchPlanningAdminGetBoard = dispatchPlanningAdminGetBoard;
-this.dispatchPlanningAdminSaveHeader = dispatchPlanningAdminSaveHeader;
-this.dispatchPlanningAdminAddSelected = dispatchPlanningAdminAddSelected;
-this.dispatchPlanningAdminSaveLine = dispatchPlanningAdminSaveLine;
-this.dispatchPlanningAdminMoveLine = dispatchPlanningAdminMoveLine;
-this.dispatchPlanningAdminRemoveLine = dispatchPlanningAdminRemoveLine;
-this.dispatchPlanningAdminReleasePlan = dispatchPlanningAdminReleasePlan;
-this.dispatchPlanningAdminStartLoading = dispatchPlanningAdminStartLoading;
-this.dispatchPlanningAdminSaveLoading = dispatchPlanningAdminSaveLoading;
-this.dispatchPlanningAdminAcknowledgeEvent = dispatchPlanningAdminAcknowledgeEvent;
-this.dispatchPlanningAdminExportPlan = dispatchPlanningAdminExportPlan;
 
 // ===== DEDICATED PLANNING MODULE =====
 function _planningCompositeKey_(soNumber, lineNo) {
