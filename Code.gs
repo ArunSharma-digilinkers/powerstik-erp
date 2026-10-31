@@ -932,6 +932,7 @@ const DEFAULT_MASTERS = {
 };
 
 const PAGE_MODULE_MAP = {
+  'historicalorder':'MASTERADMIN',
   'order':'SALES_ORDER_ENTRY',
   'salesorderapproval':'SALES_ORDER_APPROVAL',
   'artwork':'ARTWORK',
@@ -955,12 +956,14 @@ const PAGE_MODULE_MAP = {
   'printadjustment':'BILLING',
   'planning':'PLANNING',
   'commitmentplanning':'MASTERADMIN',
+  'dispatchplanning':'MASTERADMIN',
   'printingplanning':'MASTERADMIN',
   'corrugationplanning':'MASTERADMIN',
   'finishingplanning':'MASTERADMIN',
   'diecuttingplanning':'MASTERADMIN',
   'packingplanning':'MASTERADMIN',
   'reports':'REPORTS',
+  'ordertracker':'REPORTS',
   'salesdashboard':'REPORTS',
   'salestargets':'MASTERADMIN',
   'costing':'COSTING',
@@ -12575,9 +12578,9 @@ function _prepareWorkOrderPrintPaperAssignments_(payload) {
     ).trim().toUpperCase().indexOf('PRINT') !== -1;
   }) || {};
   const jobStyle = String(source.jobDetails && source.jobDetails.printStyle || '').trim();
-  const noPrint = jobStyle.toUpperCase() === 'NO PRINT';
   const routeMachine=String(route.machine||route.machineName||route.machine_name||route.plannedMachine||route.planned_machine||'').trim();
-  const printablePapers=papers.filter(function(paper){return !noPrint&&paper.printingRequired!==false&&paper.printing_required!==false;});
+  const paperStyle=function(paper){return String(paper.printStyle||paper.print_style||jobStyle||'').trim();};
+  const printablePapers=papers.filter(function(paper){return paperStyle(paper).toUpperCase()!=='NO PRINT'&&paper.printingRequired!==false&&paper.printing_required!==false;});
   const hasPrintRequired=printablePapers.length>0;
   if(hasPrintRequired&&!String(route.dept||route.operation||'').trim())throw new Error('Add the Printing process in routing before saving print-required paper lines.');
   if(hasPrintRequired&&!routeMachine)throw new Error('Select the printing machine in routing before saving the Work Order.');
@@ -12586,7 +12589,9 @@ function _prepareWorkOrderPrintPaperAssignments_(payload) {
   const legacyVariedAssignments=printablePapers.length>1&&distinctPaperMachines.length>1;
   papers.forEach(function(paper, index) {
     if (!paper.paperLineId && !paper.paper_line_id) paper.paperLineId = Utilities.getUuid();
-    const required = !noPrint && paper.printingRequired !== false && paper.printing_required !== false;
+    const style=paperStyle(paper);
+    paper.printStyle=style;
+    const required = style.toUpperCase() !== 'NO PRINT' && paper.printingRequired !== false && paper.printing_required !== false;
     paper.printingRequired = required;
     if (required) {
       const currentMachine=String(paper.printingMachine||paper.printing_machine||'').trim();
@@ -12608,16 +12613,33 @@ function _prepareWorkOrderPrintPaperAssignments_(payload) {
   return source;
 }
 
+function _workOrderFinishingProcessFamily_(value) {
+  const text = String(value || '').trim();
+  if (/laminat/i.test(text)) return 'LAMINATION';
+  if (/coat|varnish|aqueous/i.test(text)) return 'COATING';
+  return '';
+}
+
 function _normalizeAndValidateWorkOrderFinishing_(payload) {
   const source = payload && typeof payload === 'object' ? payload : {};
   const details = _safeJsonObject_(source.jobDetails);
   const routing = Array.isArray(source.routing) ? source.routing : [];
+  const papers = Array.isArray(source.papers) ? source.papers : [];
   let hasLamination = false;
   let hasCoating = false;
 
   routing.forEach(function(row) {
     if (!row || typeof row !== 'object') return;
-    const routeText = String(row.dept || row.department || '') + ' ' +
+    const department = String(row.dept || row.department || '').trim();
+    const operation = String(row.operation || row.operationName || row.process_name || '').trim();
+    const departmentFamily = _workOrderFinishingProcessFamily_(department);
+    const operationFamily = _workOrderFinishingProcessFamily_(operation);
+    if (departmentFamily && operationFamily && departmentFamily !== operationFamily) {
+      row.operation = department;
+      row.operationName = department;
+      row.process_name = department;
+    }
+    const routeText = department + ' ' +
       String(row.operation || row.operationName || row.process_name || '');
     if (/laminat/i.test(routeText)) hasLamination = true;
     if (/coat|varnish|aqueous/i.test(routeText)) hasCoating = true;
@@ -12632,17 +12654,32 @@ function _normalizeAndValidateWorkOrderFinishing_(payload) {
     }
   });
 
-  const laminationType = String(details.laminationType || '').trim();
-  const laminationFinish = String(details.laminationFinish || '').trim();
+  let laminationType = String(details.laminationType || '').trim();
+  let laminationFinish = String(details.laminationFinish || '').trim();
   const allowedTypes = ['THERMAL LAMINATION','COLD TAPE LAMINATION','BOPP LAMINATION'];
   const allowedFinishes = ['GLOSS','MATT','3D'];
+  const paperProcess=function(paper){
+    const value=String(paper&& (paper.finishingProcess||paper.finishing_process) ||'').trim();
+    return value||(hasLamination&&hasCoating?'Lamination + Coating':(hasLamination?'Lamination':(hasCoating?'Coating':'None')));
+  };
+  const laminationPapers=papers.filter(function(paper){return /LAMINATION/i.test(paperProcess(paper));});
+  const coatingPapers=papers.filter(function(paper){return /COATING/i.test(paperProcess(paper));});
   if (hasLamination) {
-    if (allowedTypes.indexOf(laminationType.toUpperCase()) < 0) {
+    if(papers.length&&!laminationPapers.length)throw new Error('Assign the Lamination routing step to at least one paper line.');
+    if(papers.length&&allowedTypes.indexOf(laminationType.toUpperCase())<0){
+      laminationType=String(laminationPapers[0]&& (laminationPapers[0].laminationType||laminationPapers[0].lamination_type) ||'').trim();
+    }
+    if(papers.length&&allowedFinishes.indexOf(laminationFinish.toUpperCase())<0){
+      laminationFinish=String(laminationPapers[0]&& (laminationPapers[0].laminationFinish||laminationPapers[0].lamination_finish) ||'').trim();
+    }
+    if (!papers.length&&allowedTypes.indexOf(laminationType.toUpperCase()) < 0) {
       throw new Error('Select Thermal Lamination, Cold Tape Lamination, or BOPP Lamination for the Lamination routing step.');
     }
-    if (allowedFinishes.indexOf(laminationFinish.toUpperCase()) < 0) {
+    if (!papers.length&&allowedFinishes.indexOf(laminationFinish.toUpperCase()) < 0) {
       throw new Error('Select Gloss, Matt, or 3D as the Lamination Finish.');
     }
+    if(laminationType)details.laminationType=laminationType;
+    if(laminationFinish)details.laminationFinish=laminationFinish;
     routing.forEach(function(row) {
       if (!row || typeof row !== 'object') return;
       const routeText = String(row.dept || row.department || '') + ' ' +
@@ -12655,12 +12692,36 @@ function _normalizeAndValidateWorkOrderFinishing_(payload) {
   }
 
   if (hasCoating) {
-    const coatingType = String(details.coating || '').trim();
-    if (!coatingType || /^(NONE|NO COATING|N\/A)$/i.test(coatingType)) {
+    let coatingType = String(details.coating || '').trim();
+    if(papers.length&&!coatingPapers.length)throw new Error('Assign the Coating routing step to at least one paper line.');
+    if(papers.length&&(!coatingType||/^(NONE|NO COATING|N\/A)$/i.test(coatingType))){
+      coatingType=String(coatingPapers[0]&& (coatingPapers[0].coatingType||coatingPapers[0].coating_type||coatingPapers[0].coating) ||'').trim();
+      if(coatingType)details.coating=coatingType;
+    }
+    if (!papers.length&&(!coatingType || /^(NONE|NO COATING|N\/A)$/i.test(coatingType))) {
       throw new Error('Select a Coating Type when Coating is included in routing.');
     }
   }
+  papers.forEach(function(paper,index){
+    if (!paper || typeof paper !== 'object') return;
+    let process=String(paper.finishingProcess||paper.finishing_process||'').trim();
+    if (!process) process=hasLamination&&hasCoating?'Lamination + Coating':(hasLamination?'Lamination':(hasCoating?'Coating':'None'));
+    const usesLamination=/LAMINATION/i.test(process),usesCoating=/COATING/i.test(process);
+    const paperLaminationType=String(paper.laminationType||paper.lamination_type||(usesLamination?laminationType:'')||'').trim();
+    const paperLaminationFinish=String(paper.laminationFinish||paper.lamination_finish||(usesLamination?laminationFinish:'')||'').trim();
+    const paperCoating=String(paper.coatingType||paper.coating_type||paper.coating||(usesCoating?details.coating:'')||'').trim();
+    if(usesLamination&&!hasLamination)throw new Error('Add Lamination in routing for paper line '+(index+1)+'.');
+    if(usesCoating&&!hasCoating)throw new Error('Add Coating in routing for paper line '+(index+1)+'.');
+    if(usesLamination&&allowedTypes.indexOf(paperLaminationType.toUpperCase())<0)throw new Error('Select a valid Lamination Type for paper line '+(index+1)+'.');
+    if(usesLamination&&allowedFinishes.indexOf(paperLaminationFinish.toUpperCase())<0)throw new Error('Select Gloss, Matt, or 3D as the Lamination Finish for paper line '+(index+1)+'.');
+    if(usesCoating&&(!paperCoating||/^(NONE|NO COATING|N\/A)$/i.test(paperCoating)))throw new Error('Select a Coating Type for paper line '+(index+1)+'.');
+    paper.finishingProcess=process;
+    paper.coatingType=usesCoating?paperCoating:'';
+    paper.laminationType=usesLamination?paperLaminationType:'';
+    paper.laminationFinish=usesLamination?paperLaminationFinish:'';
+  });
   source.jobDetails = details;
+  source.papers = papers;
   source.routing = routing;
   return source;
 }
@@ -13185,7 +13246,7 @@ function getWorkOrder(woNo) {
   if (cached) return cached;
 
   const wo = supabaseSelect_('work_orders', {
-    select: `id, wo_number, status, snapshot_json`,
+    select: `id, wo_number, wo_date, status, snapshot_json`,
     filters: { wo_number: 'eq.' + normalizedWoNo },
     limit: 1
   })[0];
@@ -13485,6 +13546,7 @@ const corrugNormalized = (snap.corrugation || []).map((c, i) => ({
 
   const result = {
     woNo: wo.wo_number,
+    woDate: wo.wo_date || snap.woDate || '',
     status: wo.status || 'Pending',
     jobs: jobsNormalized,
     jobDetails: snap.jobDetails || {},
@@ -20268,7 +20330,13 @@ function _salesOrderLineGstPct_(line, hsnGroup, itemTaxMap) {
   return 0;
 }
 
-function generateSalesOrderNumber(prefix, orderDate) {
+function generateSalesOrderNumber(prefix, orderDate, token) {
+  if (String(prefix || '').toUpperCase() === 'SP') {
+    _requireAdmin_(token);
+    const number = supabaseRpc_('historical_order_next_so_v1', { p_date: String(orderDate || _salesOrderTodayIso_()).slice(0, 10) });
+    if (typeof number !== 'string' || !number) throw new Error('SP numbering migration is not installed.');
+    return number;
+  }
   const dt = orderDate ? new Date(orderDate) : new Date();
   const fy = getFinancialYear(dt);
 
@@ -20302,6 +20370,7 @@ const sessionUser = _requireModuleAccess_(_authTokenFromPayload_(payload, token)
 if (!payload?.header) throw new Error('Invalid payload');
 
 const h = _salesOrderNormalizeHeader_(payload.header);
+_historicalOrderBlockRegularSave_(null, h, sessionUser);
 h.orderDate = _salesOrderTodayIso_();
 const lines = payload.lines || [];
 const createdBy = _authActorName_(sessionUser);
@@ -20360,7 +20429,7 @@ throw e;
    GENERATE SO NUMBER
 ======================== */
 
-const soNumber = generateSalesOrderNumber(h.orderPrefix,h.orderDate);
+const soNumber = generateSalesOrderNumber(h.orderPrefix,h.orderDate,_authTokenFromPayload_(payload, token));
 
 if(!soNumber) throw new Error('SO number generation failed');
 
@@ -20651,6 +20720,7 @@ const sessionUser = _requireModuleAccess_(_authTokenFromPayload_(payload, token)
 if(!soId) throw new Error('SO id missing');
 
 const header = _salesOrderNormalizeHeader_(payload.header);
+_historicalOrderBlockRegularSave_(soId, header, sessionUser);
 const lines = payload.lines || [];
 const itemTaxMap = _salesOrderItemTaxMap_(lines);
 
@@ -22948,8 +23018,8 @@ function _canAccessPage_(page, sessionUser, token) {
   if (String(sessionUser.role || '').toUpperCase() === 'ADMIN') return true;
   if (currentPage === 'menu') return true;
   if (currentPage === 'checklist') return true;
-  if (currentPage === 'masteradmin' || currentPage === 'salestargets') return false;
-  if (currentPage === 'reports' || currentPage === 'salesdashboard') return true;
+  if (currentPage === 'masteradmin' || currentPage === 'salestargets' || currentPage === 'historicalorder') return false;
+  if (currentPage === 'reports' || currentPage === 'salesdashboard' || currentPage === 'ordertracker') return true;
 
   const moduleCode = PAGE_MODULE_MAP[currentPage];
   if (!moduleCode) return true;
@@ -23019,6 +23089,7 @@ const ROUTES = {
   menu: 'Menu',
 
   order: 'OrderForm',
+  historicalorder: 'HistoricalOrderPosting',
   salesorderapproval: 'SalesOrderApproval',
 
     artwork: 'ArtworkApproval',
@@ -23045,12 +23116,14 @@ const ROUTES = {
   printadjustment: 'AdjustmentNotePrint',
   planning: 'Planning',
   commitmentplanning: 'PPCPending',
+  dispatchplanning: 'DispatchPlan',
   printingplanning: 'PrintingPlanning',
   corrugationplanning: 'CorrugationPlanning',
   finishingplanning: 'FinishingPlanning',
   diecuttingplanning: 'StagePlanning',
   packingplanning: 'StagePlanning',
   reports: 'Reports',
+  ordertracker: 'OrderTracker',
   salesdashboard: 'SalesDashboard',
   salestargets: 'SalesTargetsAdmin',
   costing: 'Costing',
@@ -23101,12 +23174,6 @@ const ROUTES = {
 }
 
 function doPost(e) {
-  // Machine-to-machine Tally connector requests use JSON and their own
-  // revocable connector credential. Handle them before the interactive
-  // login form route.
-  if (typeof _tallyIsConnectorRequest_ === 'function' && _tallyIsConnectorRequest_(e)) {
-    return tallyHandleConnectorRequest_(e);
-  }
   const action = String(e?.parameter?.action || '').toLowerCase();
   if (action === 'logout') {
     const token = String(e?.parameter?.token || '').trim();
@@ -46737,9 +46804,9 @@ function _prodMapStageRowsFastViewRows_(rows) {
   });
 }
 
-function _prodEnrichCorrugationFinalStageFlags_(rows) {
+function _prodEnrichCorrugationFinalStageFlags_(rows, options) {
   const list = typeof _downstreamExpandDieRows_ === 'function'
-    ? _downstreamExpandDieRows_(Array.isArray(rows) ? rows : []) : (Array.isArray(rows) ? rows : []);
+    ? _downstreamExpandDieRows_(Array.isArray(rows) ? rows : [], options) : (Array.isArray(rows) ? rows : []);
   const woIds = [...new Set(list.filter(function(row) {
     return _prodNormalizeCategoryGroup_(row.categoryGroup || '') === 'CORRUGATION';
   }).map(function(row) {
@@ -47270,7 +47337,7 @@ function _prodBuildCorr2PlyGroupsFromSnapshot_(snapshot, options) {
   });
 }
 
-function _prodGetCorr2PlyDetailTotals_(routingIds) {
+function _prodGetCorr2PlyDetailTotals_(routingIds, options) {
   const ids = Array.isArray(routingIds) ? routingIds.filter(Boolean) : [];
   if (!ids.length) return {};
   try {
@@ -47287,6 +47354,7 @@ function _prodGetCorr2PlyDetailTotals_(routingIds) {
     });
     return totals;
   } catch (err) {
+    if (options && options.strict === true) throw err;
     return {};
   }
 }
@@ -47296,21 +47364,21 @@ function _prodIsPrintingProcess_(row) {
   return name.indexOf('PRINT')!==-1;
 }
 
-function _prodGetPrintingComponentTotals_(componentIds) {
+function _prodGetPrintingComponentTotals_(componentIds, options) {
   const ids=[...new Set((componentIds||[]).map(function(id){return String(id||'').trim();}).filter(Boolean))];
   if(!ids.length)return {};
   try{
     const rows=_selectInBatches_('printing_component_entry_details','print_component_id,produced_sheets,rejected_sheets,good_sheets','print_component_id',ids)||[],totals={};
     rows.forEach(function(row){const key=String(row.print_component_id||'');if(!totals[key])totals[key]={gross:0,rejected:0,good:0};totals[key].gross+=Number(row.produced_sheets||0);totals[key].rejected+=Number(row.rejected_sheets||0);totals[key].good+=Number(row.good_sheets||0);});
-    try{(_selectInBatches_('printing_component_legacy_allocations','print_component_id,produced_sheets,good_sheets','print_component_id',ids)||[]).forEach(function(row){const key=String(row.print_component_id||'');if(!totals[key])totals[key]={gross:0,rejected:0,good:0};totals[key].gross+=Number(row.produced_sheets||0);totals[key].good+=Number(row.good_sheets||0);});}catch(allocationErr){if(!_supabaseRelationMissing_(allocationErr,'printing_component_legacy_allocations'))throw allocationErr;}
+    try{(_selectInBatches_('printing_component_legacy_allocations','print_component_id,produced_sheets,good_sheets','print_component_id',ids)||[]).forEach(function(row){const key=String(row.print_component_id||'');if(!totals[key])totals[key]={gross:0,rejected:0,good:0};totals[key].gross+=Number(row.produced_sheets||0);totals[key].good+=Number(row.good_sheets||0);});}catch(allocationErr){if(options && options.strict === true || !_supabaseRelationMissing_(allocationErr,'printing_component_legacy_allocations'))throw allocationErr;}
     return totals;
-  }catch(err){if(_supabaseRelationMissing_(err,'printing_component_entry_details'))return{};throw err;}
+  }catch(err){if(!(options && options.strict === true) && _supabaseRelationMissing_(err,'printing_component_entry_details'))return{};throw err;}
 }
 
 function _prodResolvePrintingComponentTotals_(components, options) {
   const list=Array.isArray(components)?components:[],opts=options||{};
   const componentIds=[...new Set(list.map(function(component){return String(component&&component.id||'').trim();}).filter(Boolean))];
-  const totals=_prodGetPrintingComponentTotals_(componentIds);
+  const totals=_prodGetPrintingComponentTotals_(componentIds,opts);
   const routingIds=[...new Set(list.map(function(component){return String(component&&component.routing_id||'').trim();}).filter(Boolean))];
   if(!routingIds.length)return totals;
 
@@ -47319,7 +47387,7 @@ function _prodResolvePrintingComponentTotals_(components, options) {
     try{
       routeComponents=_selectInBatches_('work_order_print_components','id,routing_id,print_required,status','routing_id',routingIds)||[];
     }catch(err){
-      if(_supabaseRelationMissing_(err,'work_order_print_components'))return totals;
+      if(!opts.strict && _supabaseRelationMissing_(err,'work_order_print_components'))return totals;
       throw err;
     }
   }
@@ -47400,17 +47468,17 @@ function _printingHydrateEffectiveRoutingMachines_(rows) {
   return input;
 }
 
-function _prodExpandPrintingStageRows_(rows) {
+function _prodExpandPrintingStageRows_(rows, options) {
   const list=Array.isArray(rows)?rows:[],targets=list.filter(_prodIsPrintingProcess_);
   if(!targets.length)return list;
   const routingIds=[...new Set(targets.map(function(row){return row.routingId||row.routing_id;}).filter(Boolean))];
   let components=[];
   try{
     components=_selectInBatches_('work_order_print_components','id,wo_id,routing_id,paper_line_id,paper_index,item_code,item_name,machine_name,print_style,front_colors,back_colors,gsm,sheet_short_mm,sheet_long_mm,core_sheets,wastage_sheets,total_sheets,print_required,needs_machine_review,needs_production_review,status,source_snapshot','routing_id',routingIds,'paper_index.asc')||[];
-  }catch(err){if(_supabaseRelationMissing_(err,'work_order_print_components'))return list;throw err;}
+  }catch(err){if(!(options && options.strict === true) && _supabaseRelationMissing_(err,'work_order_print_components'))return list;throw err;}
   if(!components.length)return list;
   const byRoute={};components.forEach(function(component){const key=String(component.routing_id||'');if(!byRoute[key])byRoute[key]=[];byRoute[key].push(component);});
-  const totals=_prodResolvePrintingComponentTotals_(components,{routeComponents:components}),expanded=[];
+  const totals=_prodResolvePrintingComponentTotals_(components,{routeComponents:components,strict:!!(options && options.strict),entryRows:options && options.entryRows}),expanded=[];
   list.forEach(function(row){
     if(!_prodIsPrintingProcess_(row)||!byRoute[String(row.routingId||row.routing_id)]){expanded.push(row);return;}
     const routeComponents=byRoute[String(row.routingId||row.routing_id)],machineAssignments=_printingComponentMachineAssignmentMap_(routeComponents,row.plannedMachine||row.planned_machine||'');
@@ -47453,10 +47521,10 @@ function _prodExpandCorr2PlyStageRows_(rows, prefetched) {
   }
   let detailTotals = supplied.detailTotals;
   if (!detailTotals) {
-    detailTotals = _prodGetCorr2PlyDetailTotals_(targets.map(function(row) { return row.routingId || row.routing_id; }));
+    detailTotals = _prodGetCorr2PlyDetailTotals_(targets.map(function(row) { return row.routingId || row.routing_id; }), supplied);
   }
   const closureMap = typeof _corrClosureMap_ === 'function'
-    ? _corrClosureMap_(targets.map(function(row) { return row.routingId || row.routing_id; }))
+    ? _corrClosureMap_(targets.map(function(row) { return row.routingId || row.routing_id; }), supplied)
     : {};
 
   const expanded = [];
@@ -50565,6 +50633,7 @@ function _prodGetEntryMutationBlockReason_(entryRow, routingRow) {
 
 function prodAdminListStageEntries(payload, token) {
   _requireAnyModuleAccess_(token, [
+    { module:'PRODUCTION', action:'can_view' },
     { module:'PRODUCTION', action:'can_edit' },
     { module:'PRODUCTION', action:'can_delete' }
   ]);
@@ -54129,6 +54198,9 @@ function _reportsSectionOTIF_(token, params) {
       division: row.division || '',
       department: row.department || 'Unassigned',
       orderQty: _reportsSafeNumber_(row.order_qty),
+      stockFulfilledQty: _reportsSafeNumber_(row.stock_fulfilled_qty),
+      productionRequiredQty: _reportsSafeNumber_(row.production_required_qty),
+      fulfillmentMode: row.fulfillment_mode || 'PRODUCTION',
       unit: row.unit || '',
       orderValue: _reportsSafeNumber_(row.order_value),
       jobType: row.job_type || '',
@@ -54154,7 +54226,11 @@ function _reportsSectionOTIF_(token, params) {
       completedStageCount: _reportsSafeNumber_(row.completed_stage_count),
       requiredStages: row.required_stages || '',
       productionOkQty: _reportsSafeNumber_(row.production_ok_qty),
-      productionCompletedAt: row.production_completed_at || '',
+      packingProducedQty: _reportsSafeNumber_(row.packing_produced_qty),
+      productionPackedQty: _reportsSafeNumber_(row.production_packed_qty),
+      productionCompletionBasis: row.production_completion_basis || '',
+      latestPackingAt: row.production_completed_at || '',
+      productionCompletedAt: row.production_otif_completed_at || '',
       productionCompletedDate: row.production_completed_date || '',
       invoiceCount: _reportsSafeNumber_(row.invoice_count),
       invoiceNos: row.invoice_nos || '',
@@ -54219,6 +54295,8 @@ function _reportsSectionOTIF_(token, params) {
         'category',
         'division',
         'department',
+        'fulfillmentMode',
+        'productionCompletionBasis',
         'jobType',
         'jobTypeBucket',
         'jobReference',
@@ -54247,6 +54325,8 @@ function _reportsSectionOTIF_(token, params) {
       _reportsStatusPasses_(row, filters, [
         'department',
         'division',
+        'fulfillmentMode',
+        'productionCompletionBasis',
         'jobTypeBucket',
         'soLineStatus',
         'salesApprovalStatus',
@@ -54336,8 +54416,8 @@ function _reportsSectionOTIF_(token, params) {
     }, {
       key: 'otifJobDetail',
       title: 'Job-wise OTIF Detail',
-      subtitle: 'Line-wise OTIF with separate artwork-based and batch-verified material clocks. Production completion is the latest packing completion. Material OTIF starts on the later of artwork approval and the latest PO receipt date among batches actually issued to the job.',
-      minWidth: 6100,
+      subtitle: 'Line-wise OTIF with separate artwork-based and batch-verified material clocks. Full-stock lines are marked BILLED_FROM_STOCK and excluded from production OTIF; partial-stock lines require produced quantity to cover the remaining balance plus a recorded packing completion.',
+      minWidth: 6700,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -54350,6 +54430,9 @@ function _reportsSectionOTIF_(token, params) {
         { key:'productName', label:'Product' },
         { key:'category', label:'Category' },
         { key:'orderQty', label:'Order Qty', type:'number' },
+        { key:'stockFulfilledQty', label:'Stock Fulfilled Qty', type:'number' },
+        { key:'productionRequiredQty', label:'Production Required Qty', type:'number' },
+        { key:'fulfillmentMode', label:'Fulfilment Mode', type:'status' },
         { key:'unit', label:'Unit' },
         { key:'orderValue', label:'SO Value', type:'money' },
         { key:'jobType', label:'Job Type' },
@@ -54401,9 +54484,13 @@ function _reportsSectionOTIF_(token, params) {
         { key:'productionTatDays', label:'Production TAT Days', type:'number' },
         { key:'productionTargetDate', label:'Production Target', type:'date' },
         { key:'productionCompletedDate', label:'Packing Completion Date', type:'date' },
-        { key:'productionCompletedAt', label:'Packing Completed At', type:'datetime' },
+        { key:'latestPackingAt', label:'Latest Packing Entry At', type:'datetime' },
+        { key:'productionCompletedAt', label:'OTIF Packing Completion At', type:'datetime' },
         { key:'productionStatus', label:'Artwork-to-Packing OTIF', type:'status' },
         { key:'productionOkQty', label:'Production OK Qty', type:'number' },
+        { key:'packingProducedQty', label:'Packing Produced Qty', type:'number' },
+        { key:'productionPackedQty', label:'Packed Production Qty', type:'number' },
+        { key:'productionCompletionBasis', label:'Production Completion Basis', type:'status' },
         { key:'dispatchBillingTargetDate', label:'Billing Target', type:'date' },
         { key:'dispatchBillingActualDate', label:'Billing Actual', type:'date' },
         { key:'dispatchBillingStatus', label:'Dispatch/Billing OTIF', type:'status' },
@@ -57177,10 +57264,10 @@ function _reportsMachineLoadStandards_() {
   return [
     { key:'SM74', machine:'Heidelberg SM74', makeReady:30, target:4125 },
     { key:'CD102', machine:'CD102', makeReady:30, target:4125 },
-    { key:'LAMINATION', machine:'Lamination', makeReady:10, target:1500 },
-    { key:'LAM1', machine:'Lamination Roll-1', makeReady:10, target:1500 },
-    { key:'LAM2', machine:'Lamination 02', makeReady:10, target:1500 },
-    { key:'LAM3', machine:'Lamination 03', makeReady:10, target:1500 },
+    { key:'LAMINATION', machine:'Lamination', makeReady:10, target:1100 },
+    { key:'LAM1', machine:'Lamination Roll-1', makeReady:10, target:1100 },
+    { key:'LAM2', machine:'Lamination 02', makeReady:10, target:1100 },
+    { key:'LAM3', machine:'Lamination 03', makeReady:10, target:1100 },
     { key:'DIEOFFSET', machine:'Die Cutting - Offset', makeReady:30, target:2400 },
     { key:'DICORR', machine:'Die Cutting - Corrugation', makeReady:30, target:1600 },
     { key:'DIE1', machine:'Die Cutting 01', makeReady:30, target:880 },
@@ -57188,11 +57275,11 @@ function _reportsMachineLoadStandards_() {
     { key:'DIE3', machine:'Die Cutting 03', makeReady:30, target:880 },
     { key:'DIE4', machine:'Die Cutting 04', makeReady:30, target:880 },
     { key:'DIE5', machine:'Die Cutting 05', makeReady:30, target:880 },
-    { key:'FLEXOPRINT', machine:'Markany Flexo E5', makeReady:30, target:55 },
-    { key:'FLEXODIE', machine:'Flexo Die Cutting Offline', makeReady:30, target:44 },
+    { key:'FLEXOPRINT', machine:'Markany Flexo E5', makeReady:40, target:55 },
+    { key:'FLEXODIE', machine:'Flexo Die Cutting Offline', makeReady:30, target:90 },
     { key:'FLEXOSLIT', machine:'Rhyguan', makeReady:30, target:40 },
     { key:'DIGITAL', machine:'Canon Digital Printing', makeReady:10, target:660 },
-    { key:'2PLY', machine:'2 Ply Making Machine', makeReady:15, target:2000 },
+    { key:'2PLY', machine:'2 Ply Making Machine', makeReady:30, target:2000 },
     { key:'ROTARY', machine:'Rotary Cutting', makeReady:0, target:650 },
     { key:'MSP1', machine:'Manual Sheet Pasting', makeReady:0, target:750 },
     { key:'MSP2', machine:'Manual Pasting', makeReady:0, target:600 },
@@ -57214,6 +57301,21 @@ function _reportsMachineLoadStandardsMap_() {
     map[row.key] = row;
   });
   return map;
+}
+
+function _reportsMachineLoadIsFlexoMeterPerMinute_(machineKey) {
+  return ['FLEXOPRINT', 'FLEXOSLIT'].indexOf(String(machineKey || '').toUpperCase()) !== -1;
+}
+
+function _reportsMachineLoadIsPerMinute_(machineKey) {
+  const key = String(machineKey || '').toUpperCase();
+  return key === 'FLEXODIE' || _reportsMachineLoadIsFlexoMeterPerMinute_(key);
+}
+
+function _reportsMachineLoadTargetUnit_(machineKey) {
+  const key = String(machineKey || '').toUpperCase();
+  if (key === 'FLEXODIE') return 'impressions/min';
+  return _reportsMachineLoadIsFlexoMeterPerMinute_(key) ? 'meter/min' : 'qty/hour';
 }
 
 function _reportsMachineLoadNormalizeKey_(machine, processName, department, categoryGroup) {
@@ -57264,9 +57366,14 @@ function _reportsMachineLoadFromQueueRow_(row) {
   const loadQty = balanceQty > 0 ? balanceQty : plannedQty;
   const planUnit = row.plan_unit || row.planUnit || '';
   const targetOutput = _reportsSafeNumber_(standard.target);
-  const hourlyCapacity = _reportsProductionNOPIsFlexoMeterPerMinute_(key) ? targetOutput * 60 : targetOutput;
+  const repeatMm = _reportsSafeNumber_(row.repeat_mm || row.repeatMm || row.flexo_repeat_mm || row.flexoRepeatMm);
+  const conversionMissing = key === 'FLEXODIE' && !(repeatMm > 0);
+  const effectiveLoadQty = key === 'FLEXODIE'
+    ? (conversionMissing ? 0 : loadQty * 1000 / repeatMm)
+    : loadQty;
+  const hourlyCapacity = _reportsMachineLoadIsPerMinute_(key) ? targetOutput * 60 : targetOutput;
   const makeReadyHours = _reportsSafeNumber_(standard.makeReady) / 60;
-  const runningLoadHours = hourlyCapacity > 0 ? loadQty / hourlyCapacity : 0;
+  const runningLoadHours = hourlyCapacity > 0 && !conversionMissing ? effectiveLoadQty / hourlyCapacity : 0;
   const totalLoadHours = runningLoadHours + makeReadyHours;
   return {
     routingId: row.routing_id || row.routingId || '',
@@ -57290,25 +57397,25 @@ function _reportsMachineLoadFromQueueRow_(row) {
     balanceQty: balanceQty,
     planUnit: planUnit,
     baseLoadQty: _reportsRoundNumber_(loadQty, 2),
-    loadQty: _reportsRoundNumber_(loadQty, 2),
-    loadQtyUnit: _reportsProductionNOPIsFlexoMeterPerMinute_(key) ? 'meter' : (String(planUnit || '').toLowerCase() || 'qty'),
+    loadQty: _reportsRoundNumber_(effectiveLoadQty, 2),
+    loadQtyUnit: key === 'FLEXODIE' ? 'impressions' : (_reportsMachineLoadIsFlexoMeterPerMinute_(key) ? 'meter' : (String(planUnit || '').toLowerCase() || 'qty')),
     flexoTotalRm: 0,
     flexoTotalJobQty: 0,
     status: row.status || '',
     standardMakeReadyMinutes: _reportsSafeNumber_(standard.makeReady),
     targetOutput: targetOutput,
-    targetUnit: _reportsProductionNOPIsFlexoMeterPerMinute_(key) ? 'meter/min' : 'qty/hour',
+    targetUnit: _reportsMachineLoadTargetUnit_(key),
     targetHourlyCapacity: _reportsRoundNumber_(hourlyCapacity, 2),
     makeReadyHours: _reportsRoundNumber_(makeReadyHours, 2),
     runningLoadHours: _reportsRoundNumber_(runningLoadHours, 2),
     totalLoadHours: _reportsRoundNumber_(totalLoadHours, 2),
     loadDays: _reportsRoundNumber_(totalLoadHours / 8, 2),
-    loadStatus: hourlyCapacity > 0 ? 'OPEN_LOAD' : 'NO_TARGET'
+    loadStatus: conversionMissing ? 'CONVERSION_MISSING' : (hourlyCapacity > 0 ? 'OPEN_LOAD' : 'NO_TARGET')
   };
 }
 
 function _reportsMachineLoadRows_(filters) {
-  const cacheKey = _reportsCacheKey_('MACHINE_LOAD_ROWS', { filters: filters || {} });
+  const cacheKey = _reportsCacheKey_('MACHINE_LOAD_ROWS_FLEXODIE_IMPRESSIONS_V2', { filters: filters || {} });
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
 
@@ -57590,12 +57697,15 @@ function _reportsProductionNOPRows_(filters, fromDate, toDate) {
       actualRunningHours: _reportsSafeNumber_(row.actual_running_hours),
       targetHourlyOutput: _reportsSafeNumber_(row.target_hourly_output),
       targetProduction: _reportsSafeNumber_(row.target_production),
+      entryActualProduction: _reportsSafeNumber_(row.entry_actual_production),
       actualProduction: _reportsSafeNumber_(row.actual_production),
       actualNop: _reportsSafeNumber_(row.actual_nop),
       nopDeviation: _reportsSafeNumber_(row.nop_deviation),
       nopAchievementPct: _reportsSafeNumber_(row.nop_achievement_pct),
       performanceStatus: row.performance_status || '',
-      lastCompletionAt: row.last_completion_at || ''
+      lastCompletionAt: row.last_completion_at || '',
+      conversionMissingEntries: _reportsSafeNumber_(row.conversion_missing_entries),
+      twoSidedEntries: _reportsSafeNumber_(row.two_sided_entries)
     };
   });
 
@@ -57621,14 +57731,15 @@ function _reportsProductionNOPEntryLineRows_(filters, fromDate, toDate) {
     filters: _reportsDateRangeFilters_(fromDate, toDate, 'production_date'),
     order: 'production_date.desc,machine.asc,entry_local_ts.asc,wo_number.asc'
   }).map(function(row) {
+    const machineKey = String(row.machine_key || '').toUpperCase();
     return {
       productionEntryId: row.production_entry_id || '',
       productionDate: row.production_date || '',
       entryLocalTs: row.entry_local_ts || '',
       machine: row.machine || '',
-      machineKey: row.machine_key || '',
-      targetUnit: row.target_unit || '',
-      targetHourlyOutput: _reportsSafeNumber_(row.target_hourly_output),
+      machineKey: machineKey,
+      targetUnit: _reportsProductionNOPTargetUnit_(machineKey),
+      targetHourlyOutput: machineKey === 'FLEXODIE' ? 90 : _reportsSafeNumber_(row.target_hourly_output),
       standardMakeReadyMinutes: _reportsSafeNumber_(row.standard_make_ready_minutes),
       operatorName: row.operator_name || '',
       woNumber: row.wo_number || '',
@@ -57650,10 +57761,20 @@ function _reportsProductionNOPEntryLineRows_(filters, fromDate, toDate) {
       routingStatus: row.routing_status || '',
       orderQty: _reportsSafeNumber_(row.order_qty),
       orderUnit: row.order_unit || '',
+      entryProducedQty: _reportsSafeNumber_(row.entry_produced_qty),
       producedQty: _reportsSafeNumber_(row.produced_qty),
       rejectedQty: _reportsSafeNumber_(row.rejected_qty),
       okQty: _reportsSafeNumber_(row.ok_qty),
       nopProductionQty: _reportsSafeNumber_(row.nop_production_qty),
+      enteredRunningMeter: _reportsSafeNumber_(row.entered_running_meter),
+      repeatMm: _reportsSafeNumber_(row.repeat_mm),
+      impressionsPerRunningMeter: _reportsSafeNumber_(row.impressions_per_running_meter),
+      totalUps: _reportsSafeNumber_(row.total_ups),
+      pcsPerRunningMeter: _reportsSafeNumber_(row.pcs_per_running_meter),
+      conversionStatus: row.conversion_status || '',
+      printStyle: row.print_style || '',
+      outputMultiplier: _reportsSafeNumber_(row.output_multiplier) || 1,
+      printStyleSource: row.print_style_source || '',
       downtimeMinutes: _reportsSafeNumber_(row.downtime_minutes),
       downtimeHours: _reportsSafeNumber_(row.downtime_hours),
       downtimeLabel: row.downtime_label || '',
@@ -57680,6 +57801,8 @@ function _reportsProductionNOPEntryLineRows_(filters, fromDate, toDate) {
         'plannedMachine',
         'productionEntryMachine',
         'rawMachine',
+        'printStyle',
+        'printStyleSource',
         'routingStatus',
         'downtimeLabel',
         'downtimeReasonRaw'
@@ -57690,6 +57813,7 @@ function _reportsProductionNOPEntryLineRows_(filters, fromDate, toDate) {
         'processName',
         'department',
         'plannedMachine',
+        'printStyle',
         'routingStatus',
         'downtimeLabel',
         'downtimeReasonRaw'
@@ -57701,9 +57825,9 @@ function _reportsProductionNOPMachineStandards_() {
   return [
     { key:'SM74', machine:'Heidelberg SM74', target:4125 },
     { key:'CD102', machine:'CD102', target:4125 },
-    { key:'LAM1', machine:'Lamination Roll-1', target:1500 },
-    { key:'LAM2', machine:'Lamination 02', target:1500 },
-    { key:'LAM3', machine:'Lamination 03', target:1500 },
+    { key:'LAM1', machine:'Lamination Roll-1', target:1100 },
+    { key:'LAM2', machine:'Lamination 02', target:1100 },
+    { key:'LAM3', machine:'Lamination 03', target:1100 },
     { key:'DIE1', machine:'Die Cutting 01', target:880 },
     { key:'DIE2', machine:'Die Cutting 02', target:880 },
     { key:'DIE3', machine:'Die Cutting 03', target:880 },
@@ -57724,14 +57848,25 @@ function _reportsProductionNOPMachineStandards_() {
     { key:'FOLDER', machine:'Folder Gluer', target:15000 },
     { key:'RS4', machine:'RS4 Printing', target:1500 },
     { key:'FLEXOPRINT', machine:'Markany Flexo E5', target:55 },
-    { key:'FLEXODIE', machine:'Flexo Die Cutting Offline', target:44 },
+    { key:'FLEXODIE', machine:'Flexo Die Cutting Offline', target:90 },
     { key:'FLEXOSLIT', machine:'Rhyguan', target:40 },
     { key:'DIGITAL', machine:'Canon Digital Printing', target:660 }
   ];
 }
 
 function _reportsProductionNOPIsFlexoMeterPerMinute_(machineKey) {
-  return ['FLEXOPRINT', 'FLEXODIE', 'FLEXOSLIT'].indexOf(String(machineKey || '').toUpperCase()) !== -1;
+  return ['FLEXOPRINT', 'FLEXOSLIT'].indexOf(String(machineKey || '').toUpperCase()) !== -1;
+}
+
+function _reportsProductionNOPIsPerMinute_(machineKey) {
+  const key = String(machineKey || '').toUpperCase();
+  return key === 'FLEXODIE' || _reportsProductionNOPIsFlexoMeterPerMinute_(key);
+}
+
+function _reportsProductionNOPTargetUnit_(machineKey) {
+  const key = String(machineKey || '').toUpperCase();
+  if (key === 'FLEXODIE') return 'impressions/min';
+  return _reportsProductionNOPIsFlexoMeterPerMinute_(key) ? 'meter/min' : 'qty/hour';
 }
 
 function _reportsProductionNOPDateLabel_(dateKey) {
@@ -57762,29 +57897,33 @@ function _reportsProductionNOPActualByMachine_(rows) {
         machine: row.machine || '',
         target: _reportsSafeNumber_(row.targetHourlyOutput),
         actualProduction: 0,
-        runningHours: 0
+        runningHours: 0,
+        conversionMissingEntries: 0
       };
     }
     totals[key].actualProduction += _reportsSafeNumber_(row.actualProduction);
     totals[key].runningHours += _reportsSafeNumber_(row.actualRunningHours);
+    totals[key].conversionMissingEntries += _reportsSafeNumber_(row.conversionMissingEntries);
     if (!totals[key].target && row.targetHourlyOutput) totals[key].target = _reportsSafeNumber_(row.targetHourlyOutput);
   });
 
   Object.keys(totals).forEach(function(key) {
     const row = totals[key];
     row.actual = row.runningHours > 0 ? row.actualProduction / row.runningHours : 0;
-    if (_reportsProductionNOPIsFlexoMeterPerMinute_(key)) row.actual = row.actual / 60;
+    if (_reportsProductionNOPIsPerMinute_(key)) row.actual = row.actual / 60;
+    if (row.conversionMissingEntries > 0) row.actual = null;
   });
   return totals;
 }
 
 function _reportsProductionNOPSummaryMetric_(target, actual) {
   const t = _reportsSafeNumber_(target);
+  const hasActual = actual !== null && typeof actual !== 'undefined' && actual !== '';
   const a = _reportsSafeNumber_(actual);
   return {
     target: Math.round(t * 100) / 100,
-    actual: a > 0 ? Math.round(a * 100) / 100 : '',
-    deviation: t > 0 ? Math.round(((a - t) / t) * 1000) / 10 : 0
+    actual: hasActual ? Math.round(a * 100) / 100 : '',
+    deviation: hasActual && t > 0 ? Math.round(((a - t) / t) * 1000) / 10 : ''
   };
 }
 
@@ -57802,6 +57941,7 @@ function _reportsProductionNOPSummaryRows_(onDateRows, weekRows, mtdRows, filter
     const mtd = _reportsProductionNOPSummaryMetric_(target, mtdMap[machine.key] && mtdMap[machine.key].actual);
     return {
       machine: machine.machine,
+      targetUnit: _reportsProductionNOPTargetUnit_(machine.key),
       onDateTarget: onDate.target,
       onDateActual: onDate.actual,
       onDateDeviationPct: onDate.deviation,
@@ -57823,6 +57963,7 @@ function _reportsProductionNOPSummaryRows_(onDateRows, weekRows, mtdRows, filter
     const mtd = _reportsProductionNOPSummaryMetric_(target, mtdMap[key] && mtdMap[key].actual);
     rows.push({
       machine: src.machine || key,
+      targetUnit: _reportsProductionNOPTargetUnit_(key),
       onDateTarget: onDate.target,
       onDateActual: onDate.actual,
       onDateDeviationPct: onDate.deviation,
@@ -57858,7 +57999,7 @@ function _reportsProductionNOPDetailRows_(rows, selectedDate, weekStartDate) {
       productionDate: row.productionDate,
       machine: row.machine,
       machineKey: row.machineKey,
-      targetUnit: _reportsProductionNOPIsFlexoMeterPerMinute_(machineKey) ? 'meter/min' : 'qty/hour',
+      targetUnit: _reportsProductionNOPTargetUnit_(machineKey),
       operatorNames: row.operatorNames,
       workingHours: _reportsRoundNumber_(row.workingHours, 2),
       downtimeHours: _reportsRoundNumber_(row.downtimeHours, 2),
@@ -57869,12 +58010,15 @@ function _reportsProductionNOPDetailRows_(rows, selectedDate, weekStartDate) {
       actualRunningHours: _reportsRoundNumber_(row.actualRunningHours, 2),
       targetHourlyOutput: _reportsRoundNumber_(row.targetHourlyOutput, 2),
       targetProduction: _reportsRoundNumber_(row.targetProduction, 2),
+      entryActualProduction: _reportsRoundNumber_(row.entryActualProduction, 2),
       actualProduction: _reportsRoundNumber_(row.actualProduction, 2),
       actualNop: _reportsRoundNumber_(row.actualNop, 2),
       nopDeviation: _reportsRoundNumber_(row.nopDeviation, 2),
       nopAchievementPct: _reportsRoundNumber_(row.nopAchievementPct, 2),
       performanceStatus: row.performanceStatus,
-      lastCompletionAt: row.lastCompletionAt
+      lastCompletionAt: row.lastCompletionAt,
+      conversionMissingEntries: _reportsRoundNumber_(row.conversionMissingEntries, 0),
+      twoSidedEntries: _reportsRoundNumber_(row.twoSidedEntries, 0)
     };
   }).sort(function(a, b) {
     return String(b.productionDate || '').localeCompare(String(a.productionDate || '')) ||
@@ -57912,15 +58056,25 @@ function _reportsProductionNOPEntryLineDetailRows_(rows, selectedDate, weekStart
       plannedMachine: row.plannedMachine,
       productionEntryMachine: row.productionEntryMachine,
       rawMachine: row.rawMachine,
+      printStyle: row.printStyle,
+      outputMultiplier: _reportsRoundNumber_(row.outputMultiplier, 0),
+      printStyleSource: row.printStyleSource,
       plannedQty: _reportsRoundNumber_(row.plannedQty, 2),
       completedQty: _reportsRoundNumber_(row.completedQty, 2),
       routingStatus: row.routingStatus,
       orderQty: _reportsRoundNumber_(row.orderQty, 2),
       orderUnit: row.orderUnit,
+      entryProducedQty: _reportsRoundNumber_(row.entryProducedQty, 2),
       producedQty: _reportsRoundNumber_(row.producedQty, 2),
       rejectedQty: _reportsRoundNumber_(row.rejectedQty, 2),
       okQty: _reportsRoundNumber_(row.okQty, 2),
       nopProductionQty: _reportsRoundNumber_(row.nopProductionQty, 2),
+      enteredRunningMeter: _reportsRoundNumber_(row.enteredRunningMeter, 2),
+      repeatMm: _reportsRoundNumber_(row.repeatMm, 3),
+      impressionsPerRunningMeter: _reportsRoundNumber_(row.impressionsPerRunningMeter, 6),
+      totalUps: _reportsRoundNumber_(row.totalUps, 2),
+      pcsPerRunningMeter: _reportsRoundNumber_(row.pcsPerRunningMeter, 6),
+      conversionStatus: row.conversionStatus,
       downtimeMinutes: _reportsRoundNumber_(row.downtimeMinutes, 2),
       downtimeHours: _reportsRoundNumber_(row.downtimeHours, 2),
       downtimeLabel: row.downtimeLabel,
@@ -57973,13 +58127,14 @@ function _reportsSectionProductionNOP_(token, params) {
         wrapClass: 'nopSummaryTableWrap',
         hideHeader: true,
         columnGroups: [
-          { label:'Machine', span:1 },
+          { label:'Machine', span:2 },
           { label:onDateLabel, span:3 },
           { label:weekLabel, span:3 },
           { label:mtdLabel, span:3 }
         ],
         columns: [
           { key:'machine', label:'Machine' },
+          { key:'targetUnit', label:'Target Unit' },
           { key:'onDateTarget', label:'Target', type:'nop' },
           { key:'onDateActual', label:'Actual', type:'nop' },
           { key:'onDateDeviationPct', label:'Deviation%', type:'deviationPct' },
@@ -57995,8 +58150,8 @@ function _reportsSectionProductionNOP_(token, params) {
       {
         key: 'nop-line-wise-details',
         title: 'Line Wise NOP Entry Details',
-        subtitle: 'Production-entry rows for the selected MTD window. NOP Qty is the quantity included in the machine/date production total used by the summary.',
-        minWidth: 4100,
+        subtitle: 'Production-entry rows for the selected MTD window. SM74 and CD102 NOP Qty is doubled for Front-Back, Work - Turn, and Work - Tumble jobs.',
+        minWidth: 5200,
         columns: [
           { key:'periodScope', label:'Scope' },
           { key:'productionDate', label:'Production Date', type:'date' },
@@ -58019,15 +58174,25 @@ function _reportsSectionProductionNOP_(token, params) {
           { key:'plannedMachine', label:'Planned Machine' },
           { key:'productionEntryMachine', label:'Entry Machine' },
           { key:'rawMachine', label:'Machine Input' },
+          { key:'printStyle', label:'Print Style' },
+          { key:'outputMultiplier', label:'Output Multiplier', type:'number' },
+          { key:'printStyleSource', label:'Print Style Source' },
           { key:'plannedQty', label:'Planned Qty', type:'number' },
           { key:'completedQty', label:'Completed Qty', type:'number' },
           { key:'routingStatus', label:'Routing Status', type:'status' },
           { key:'orderQty', label:'Order Qty', type:'number' },
           { key:'orderUnit', label:'Order Unit' },
+          { key:'entryProducedQty', label:'Entry Produced Qty', type:'number' },
           { key:'producedQty', label:'Produced Qty', type:'number' },
           { key:'rejectedQty', label:'Rejected Qty', type:'number' },
           { key:'okQty', label:'OK Qty', type:'number' },
           { key:'nopProductionQty', label:'NOP Qty', type:'number' },
+          { key:'enteredRunningMeter', label:'Entered RM', type:'number' },
+          { key:'repeatMm', label:'Repeat mm', type:'number' },
+          { key:'impressionsPerRunningMeter', label:'Impressions / RM', type:'number' },
+          { key:'totalUps', label:'Total UPS', type:'number' },
+          { key:'pcsPerRunningMeter', label:'PCS / RM', type:'number' },
+          { key:'conversionStatus', label:'Conversion Status', type:'status' },
           { key:'downtimeMinutes', label:'Downtime Min', type:'number' },
           { key:'downtimeHours', label:'Downtime Hrs', type:'number' },
           { key:'downtimeLabel', label:'Downtime Reason' },
@@ -58039,7 +58204,7 @@ function _reportsSectionProductionNOP_(token, params) {
       {
         key: 'nop-daily-calculation-details',
         title: 'Daily NOP Calculation Details',
-        subtitle: 'MTD daily machine rows used for the summary. Actual running hours = working hours - downtime hours - make-ready hours.',
+        subtitle: 'MTD daily machine rows used for the summary. Two-Sided Entries counts SM74/CD102 rows whose NOP output was multiplied by 2.',
         minWidth: 2950,
         columns: [
           { key:'periodScope', label:'Scope' },
@@ -58056,11 +58221,14 @@ function _reportsSectionProductionNOP_(token, params) {
           { key:'actualRunningHours', label:'Actual Running Hrs', type:'number' },
           { key:'targetHourlyOutput', label:'Target NOP', type:'number' },
           { key:'targetProduction', label:'Target Production', type:'number' },
+          { key:'entryActualProduction', label:'Entry Actual Production', type:'number' },
           { key:'actualProduction', label:'Actual Production', type:'number' },
           { key:'actualNop', label:'Actual NOP', type:'number' },
           { key:'nopDeviation', label:'NOP Deviation', type:'number' },
           { key:'nopAchievementPct', label:'Achievement %', type:'number' },
           { key:'performanceStatus', label:'Status', type:'status' },
+          { key:'conversionMissingEntries', label:'Missing Conversion Entries', type:'number' },
+          { key:'twoSidedEntries', label:'Two-Sided Entries', type:'number' },
           { key:'lastCompletionAt', label:'Last Completion', type:'datetime' }
         ],
         rows: detailRows
@@ -58964,13 +59132,15 @@ function _reportsGetSectionDataUncached_(section, params, token) {
 function reportsGetSectionData(section, params, token) {
   _reportsRequireSession_(token);
   const key = String(section || '').trim().toLowerCase();
-  const sectionCacheVersion = key === 'jobprofitability'
+  const sectionCacheVersion = key === 'productionnop'
+    ? 'V3'
+    : (key === 'jobprofitability'
     ? 'V3'
     : (key === 'otif'
-      ? 'V4'
+      ? 'V6'
       : (key === 'monthlyperformance'
         ? 'V1'
-        : (key === 'repeattooling' || key === 'planning' || key === 'traceability' ? 'V2' : 'V1')));
+        : (key === 'repeattooling' || key === 'planning' || key === 'traceability' ? 'V2' : 'V1'))));
   const cacheKey = _reportsCacheKey_('SECTION_' + key + '_' + sectionCacheVersion, { params: params || {} });
   const cached = _getCachedJson_(cacheKey);
   if (cached) return cached;
@@ -61054,7 +61224,7 @@ function _ppcLivePrintingStatuses_(rows) {
   return result;
 }
 
-function _ppcBuildJobStates_(pendingRows,eventByLine,actor) {
+function _ppcBuildJobStates_(pendingRows,eventByLine,actor,previous) {
   const rows=Array.isArray(pendingRows)?pendingRows:[];
   if(!rows.length)return [];
   const lineIds=rows.map(function(row){return row.so_line_id;}).filter(Boolean);
@@ -61064,7 +61234,7 @@ function _ppcBuildJobStates_(pendingRows,eventByLine,actor) {
   const ppc=_commitmentLoadPendingPpcContext_(rows);
   const today=_commitmentToday_();
 
-  return rows.map(function(row){
+  const states=rows.map(function(row){
     const lineId=String(row.so_line_id),control=controlByLine[lineId]||{},info=ppc.identifiersByLine[lineId]||{};
     const processes=(ppc.processRows||[]).filter(function(x){return String(x.soLineId||'')===lineId;})
       .sort(function(a,b){return Number(a.sequenceNo||0)-Number(b.sequenceNo||0);});
@@ -61170,9 +61340,15 @@ function _ppcBuildJobStates_(pendingRows,eventByLine,actor) {
     };
     return state;
   });
+  if(typeof _dispatchBuildPositions_==='function'){
+    const positions=_dispatchBuildPositions_(rows,controls,ppc,previous||{},states);
+    states.forEach(function(state){state.dispatch_position=positions[String(state.so_line_id)]||{};const stableDispatch=Object.assign({},state.dispatch_position);delete stableDispatch.evaluatedAt;state.state_hash=_cacheKeyHash_('PPCDISPATCH',state.state_hash+JSON.stringify(stableDispatch));});
+  }
+  return states;
 }
 
 function _ppcProcessPendingEvents_(options) {
+  if(typeof _dispatchFlushQueueChanges_==='function')_dispatchFlushQueueChanges_();
   const p=options||{},limit=Math.max(1,Math.min(250,Number(p.limit||100))),actor=String(p.actor||'SYSTEM AI PLANNER');
   const events=supabaseRpc_('ppc_claim_planning_events',{p_limit:limit,p_worker:actor})||[];
   if(!events.length)return {ok:true,eventCount:0,jobCount:0,changedCount:0};
@@ -61187,7 +61363,7 @@ function _ppcProcessPendingEvents_(options) {
     if(closedIds.length)supabaseDeleteMinimal_('ppc_job_state',{so_line_id:_supabaseInFilter_(closedIds)});
     const existing=(pendingRows||[]).length?_supabaseSelectByKeyInBatches_('ppc_job_state','*','so_line_id',Object.keys(openIds),null,30):[];
     const existingByLine={};(existing||[]).forEach(function(row){existingByLine[String(row.so_line_id)]=row;});
-    const states=_ppcBuildJobStates_(pendingRows,latestByLine,actor);
+    const states=_ppcBuildJobStates_(pendingRows,latestByLine,actor,existingByLine);
     const changed=states.filter(function(row){return !existingByLine[String(row.so_line_id)]||existingByLine[String(row.so_line_id)].state_hash!==row.state_hash;});
     if(states.length)supabaseUpsertMinimal_('ppc_job_state',states,{onConflict:'so_line_id'});
     if(changed.length)supabaseBulkInsertMinimal_('ppc_job_state_history',changed.map(function(row){const before=existingByLine[String(row.so_line_id)]||{};return{
@@ -61196,12 +61372,10 @@ function _ppcProcessPendingEvents_(options) {
       previous_state:before,current_state:row,changed_by:actor
     };}));
     supabaseRpc_('ppc_complete_planning_events',{p_event_ids:eventIds,p_success:true,p_error:null});
-    PropertiesService.getScriptProperties().setProperty('PPC_AUTOMATIC_LAST_RUN_AT',new Date().toISOString());
-    PropertiesService.getScriptProperties().deleteProperty('PPC_AUTOMATIC_LAST_ERROR');
+    if(typeof _dispatchScheduleRetries_==='function')_dispatchScheduleRetries_(states);
     return {ok:true,eventCount:events.length,jobCount:states.length,changedCount:changed.length,closedCount:closedIds.length};
   }catch(err){
     try{supabaseRpc_('ppc_complete_planning_events',{p_event_ids:eventIds,p_success:false,p_error:String(err&&err.message||err)});}catch(completeErr){}
-    PropertiesService.getScriptProperties().setProperty('PPC_AUTOMATIC_LAST_ERROR',String(err&&err.message||err).slice(0,1000));
     throw err;
   }
 }
@@ -61209,16 +61383,62 @@ function _ppcProcessPendingEvents_(options) {
 function _ppcAutomaticTriggers_(){return ScriptApp.getProjectTriggers().filter(function(t){return t.getHandlerFunction()==='ppcAutomaticPlanningScheduled_';});}
 
 function _ppcEnsureAutomaticTrigger_(){
-  if(_ppcAutomaticTriggers_().length)return true;
-  try{ScriptApp.newTrigger('ppcAutomaticPlanningScheduled_').timeBased().everyMinutes(1).create();return true;}
-  catch(err){Logger.log('Unable to install automatic PPC trigger: '+String(err&&err.message||err));return false;}
+  const props=PropertiesService.getScriptProperties();
+  if(props.getProperty('PPC_AUTOMATIC_ENABLED')==='FALSE')return false;
+  let triggers=_ppcAutomaticTriggers_();
+  if(triggers.length===1&&props.getProperty('PPC_AUTOMATIC_SCHEDULE_VERSION')==='FIVE_MINUTES_V1')return true;
+  const lock=LockService.getScriptLock();
+  if(!lock.tryLock(1000))return triggers.length>0;
+  try{
+    if(props.getProperty('PPC_AUTOMATIC_ENABLED')==='FALSE')return false;
+    triggers=_ppcAutomaticTriggers_();
+    if(triggers.length===1&&props.getProperty('PPC_AUTOMATIC_SCHEDULE_VERSION')==='FIVE_MINUTES_V1')return true;
+    // Create the replacement before deleting old one-minute/duplicate triggers.
+    ScriptApp.newTrigger('ppcAutomaticPlanningScheduled_').timeBased().everyMinutes(5).create();
+    triggers.forEach(function(trigger){ScriptApp.deleteTrigger(trigger);});
+    props.setProperty('PPC_AUTOMATIC_SCHEDULE_VERSION','FIVE_MINUTES_V1');
+    return true;
+  }catch(err){Logger.log('Unable to install five-minute PPC trigger: '+String(err&&err.message||err));return false;}
+  finally{lock.releaseLock();}
 }
 
 function ppcAutomaticPlanningScheduled_(){
-  const lock=LockService.getScriptLock();if(!lock.tryLock(1000))return {ok:true,skipped:true};
-  try{return _ppcProcessPendingEvents_({limit:150,actor:'SYSTEM AI PLANNER'});}
-  catch(err){Logger.log('Automatic PPC planning failed: '+String(err&&err.stack||err));throw err;}
-  finally{lock.releaseLock();}
+  _ppcEnsureAutomaticTrigger_();
+  return _ppcRunPlannerCycle_({limit:150,actor:'SYSTEM AI PLANNER'});
+}
+
+function _ppcRunPlannerCycle_(options){
+  const p=options||{},manual=p.manual===true,props=PropertiesService.getScriptProperties();
+  const lock=LockService.getScriptLock();
+  if(!lock.tryLock(1000))return {ok:true,skipped:true,reason:'WORKER_BUSY'};
+  try{
+    if(!manual&&props.getProperty('PPC_AUTOMATIC_ENABLED')==='FALSE')return {ok:true,skipped:true,reason:'PAUSED'};
+    const now=Date.now(),lastAttempt=Date.parse(props.getProperty('PPC_AUTOMATIC_LAST_ATTEMPT_AT')||'');
+    // Also rate-limit fallback requests from browser tabs loaded before upgrade.
+    if(!manual&&isFinite(lastAttempt)&&now-lastAttempt>=0&&now-lastAttempt<300000)return {ok:true,skipped:true,reason:'RECENT_CHECK'};
+    props.setProperty('PPC_AUTOMATIC_LAST_ATTEMPT_AT',new Date(now).toISOString());
+    const limit=Math.max(1,Math.min(150,Number(p.limit||150)||150));
+    let result=_ppcProcessPendingEvents_({limit:limit,actor:p.actor||'SYSTEM AI PLANNER'});
+    if(!result.eventCount){
+      const lastRecovery=Date.parse(props.getProperty('PPC_AUTOMATIC_LAST_RECOVERY_CHECK_AT')||'');
+      // Missing-state reconciliation is occasional; empty queues are normal.
+      if(manual||!isFinite(lastRecovery)||now-lastRecovery>=1800000){
+        const recovered=_ppcRecoverEmptyQueue_(Math.min(limit,50));
+        props.setProperty('PPC_AUTOMATIC_LAST_RECOVERY_CHECK_AT',new Date().toISOString());
+        if(recovered)result=_ppcProcessPendingEvents_({limit:limit,actor:p.actor||'PPC RECOVERY WORKER'});
+        result.recoveredCount=recovered;
+      }
+    }
+    const checkedAt=new Date().toISOString();
+    props.setProperty('PPC_AUTOMATIC_LAST_CHECKED_AT',checkedAt);
+    if(result.eventCount)props.setProperty('PPC_AUTOMATIC_LAST_RUN_AT',checkedAt);
+    props.deleteProperty('PPC_AUTOMATIC_LAST_ERROR');
+    return result;
+  }catch(err){
+    props.setProperty('PPC_AUTOMATIC_LAST_ERROR',String(err&&err.message||err).slice(0,1000));
+    Logger.log('PPC planning failed: '+String(err&&err.stack||err));
+    throw err;
+  }finally{lock.releaseLock();}
 }
 
 function _ppcQueueHealth_(){
@@ -61233,26 +61453,14 @@ function _ppcQueueHealth_(){
 
 function _ppcRecoverEmptyQueue_(limit){
   const size=Math.max(1,Math.min(50,Number(limit||20)));
-  const active=supabaseSelect_('ppc_planning_events',{select:'id',filters:{status:'in.(PENDING,PROCESSING)'},limit:1})||[];
-  if(active.length)return 0;
-  let candidates=supabaseSelect_('ppc_planning_events',{select:'so_line_id',filters:{status:'eq.FAILED'},order:'occurred_at.asc',limit:size})||[];
-  if(!candidates.length)candidates=supabaseSelect_('v_order_commitment_pending_export',{select:'so_line_id',order:'order_created_at.asc.nullslast,order_date.asc,so_number.asc,line_no.asc',limit:size})||[];
-  const lineIds=[...new Set(candidates.map(function(row){return row.so_line_id;}).filter(Boolean))];
-  if(!lineIds.length)return 0;
-  supabaseBulkInsertMinimal_('ppc_planning_events',lineIds.map(function(id){return{so_line_id:id,event_type:'RECOVERY_RETRY',source_table:'PPC_LIVE_SHEET',source_id:String(id),payload:{reason:'Automatic queue recovery'}};}));
-  supabaseUpdateMinimal_('ppc_planning_events',{status:'eq.FAILED',so_line_id:_supabaseInFilter_(lineIds)},
-    {status:'COMPLETED',processed_at:new Date().toISOString(),error_message:null});
-  return lineIds.length;
+  // The database anti-join skips healthy state, future retries, active leases,
+  // and terminal failures atomically. Never reset a failed event's retry count.
+  return Number(supabaseRpc_('ppc_recover_missing_job_events',{p_limit:size})||0);
 }
 
 function ppcAdminRunPendingPlanner(options,token){
-  const admin=_commitmentRequireAdmin_(token),p=options||{},lock=LockService.getScriptLock();
-  if(!lock.tryLock(1000))return {ok:true,skipped:true,reason:'WORKER_BUSY'};
-  try{
-    let result=_ppcProcessPendingEvents_({limit:Math.max(1,Math.min(25,Number(p.limit||15))),actor:_commitmentActor_(admin)||'PPC LIVE FALLBACK'});
-    if(!result.eventCount){const recovered=_ppcRecoverEmptyQueue_(Math.max(1,Math.min(25,Number(p.limit||15))));if(recovered)result=_ppcProcessPendingEvents_({limit:recovered,actor:'PPC RECOVERY WORKER'});result.recoveredCount=recovered;}
-    result.queue=_ppcQueueHealth_();return result;
-  }finally{lock.releaseLock();}
+  const admin=_commitmentRequireAdmin_(token),p=options||{};
+  return _ppcRunPlannerCycle_({limit:p.limit,manual:p.manual===true,actor:_commitmentActor_(admin)||'PPC MANUAL REFRESH'});
 }
 
 function ppcAdminGetLiveSheet(params,token){
@@ -61268,7 +61476,7 @@ function ppcAdminGetLiveSheet(params,token){
       return String(a.order_booking_at||'9999-12-31T23:59:59Z').localeCompare(String(b.order_booking_at||'9999-12-31T23:59:59Z'))||
         String(a.so_number||'').localeCompare(String(b.so_number||''))||Number(a.line_no||0)-Number(b.line_no||0);
     });
-    const printingByLine=_ppcLivePrintingStatuses_(visible);
+    const printingByLine=p.cachedDispatchOnly===true?{}:_ppcLivePrintingStatuses_(visible);
     const props=PropertiesService.getScriptProperties(),queue=_ppcQueueHealth_();
     return {ok:true,rows:visible.map(function(row){return{
       soLineId:row.so_line_id,planId:row.plan_id||'',soNumber:row.so_number,lineNo:Number(row.line_no||0),division:row.division||'',clientName:row.client_name||'',salesPerson:row.sales_person||'',
@@ -61282,7 +61490,7 @@ function ppcAdminGetLiveSheet(params,token){
       varianceDays:Number(row.variance_days||0),riskSeverity:row.risk_severity||'NONE',riskCode:row.risk_code||'',confidence:row.confidence||'LOW',
       advice:row.ai_advice||'',recommendedAction:row.recommended_action||'',actionOwner:row.action_owner||'',priority:row.planner_priority||'',remark:row.planner_remark||'',
       materialAvailable:row.manual_rm_available===true,manualRmAvailableDate:row.manual_rm_available_date||'',otherConstraint:row.other_constraint||'',manualOtherDate:row.other_available_date||'',
-      includeInDeliveryPlan:row.include_in_delivery_plan===true,dispatchPlanDate:row.dispatch_plan_date||'',
+      dispatchPosition:row.dispatch_position||{},includeInDeliveryPlan:row.include_in_delivery_plan===true,dispatchPlanDate:row.dispatch_plan_date||'',
       deliveryPlanSequence:Number(row.delivery_plan_sequence||0),deliveryPlanRemarks:row.delivery_plan_remarks||'',
       unbilledDispatchQty:Math.max(0,Number(row.dispatched_qty||0)-Number(row.billed_qty||0)),
       lastEventType:row.last_event_type||'',lastEventAt:row.last_event_at||'',evaluatedAt:row.evaluated_at||''};}),
@@ -61291,10 +61499,11 @@ function ppcAdminGetLiveSheet(params,token){
         rmAttention:all.filter(function(row){return row.manual_rm_available!==true&&(Number(row.rm_shortage_qty||0)>0||row.rm_status==='SHORT_DATE_REQUIRED');}).length,
         atRisk:all.filter(function(row){return ['HIGH','CRITICAL'].indexOf(row.risk_severity)!==-1;}).length,
         dueToday:all.filter(function(row){return (row.committed_delivery||row.requested_delivery)===_commitmentToday_();}).length},
-      automatic:{enabled:triggerEnabled,fallbackEnabled:true,lastRunAt:props.getProperty('PPC_AUTOMATIC_LAST_RUN_AT')||'',
+      automatic:{enabled:triggerEnabled,fallbackEnabled:false,intervalMinutes:5,lastRunAt:props.getProperty('PPC_AUTOMATIC_LAST_RUN_AT')||'',
+        lastCheckedAt:props.getProperty('PPC_AUTOMATIC_LAST_CHECKED_AT')||'',
         lastError:props.getProperty('PPC_AUTOMATIC_LAST_ERROR')||queue.sampleError||'',pendingCount:queue.pending,
         processingCount:queue.processing,failedCount:queue.failed,queueCapped:queue.capped,
-        needsWork:queue.pending>0||queue.processing>0||queue.failed>0||all.length===0}};
+        needsWork:queue.pending>0}};
   }catch(err){if(_ppcSchemaMissing_(err))throw new Error('Automatic PPC planning is not installed. Apply supabase/ppc_event_driven_planning_20260826.sql.');throw err;}
 }
 
@@ -62900,26 +63109,75 @@ function _printingCoatingApplicable_(value) {
 }
 
 function _printingLaminationTypeFromSnapshot_(snapshot) {
-  let snap=snapshot||{};
-  if(typeof snap==='string'){try{snap=JSON.parse(snap);}catch(ignore){snap={};}}
-  const routes=Array.isArray(snap.routing)?snap.routing:(Array.isArray(snap.routes)?snap.routes:[]),types=[];
-  routes.forEach(function(route){
-    const process=String(route&&(
-      route.dept||route.department||route.operation||route.process_name||route.processName
-    )||'').trim().toUpperCase();
-    if(process.indexOf('LAMIN')===-1)return;
-    const type=String(route.material||route.inputMaterial||route.input_material||route.laminationType||route.lamination_type||route.out||'').trim();
-    if(type&&types.indexOf(type)===-1)types.push(type);
-  });
-  return types.join(', ');
+  return _printingLaminationDetailsFromSnapshot_(snapshot).type;
 }
 
-function _printingHydrateLaminationTypes_(rows) {
-  const input=rows||[],woIds=[...new Set(input.filter(function(row){return !String(row.lamination_type||'').trim()&&!_printingCoatingApplicable_(row.coating);}).map(function(row){return row.wo_id;}).filter(Boolean))];
-  if(!woIds.length)return input;
-  const workOrders=_supabaseSelectByKeyInBatches_('work_orders','id,snapshot_json','id',woIds,null,40)||[],byId={};
-  workOrders.forEach(function(row){byId[row.id]=_printingLaminationTypeFromSnapshot_(row.snapshot_json);});
-  input.forEach(function(row){if(!String(row.lamination_type||'').trim()&&byId[row.wo_id])row.lamination_type=byId[row.wo_id];});
+function _printingLaminationDetailsFromSnapshot_(snapshot) {
+  let snap=snapshot||{};
+  if(typeof snap==='string'){try{snap=JSON.parse(snap);}catch(ignore){snap={};}}
+  if(!snap||typeof snap!=='object'||Array.isArray(snap))snap={};
+  const routes=Array.isArray(snap.routing)?snap.routing:(Array.isArray(snap.routes)?snap.routes:[]),details=snap.jobDetails||snap.job_details||{},types=[],finishes=[];let hasLamination=false;
+  function clean(value){const text=String(value==null?'':value).trim();return /^(NONE|NO|NO LAMINATION|NOT APPLICABLE|N\/A|NA|NULL|UNDEFINED)$/i.test(text)?'':text;}
+  function first(values){return values.map(clean).find(Boolean)||'';}
+  routes.forEach(function(route){
+    if(!route||typeof route!=='object')return;
+    const process=[route.dept,route.department,route.operation,route.operationName,route.process_name,route.processName].filter(Boolean).join(' ').toUpperCase();
+    if(process.indexOf('LAMIN')===-1||process.indexOf('FLUTE')>=0)return;
+    hasLamination=true;
+    const type=first([route.material,route.inputMaterial,route.input_material,route.laminationType,route.lamination_type,route.out]),finish=first([route.laminationFinish,route.lamination_finish,route.finish]);
+    if(type&&types.indexOf(type)===-1)types.push(type);
+    if(finish&&finishes.indexOf(finish)===-1)finishes.push(finish);
+  });
+  if(hasLamination||!routes.length){
+    if(!types.length){const type=first([details.laminationType,details.lamination_type]);if(type)types.push(type);}
+    if(!finishes.length){const finish=first([details.laminationFinish,details.lamination_finish]);if(finish)finishes.push(finish);}
+  }
+  return {type:types.join(', '),finish:finishes.join(', ')};
+}
+
+function _printingPaperProcessContextFromSnapshot_(snapshot) {
+  let snap=snapshot||{};
+  if(typeof snap==='string'){try{snap=JSON.parse(snap);}catch(ignore){snap={};}}
+  if(!snap||typeof snap!=='object'||Array.isArray(snap))snap={};
+  const details=snap.jobDetails||snap.job_details||{};
+  return {
+    papers:Array.isArray(snap.papers)?snap.papers:[],
+    lamination:_printingLaminationDetailsFromSnapshot_(snap),
+    coating:String(details.coating||details.coatingType||details.coating_type||'').trim()
+  };
+}
+
+function _printingPaperProcessDetails_(context,row) {
+  const source=context||{papers:[],lamination:{type:'',finish:''},coating:''};
+  const lineId=String(row&& (row.paper_line_id||row.paperLineId) ||'').trim();
+  const paperIndex=Math.max(0,Number(row&& (row.paper_index||row.paperIndex) ||0)-1);
+  const paper=(source.papers||[]).find(function(item){return lineId&&String(item&& (item.paperLineId||item.paper_line_id) ||'').trim()===lineId;})||source.papers[paperIndex]||null;
+  const explicit=!!(paper&&Object.prototype.hasOwnProperty.call(paper,'finishingProcess'))||!!(paper&&Object.prototype.hasOwnProperty.call(paper,'finishing_process'));
+  if(!explicit)return{explicit:false,type:source.lamination&&source.lamination.type||'',finish:source.lamination&&source.lamination.finish||'',coating:source.coating||''};
+  const process=String(paper.finishingProcess||paper.finishing_process||'').trim();
+  const usesLamination=/LAMINATION/i.test(process),usesCoating=/COATING/i.test(process);
+  return{
+    explicit:true,
+    type:usesLamination?String(paper.laminationType||paper.lamination_type||'').trim():'',
+    finish:usesLamination?String(paper.laminationFinish||paper.lamination_finish||'').trim():'',
+    coating:usesCoating?String(paper.coatingType||paper.coating_type||paper.coating||'').trim():''
+  };
+}
+
+function _printingHydrateLaminationTypes_(rows,cache) {
+  const input=rows||[],byId=cache||{},woIds=[...new Set(input.map(function(row){return row.wo_id||row.woId;}).filter(function(id){return id&&!Object.prototype.hasOwnProperty.call(byId,id);}))];
+  if(woIds.length){
+    const workOrders=_supabaseSelectByKeyInBatches_('work_orders','id,snapshot_json','id',woIds,null,40)||[];
+    woIds.forEach(function(id){byId[id]=null;});
+    workOrders.forEach(function(row){byId[row.id]=_printingPaperProcessContextFromSnapshot_(row.snapshot_json);});
+  }
+  input.forEach(function(row){const context=byId[row.wo_id||row.woId];if(!context)return;const details=_printingPaperProcessDetails_(context,row);
+    row.lamination_type=details.type;row.lamination_finish=details.finish;
+    if(details.explicit)row.coating=details.coating||'None';
+    if(row.woId){row.laminationType=details.type;row.laminationFinish=details.finish;
+      if(!details.explicit&&(!_printingCoatingApplicable_(row.coating)||/^Lamination\s*:/i.test(row.coating))){row.coating=details.type||details.finish?'Lamination: '+(details.type||details.finish):'None';}
+    }
+  });
   return input;
 }
 
@@ -63104,7 +63362,7 @@ function _printingBoardRow_(row, availability) {
     printingSheetSize:sheetShortMm>0&&sheetLongMm>0?((sheetShortMm/25.4).toFixed(2)+' x '+(sheetLongMm/25.4).toFixed(2)+' in'):'',
     orderQty:Number(row.order_qty||0),combinedUps:Number(row.combined_ups||0),printStyle:style,passCount:passCount,newOldType:row.new_old_type||'',plateStatus:row.plate_status||'',plateQty:Number(row.plate_qty||0),
     frontColors:Number(row.front_colors||0),backColors:Number(row.back_colors||0),
-    coating:finishingProcess==='None'?'None':(finishingProcess+': '+finishingType),coatingType:coating||'None',laminationType:laminationType,
+    coating:finishingProcess==='None'?'None':(finishingProcess+': '+finishingType),coatingType:coating||'None',laminationType:laminationType,laminationFinish:String(row.lamination_finish||'').trim(),
     finishingProcess:finishingProcess,finishingType:finishingType,
     coreSheets:coreSheets,wastageSheets:Number(row.wastage_sheets||0),totalPlanSheets:Number(row.total_plan_sheets||0),
     requiredPrintingSheets:requiredPrintingSheets,printedGrossSheets:printedGrossSheets,
@@ -63167,7 +63425,7 @@ function _printingLoadLegacyOpenRowsByRoutingIds_(routingIds) {
 function printingAdminGetBoard(params, token) {
   _commitmentRequireAdmin_(token); const p = params || {};
   try {
-    let raw,hydrateLaminationFallback=false,componentMode=false;
+    let raw,hydrateLaminationFallback=false,componentMode=false;const laminationCache={};
     try{
       const componentRows=_supabaseSelectAll_('v_printing_plan_component_jobs',{select:'*',order:'required_date.asc.nullslast,wo_date.asc,wo_number.asc,paper_index.asc'},1000,20000)||[];
       const legacyRows=_printingLoadLegacyOpenRows_(),legacyRouteIds=[...new Set(legacyRows.map(function(row){return row.routing_id;}).filter(Boolean))],coveredRoutes={};
@@ -63180,8 +63438,8 @@ function printingAdminGetBoard(params, token) {
       raw=_printingLoadLegacyOpenRows_();hydrateLaminationFallback=true;
     }
     if(componentMode)raw=_printingHydrateEffectiveRoutingMachines_(raw);
-    if(hydrateLaminationFallback)raw=_printingHydrateLaminationTypes_(raw);
-    else _printingHydrateLaminationTypes_(raw.filter(function(row){return !!row.printing_run_id;}));
+    if(hydrateLaminationFallback)raw=_printingHydrateLaminationTypes_(raw,laminationCache);
+    else _printingHydrateLaminationTypes_(raw.filter(function(row){return !!row.printing_run_id;}),laminationCache);
     const availability = _printingItemAvailability_(raw);
     const q = String(p.q || '').trim().toLowerCase(), machine = String(p.machine || '').trim().toLowerCase();
     const status = String(p.status || '').trim().toUpperCase();
@@ -63206,6 +63464,7 @@ function printingAdminGetBoard(params, token) {
       readiness:carriedForward?'CARRIED_FORWARD':(printingClosed?'COMPLETED':(source.readiness||snapshot.readiness||'READY')),blockers:printingClosed||carriedForward?[]:(source.blockers||snapshot.blockers||[]),printingCompletionStatus:carriedForward?'CARRIED_FORWARD':(printingClosed?'COMPLETED':(source.printingCompletionStatus||'OPEN'))
     });});
     // Refresh saved/closed rows too: legacy job-type snapshots are never plate evidence.
+    _printingHydrateLaminationTypes_(selected,laminationCache);
     _printingHydratePlateStatuses_(allCandidates.concat(selected));
     const machines=[...new Set(raw.map(function(row){return row.routing_machine||'';}).concat(_reportsMachineLoadStandards_().filter(function(x){return ['SM74','CD102','RS4','DIGITAL'].indexOf(x.key)!==-1;}).map(function(x){return x.machine;})).filter(Boolean))].sort();
     return {ok:true,componentMode:componentMode,rows:rows,candidates:rows,selected:selected,plans:plans.map(function(x){return{id:x.id,revision:x.updated_at||'',planNo:x.plan_no,planDate:x.plan_date,machine:x.machine_name,shift:x.shift_name,
@@ -63984,13 +64243,13 @@ function _corrCandidateKey_(routingId,processType,setGroupKey) {
   return [String(routingId||''),String(processType||''),String(setGroupKey||'')].join('||');
 }
 
-function _corrClosureMap_(routingIds) {
+function _corrClosureMap_(routingIds, options) {
   const ids=[...new Set((routingIds||[]).filter(Boolean))];if(!ids.length)return{};
   try{
     const rows=_supabaseSelectByKeyInBatches_('corrugation_group_closures','*','routing_id',ids,null,40)||[],map={};
     rows.forEach(function(row){map[_corrCandidateKey_(row.routing_id,row.process_type,row.set_group_key)]=row;});
     return map;
-  }catch(err){return{};}
+  }catch(err){if(options && options.strict === true)throw err;return{};}
 }
 
 function _corrOperationalCandidates_(candidateKeys) {
