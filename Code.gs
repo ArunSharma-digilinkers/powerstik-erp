@@ -933,6 +933,7 @@ const DEFAULT_MASTERS = {
 
 const PAGE_MODULE_MAP = {
   'jobwork':'WOW',
+  'jobworkplanning':'MASTERADMIN',
   'historicalorder':'MASTERADMIN',
   'order':'SALES_ORDER_ENTRY',
   'salesorderapproval':'SALES_ORDER_APPROVAL',
@@ -1043,6 +1044,7 @@ function getUnifiedMasters() {
   } catch (e) {
     Logger.log('Client master load failed: ' + e.message);
     merged.clients = [];
+    merged.clientLoadError = String(e.message || e);
   }
 
   return merged;
@@ -1132,29 +1134,7 @@ function _applyCommonMastersToUnified_(masters) {
 function getMasters() {
   const masters = getUnifiedMasters();
   masters.orderPrefixes = Array.from(new Set([].concat(masters.orderPrefixes || [], ['JW'])));
-
-  try {
-    const clients = supabaseSelect_('clients', {
-      filters: { active: 'eq.true' },
-      order: 'client_name.asc'
-    }) || [];
-
-    masters.clients = clients.map(c => ({
-      code: c.client_code,
-      name: c.client_name,
-      state: c.state || '',
-      gstin: c.gstin || '',
-      creditDays: c.credit_days || 0,
-      category: c.category || '',
-      panNo: c.pan_no || '',
-      paymentTerms: c.payment_terms || '',
-      billToAddress: _clientComposeAddress_(c.bill_to_address, c.bill_to_city, c.bill_to_state, c.bill_to_pincode),
-      shipToAddress: _clientComposeAddress_(c.ship_to_address, c.ship_to_city, c.ship_to_state, c.ship_to_pincode)
-    }));
-  } catch(e){
-    Logger.log('Clients load failed: ' + e.message);
-    masters.clients = [];
-  }
+  if (masters.clientLoadError) throw new Error('Could not load the complete client list. Please retry. ' + masters.clientLoadError);
 
   try {
     const items = _supabaseSelectAll_('items', {
@@ -1485,10 +1465,9 @@ function getFlexoArtworkApprovalData(soNo, lineNo, artworkNo) {
 
 function getClients() {
   try {
-    const rows = _clientSelectRows_({
+    const rows = _clientSelectAllRows_({
       filters: { active: 'eq.true' }, // ✅ FIX
-      order: 'client_name.asc',
-      limit: 1000
+      order: 'client_name.asc,id.asc'
     });
 
     if (!rows || !rows.length) return [];
@@ -1511,7 +1490,7 @@ function getClients() {
 
   } catch (e) {
     Logger.log('[getClients] Supabase load failed: ' + e.message);
-    return [];
+    throw e;
   }
 }
 
@@ -1543,7 +1522,7 @@ function _clientNormalizeRow_(row) {
     gstin: row.gstin || '',
     credit_days: Number(row.credit_days || 0),
     category: row.category || '',
-    active: row.active !== false,
+    active: row.active === true,
     pan_no: row.pan_no || '',
     payment_terms: row.payment_terms || '',
     bill_to_address: billToAddress,
@@ -1597,6 +1576,29 @@ function _clientSelectRows_(opts) {
       })) || []).map(_clientNormalizeRow_);
     }
   }
+}
+
+function _clientReadAllPages_(readPage, options) {
+  const query = Object.assign({}, options || {});
+  query.order = query.order || 'client_name.asc,id.asc';
+  delete query.limit;
+  delete query.offset;
+  const result = [];
+  let previousPage = '';
+  while (true) {
+    const page = readPage(Object.assign({}, query, {limit:500,offset:result.length})) || [];
+    if (!Array.isArray(page)) throw new Error('Invalid client list response');
+    if (!page.length) return result;
+    const signature = JSON.stringify(page.map(function(row) { return row.id; }));
+    if (signature === previousPage) throw new Error('Client pagination did not advance; retry loading the list');
+    previousPage = signature;
+    result.push.apply(result, page);
+    // Keep fetching until empty, even if Supabase caps a page below 500 rows.
+  }
+}
+
+function _clientSelectAllRows_(options) {
+  return _clientReadAllPages_(_clientSelectRows_, options);
 }
 
 function _clientNormalizePayload_(payload, existing) {
@@ -1720,7 +1722,7 @@ function _mastersClientPayloadFromView_(row) {
     creditDays: Number(src.credit_days || 0),
     category: src.category || '',
     paymentTerms: src.payment_terms || '',
-    active: src.active !== false,
+    active: src.active === true,
     billToCount: billToCount,
     shipToCount: shipToCount,
     parties: previewParties,
@@ -1729,10 +1731,9 @@ function _mastersClientPayloadFromView_(row) {
 }
 
 function _mastersGetBootstrapFromView_() {
-  const rows = supabaseSelect_('v_client_master_register', {
-    order: 'client_name.asc',
-    limit: 3000
-  }) || [];
+  const rows = _clientReadAllPages_(function(query) {
+    return supabaseSelect_('v_client_master_register', query);
+  }, {order:'client_name.asc,id.asc'});
   return rows.map(_mastersClientPayloadFromView_);
 }
 
@@ -1887,15 +1888,16 @@ function _clientNormalizePartyPayloadRows_(clientRecord, payload) {
   return normalized;
 }
 
-function mastersGetBootstrap(token) {
+function mastersGetBootstrap(token, forceRefresh) {
   const user = _requireModuleAccess_(token, 'MASTERS', 'can_view');
   const canManageVendors = _mastersCanManageVendors_(user);
   const cacheKey = _cacheKeyHash_(
-    'MASTERS_BOOTSTRAP',
+    'MASTERS_BOOTSTRAP_COMPLETE_V3',
     _mastersCacheVersion_() + '|' + (canManageVendors ? 'WITH_VENDORS' : 'CLIENTS_ONLY')
   );
-  const cached = _getCachedJson_(cacheKey);
+  const cached = forceRefresh === true ? null : _getCachedJson_(cacheKey);
   if (cached) return cached;
+  const vendorCategories = _applyCommonMastersToUnified_(_mergeMasters_(DEFAULT_MASTERS, _readMasterOverrides_())).vendorCategories || [];
   try {
     const resultFromView = {
       ok: true,
@@ -1903,7 +1905,7 @@ function mastersGetBootstrap(token) {
       clients: _mastersGetBootstrapFromView_(),
       canManageVendors: canManageVendors,
       vendors: canManageVendors ? _purchaseListVendors_() : [],
-      vendorCategories: (getUnifiedMasters().vendorCategories || [])
+      vendorCategories: vendorCategories
     };
     _putCachedJson_(cacheKey, resultFromView, 180);
     return resultFromView;
@@ -1911,9 +1913,8 @@ function mastersGetBootstrap(token) {
     Logger.log('mastersGetBootstrap view fallback: ' + ((viewErr && viewErr.message) || viewErr));
   }
 
-  const clients = _clientSelectRows_({
-    order: 'client_name.asc',
-    limit: 2000
+  const clients = _clientSelectAllRows_({
+    order: 'client_name.asc,id.asc'
   }) || [];
   const clientIds = clients.map(function(row){ return row.id; }).filter(Boolean);
   const partyMap = {};
@@ -1933,7 +1934,7 @@ function mastersGetBootstrap(token) {
     source: 'fallback',
     canManageVendors: canManageVendors,
     vendors: canManageVendors ? _purchaseListVendors_() : [],
-    vendorCategories: (getUnifiedMasters().vendorCategories || []),
+    vendorCategories: vendorCategories,
     clients: clients.map(function(row) {
       const parties = partyMap[String(row.id || '')] || [];
       return _mastersClientPayloadFromRows_(row, parties);
@@ -5375,12 +5376,13 @@ function _purchaseGetItemRateContextMap_(itemCodes, effectiveDate, options) {
     const code = String(row.item_code || '').trim().toUpperCase();
     if (!code) return;
     const uom = uomByCode[code] || {};
-    const purchaseUom = row.purchase_uom || uom.purchase_uom || row.stock_uom || '';
+    const purchaseUom = String(uom.purchase_uom || row.purchase_uom || row.stock_uom || '').trim().toUpperCase();
     const rateKey = _purchaseNormalizeRateKey_(row.rate_key || row.rm_type || '');
     const datedMaster = targetDate
       ? datedMasterByKey[rateKey.toUpperCase() + '|' + String(purchaseUom || '').trim().toUpperCase()]
       : null;
-    const effectiveRow = targetDate
+    const matchingSetupUnit = String(row.purchase_uom || row.stock_uom || '').trim().toUpperCase() === purchaseUom;
+    const effectiveRow = targetDate || !matchingSetupUnit
       ? Object.assign({}, row, datedMaster ? {
           rate_master_id: datedMaster.id || '',
           rate_name: datedMaster.rate_name || rateKey,
@@ -5410,7 +5412,7 @@ function _purchaseGetItemRateContextMap_(itemCodes, effectiveDate, options) {
       ? uom.rule_active !== false
       : mapped.conversionRuleActive !== false;
     const conversionSource = Object.assign({}, row, uom, {
-      stock_uom: row.stock_uom || uom.stock_uom || '',
+      stock_uom: uom.stock_uom || row.stock_uom || '',
       purchase_uom: purchaseUom,
       conversion_type: conversionType,
       rule_active: directRuleActive,
@@ -5433,7 +5435,7 @@ function _purchaseGetItemRateContextMap_(itemCodes, effectiveDate, options) {
       conversionFactor: conversionFactor,
       conversionSetupStatus: conversionSetupStatus,
       conversionRuleActive: directRuleActive,
-      stockUom: row.stock_uom || uom.stock_uom || '',
+      stockUom: uom.stock_uom || row.stock_uom || '',
       purchaseUom: purchaseUom,
       rateLocked: false,
       masterReady: mapped.setupStatus === 'READY' &&
@@ -5457,17 +5459,18 @@ function _purchaseGetItemRateContextMap_(itemCodes, effectiveDate, options) {
     const history = histories.latestByRequest[_invGRNRateRequestKey_(ctx)];
     ctx.previousPurchase = history && history.hasHistory ? history : null;
     const standingRate = Number(history && history.standingRate || 0);
+    const currentMasterRate = Number(history && history.currentMasterRate || 0);
     ctx.standingApproval = standingRate > 0 ? {
       rate: standingRate, scope: history.standingRateScope, key: history.standingRateKey,
       approvedBy: history.standingRateApprovedBy, approvedAt: history.standingRateApprovedAt
     } : null;
-    if (!ctx.previousPurchase && !(standingRate > 0)) return;
+    if (!ctx.previousPurchase && !(standingRate > 0) && !(currentMasterRate > 0)) return;
     const controlled = _purchaseNormalizeRatePolicy_(ctx.controlPolicy) === 'RATE_CONTROLLED';
     // Missing master/conversion setup must still block controlled items.
     if (controlled && !ctx.masterReady) return;
     const historyRate = ctx.previousPurchase ? Number(history.rate) : 0;
     const normalCeiling = controlled ? (historyRate > 0 ? Math.min(Number(ctx.rate), historyRate) : Number(ctx.rate)) : historyRate;
-    ctx.rate = Math.max(normalCeiling, standingRate);
+    ctx.rate = Math.max(normalCeiling, standingRate, currentMasterRate);
     ctx.controlPolicy = 'RATE_CONTROLLED';
     ctx.masterReady = ctx.conversionSetupStatus === 'COMPLETE' && ctx.conversionRuleActive !== false;
     ctx.setupStatus = ctx.masterReady ? 'READY' : 'INCOMPLETE_CONVERSION';
@@ -5848,7 +5851,7 @@ function purchaseListInventoryRequestsJSON(opts = {}) {
   const requestLimit = Math.max(targetPrNos.length || 0, Math.max(1, Number(opts.limit || defaultLimit) || defaultLimit));
   const cacheKey = _cacheKeyHash_('PURCHASE_REQUESTS_OPEN', JSON.stringify({
     v: purchaseCacheVersion,
-    logic: 'supabase-pr-read-model-v9-standing-rate',
+    logic: 'supabase-pr-read-model-v10-purchase-unit',
     status: String(opts.status || ''),
     pendingOnly: opts.pendingOnly === true ? 1 : 0,
     fromDate: String(opts.fromDate || ''),
@@ -8399,7 +8402,7 @@ function purchaseBootstrapJSON(opts = {}) {
     }, opts.include || {})
   };
   const cacheKey = _cacheKeyHash_('PURCHASE_BOOTSTRAP', JSON.stringify({
-    logic: 'standing-po-rate-v1',
+    logic: 'purchase-unit-rate-v1',
     v: version,
     commonMastersVersion: commonMastersVersion,
     filters: normalized
@@ -8745,8 +8748,14 @@ function _excludeManualBillingSalesOrdersByNumber_(rows, soKey) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return list;
   return list.filter(function(row) {
-    const no = String(row && row[soKey || 'so_number'] || '').toUpperCase();
-    return !_isManualBillingSalesOrderRow_(row, soKey) && String(row.order_prefix || '').toUpperCase() !== 'JW' && !/^JW(?:[\/-]|\d)/.test(no);
+    return !_isManualBillingSalesOrderRow_(row, soKey);
+  });
+}
+
+function _excludeJobWorkManufacturingOrders_(rows, soKey) {
+  return _excludeManualBillingSalesOrdersByNumber_(rows,soKey).filter(function(row) {
+    const no=String(row && row[soKey || 'so_number'] || '').toUpperCase();
+    return String(row.order_prefix || '').toUpperCase() !== 'JW' && !/^JW(?:[\/-]|\d)/.test(no);
   });
 }
 
@@ -9648,6 +9657,7 @@ function _listSOWithStatusFromTables_(request) {
   const processed = [];
   approvalRows.forEach(function(base) {
     const soNumber = String(base.so_number || '').trim();
+    if (!_excludeJobWorkManufacturingOrders_([base],'so_number').length) return;
     const lineNo = String(base.line_no || '');
     const queueKey = soNumber + '||' + lineNo;
     const so = salesOrderMap[soNumber] || {};
@@ -9768,8 +9778,8 @@ function _listSOWithStatusFromRpc_(req) {
 
   const pending = [];
   const processed = [];
-  const pendingRows = _excludeManualBillingSalesOrdersByNumber_(payload.pending || [], 'so_number');
-  const processedRows = _excludeManualBillingSalesOrdersByNumber_(payload.processed || [], 'so_number');
+  const pendingRows = _excludeJobWorkManufacturingOrders_(payload.pending || [], 'so_number');
+  const processedRows = _excludeJobWorkManufacturingOrders_(payload.processed || [], 'so_number');
 
   pendingRows.forEach(function(r) {
     const row = _mapWOCandidateViewRow_(r);
@@ -9808,7 +9818,7 @@ function _listSOWithStatusFast_(request) {
     filters: _workOrderQueueDateFilters_(req.dateFrom, req.dateTo),
     order: 'so_date.desc,so_number.desc,line_no.asc'
   }) || [];
-  const rows = _excludeManualBillingSalesOrdersByNumber_(rawRows, 'so_number');
+  const rows = _excludeJobWorkManufacturingOrders_(rawRows, 'so_number');
   const pending = [];
   const processed = [];
 
@@ -9874,7 +9884,7 @@ function _listSOWithStatusFromCandidateView_(limit = 200, offset = 0) {
     limit: pageLimit,
     offset: pageOffset
   }) || [];
-  const rows = _excludeManualBillingSalesOrdersByNumber_(rawRows, 'so_number');
+  const rows = _excludeJobWorkManufacturingOrders_(rawRows, 'so_number');
 
   const pending = [];
   const processed = [];
@@ -9969,7 +9979,7 @@ function _listSOWithStatusLegacy_(limit = 200, offset = 0, seedCandidateMap) {
       offset: pageOffset
     }
   ) || [];
-  const approvalRows = _excludeFlexoWorkOrderItems_(_filterSalesServiceOnlyItems_(_excludeClosedSalesOrderLines_(_excludeCancelledSalesOrdersByNumber_(rawApprovalRows, 'so_number'), 'so_number', 'line_no')));
+  const approvalRows = _excludeFlexoWorkOrderItems_(_filterSalesServiceOnlyItems_(_excludeClosedSalesOrderLines_(_excludeCancelledSalesOrdersByNumber_(_excludeJobWorkManufacturingOrders_(rawApprovalRows,'so_number'), 'so_number'), 'so_number', 'line_no')));
 
   const candidateMap = {};
   if (seedCandidateMap && typeof seedCandidateMap === 'object') {
@@ -9979,7 +9989,7 @@ function _listSOWithStatusLegacy_(limit = 200, offset = 0, seedCandidateMap) {
   } else {
     let candidateRows = [];
     try {
-      candidateRows = _excludeFlexoWorkOrderItems_(_filterSalesServiceOnlyItems_(_excludeManualBillingSalesOrdersByNumber_(_selectWorkOrderCandidateRows_({
+      candidateRows = _excludeFlexoWorkOrderItems_(_filterSalesServiceOnlyItems_(_excludeJobWorkManufacturingOrders_(_selectWorkOrderCandidateRows_({
         order: 'so_number.desc,line_no.asc',
         limit: pageLimit,
         offset: pageOffset
@@ -10177,7 +10187,7 @@ function _listSOWithStatusHybrid_(limit = 200, offset = 0) {
       offset: pageOffset
     }
   ) || [];
-  const approvalRows = _excludeFlexoWorkOrderItems_(_filterSalesServiceOnlyItems_(_excludeClosedSalesOrderLines_(_excludeCancelledSalesOrdersByNumber_(rawApprovalRows, 'so_number'), 'so_number', 'line_no')));
+  const approvalRows = _excludeFlexoWorkOrderItems_(_filterSalesServiceOnlyItems_(_excludeClosedSalesOrderLines_(_excludeCancelledSalesOrdersByNumber_(_excludeJobWorkManufacturingOrders_(rawApprovalRows,'so_number'), 'so_number'), 'so_number', 'line_no')));
 
   if (!approvalRows.length) {
     if (rawApprovalRows.length >= pageLimit) {
@@ -10264,7 +10274,7 @@ function _listSOWithStatusLegacyAll_(request) {
   const approvalRows = _excludeFlexoWorkOrderItems_(
     _filterSalesServiceOnlyItems_(
       _excludeClosedSalesOrderLines_(
-        _excludeCancelledSalesOrdersByNumber_(rawApprovalRows, 'so_number'),
+        _excludeCancelledSalesOrdersByNumber_(_excludeJobWorkManufacturingOrders_(rawApprovalRows,'so_number'), 'so_number'),
         'so_number',
         'line_no'
       )
@@ -10626,10 +10636,10 @@ function listFlexoWOStatus(requestOrLimit, offset) {
     Logger.log('Flexo WO dedicated view unavailable; falling back to artwork job loader: ' + viewErr.message);
   }
 
-  const artworkRows = _filterSalesServiceOnlyItems_(_excludeCancelledSalesOrdersByNumber_(_selectArtworkJobsActiveViewAll_({
+  const artworkRows = _filterSalesServiceOnlyItems_(_excludeCancelledSalesOrdersByNumber_(_excludeJobWorkManufacturingOrders_(_selectArtworkJobsActiveViewAll_({
     select: 'so_number,so_date,so_time,sales_rep,line_no,client_name,product_name,category,division,qty,unit,artwork_no,product_type,sheet_length,sheet_width,sheet_ups,printing_colors,across_ups,along_ups,total_ups,across_width,across_gap_mm,along_gap_mm,stock_qty_to_bill,status,approved_at,accounts_status,business_status',
     order: 'so_date.asc,so_number.asc,line_no.asc'
-  }) || [], 'so_number'));
+  }) || [], 'so_number'), 'so_number'));
 
   if (!artworkRows.length) {
     const empty = { pending: [], processed: [], hasMore: false };
@@ -11181,7 +11191,7 @@ function _newJobBomSyncRequest_(payload) {
     return row && (row.crossDepartment === true || String(row.selectionScope || '').trim().toUpperCase() === 'OTHER_DEPARTMENT');
   });
   return {
-    enabled: jobType.indexOf('NEW') === 0,
+    enabled: details.preprintedSheets !== true && jobType.indexOf('NEW') === 0,
     jobType: jobType,
     itemCodes: itemCodes,
     itemCode: itemCodes.length === 1 ? itemCodes[0] : '',
@@ -12676,6 +12686,7 @@ function saveWorkOrder(payload, options, token) {
 
 function _prepareWorkOrderPrintPaperAssignments_(payload) {
   const source = payload || {};
+  const preprinted = source.jobDetails && source.jobDetails.preprintedSheets === true;
   const papers = Array.isArray(source.papers) ? source.papers : [];
   const routes = Array.isArray(source.routing) ? source.routing : [];
   routes.forEach(function(row) {
@@ -12698,10 +12709,21 @@ function _prepareWorkOrderPrintPaperAssignments_(payload) {
       (row && row.dept || '') + ' ' + (row && row.operation || '')
     ).trim().toUpperCase().indexOf('PRINT') !== -1;
   }) || {};
+  if (preprinted && (route.dept || route.operation || routes.some(function(row) {
+    return [row && row.dept, row && row.operation].some(function(value) {
+      return String(value || '').trim().toUpperCase() === 'DIGITAL';
+    });
+  }))) {
+    throw new Error('Remove Printing from routing when all sheets are already printed.');
+  }
   const jobStyle = String(source.jobDetails && source.jobDetails.printStyle || '').trim();
   const routeMachine=String(route.machine||route.machineName||route.machine_name||route.plannedMachine||route.planned_machine||'').trim();
   const paperStyle=function(paper){return String(paper.printStyle||paper.print_style||jobStyle||'').trim();};
-  const printablePapers=papers.filter(function(paper){return paperStyle(paper).toUpperCase()!=='NO PRINT'&&paper.printingRequired!==false&&paper.printing_required!==false;});
+  const needsPrinting = function(paper) {
+    return !preprinted && paperStyle(paper).toUpperCase() !== 'NO PRINT' &&
+      paper.printingRequired !== false && paper.printing_required !== false;
+  };
+  const printablePapers=papers.filter(needsPrinting);
   const hasPrintRequired=printablePapers.length>0;
   if(hasPrintRequired&&!String(route.dept||route.operation||'').trim())throw new Error('Add the Printing process in routing before saving print-required paper lines.');
   if(hasPrintRequired&&!routeMachine)throw new Error('Select the printing machine in routing before saving the Work Order.');
@@ -12712,7 +12734,7 @@ function _prepareWorkOrderPrintPaperAssignments_(payload) {
     if (!paper.paperLineId && !paper.paper_line_id) paper.paperLineId = Utilities.getUuid();
     const style=paperStyle(paper);
     paper.printStyle=style;
-    const required = style.toUpperCase() !== 'NO PRINT' && paper.printingRequired !== false && paper.printing_required !== false;
+    const required = needsPrinting(paper);
     paper.printingRequired = required;
     if (required) {
       const currentMachine=String(paper.printingMachine||paper.printing_machine||'').trim();
@@ -12850,7 +12872,6 @@ function _normalizeAndValidateWorkOrderFinishing_(payload) {
 
 function _syncWorkOrderPrintComponents_(woId, payload, actor) {
   const papers = Array.isArray(payload && payload.papers) ? payload.papers : [];
-  if (!papers.length) return { count:0, warning:'' };
   let routingRows;
   try {
     routingRows = supabaseSelect_('work_order_routing', {
@@ -12860,10 +12881,29 @@ function _syncWorkOrderPrintComponents_(woId, payload, actor) {
   } catch (err) {
     throw err;
   }
+  let existing;
+  try {
+    existing = supabaseSelect_('work_order_print_components', {
+      select:'id,paper_line_id,status,routing_id', filters:{wo_id:'eq.' + woId}, limit:1000
+    }) || [];
+  } catch (err) {
+    if (_supabaseRelationMissing_(err, 'work_order_print_components')) {
+      return { count:0, warning:'Printing paper-run schema is not installed. Apply printing_multi_paper_machine_runs_20261003.sql.' };
+    }
+    throw err;
+  }
   const printingRoute = routingRows.find(function(row) {
     return String((row.department || '') + ' ' + (row.process_name || '')).toUpperCase().indexOf('PRINT') !== -1;
   });
-  if (!printingRoute) return { count:0, warning:'' };
+  if (!printingRoute) {
+    existing.forEach(function(row) {
+      supabaseUpdateMinimal_('work_order_print_components', { id:'eq.' + row.id }, {
+        print_required:false, needs_machine_review:false, needs_production_review:false,
+        updated_by:actor, updated_at:new Date().toISOString()
+      });
+    });
+    return { count:0, warning:'' };
+  }
   const materials = supabaseSelect_('work_order_materials', {
     select:'id,item_id,item_code,item_name,material_type,gsm,deckle,cut_size,required_qty,uom',
     filters:{wo_id:'eq.' + woId}, limit:1000
@@ -12881,7 +12921,7 @@ function _syncWorkOrderPrintComponents_(woId, payload, actor) {
   const frontDefault = Number(payload && payload.jobDetails && payload.jobDetails.frontColors || 0);
   const backDefault = Number(payload && payload.jobDetails && payload.jobDetails.backColors || 0);
   const now = new Date().toISOString();
-  const inserts = papers.map(function(paper, index) {
+  const desired = papers.map(function(paper, index) {
     const material = materialForPaper(paper), style = String(paper.printStyle || paper.print_style || styleDefault || '');
     const deckle = Number(paper.deckle || 0), cut = Number(paper.cut_size || paper.cutSize || 0);
     const core = Math.max(0, Number(paper.sheets || paper.coreSheets || 0));
@@ -12905,14 +12945,176 @@ function _syncWorkOrderPrintComponents_(woId, payload, actor) {
     };
   });
   try {
+    const existingByPaperLine = {};
+    existing.forEach(function(row) {
+      existingByPaperLine[String(row.paper_line_id || '')] = row;
+    });
+    const inserts = [];
+    desired.forEach(function(row) {
+      const current = existingByPaperLine[String(row.paper_line_id || '')];
+      if (!current) {
+        inserts.push(row);
+        return;
+      }
+      const update = Object.assign({}, row);
+      delete update.wo_id;
+      delete update.paper_line_id;
+      delete update.status;
+      delete update.created_by;
+      supabaseUpdateMinimal_('work_order_print_components', { id:'eq.' + current.id }, update);
+    });
+    const desiredPaperLines = {};
+    desired.forEach(function(row) { desiredPaperLines[String(row.paper_line_id || '')] = true; });
+    existing.forEach(function(row) {
+      if (desiredPaperLines[String(row.paper_line_id || '')]) return;
+      supabaseUpdateMinimal_('work_order_print_components', { id:'eq.' + row.id }, {
+        print_required:false, needs_machine_review:false, needs_production_review:false,
+        updated_by:actor, updated_at:now
+      });
+    });
     if (inserts.length) supabaseBulkInsertMinimal_('work_order_print_components', inserts);
-    return { count:inserts.length, warning:'' };
+    return { count:desired.length, warning:'' };
   } catch (err) {
     if (_supabaseRelationMissing_(err, 'work_order_print_components')) {
       return { count:0, warning:'Printing paper-run schema is not installed. Apply printing_multi_paper_machine_runs_20261003.sql.' };
     }
     throw err;
   }
+}
+
+function _workOrderRoutingIdentity_(row) {
+  const source = row || {};
+  return [
+    String(source.dept || source.department || '').trim().toUpperCase(),
+    String(source.operation || source.process_name || source.processName || source.dept || source.department || '').trim().toUpperCase()
+  ].join('||');
+}
+
+function _workOrderRoutingDependencyTables_() {
+  return [
+    'production_entries', 'work_order_print_components', 'printing_plan_runs',
+    'finishing_plan_runs', 'corrugation_plan_runs', 'downstream_plan_runs',
+    'downstream_events', 'finishing_readiness_events', 'printing_component_entry_details',
+    'corrugation_2ply_entry_details', 'corrugation_sheet_cutting_entry_details',
+    'downstream_die_inputs', 'downstream_output_allocations', 'job_work_stages'
+  ];
+}
+
+function _assertWorkOrderRoutingRowsRemovable_(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const ids = list.map(function(row) { return String(row && row.id || '').trim(); }).filter(Boolean);
+  if (!ids.length) return;
+  const progressed = list.find(function(row) {
+    return Number(row && row.completed_qty || 0) !== 0 ||
+      ['PENDING', 'OPEN', ''].indexOf(String(row && row.status || '').trim().toUpperCase()) === -1;
+  });
+  if (progressed) {
+    throw new Error('Routing stage "' + String(progressed.process_name || progressed.department || '') +
+      '" already has activity and cannot be removed. Keep the stage in routing and revise only unprocessed stages.');
+  }
+  const filter = _supabaseInFilter_(ids);
+  const tables = _workOrderRoutingDependencyTables_();
+  for (let i = 0; i < tables.length; i += 1) {
+    const table = tables[i];
+    try {
+      const linked = supabaseSelect_(table, {
+        select:'routing_id', filters:{routing_id:filter}, limit:1
+      }) || [];
+      if (linked.length) {
+        throw new Error('Routing stage is already linked to production or planning in ' + table.replace(/_/g, ' ') +
+          '. Keep that stage in the Work Order; you can edit its operation or machine, or add another stage.');
+      }
+    } catch (err) {
+      if (_supabaseRelationMissing_(err, table)) continue;
+      throw err;
+    }
+  }
+}
+
+function _prepareWorkOrderRoutingReconciliation_(woId, requestedRouting) {
+  const existing = supabaseSelect_('work_order_routing', {
+    select:'id,wo_id,sequence_no,process_name,department,planned_machine,planned_qty,completed_qty,status',
+    filters:{wo_id:'eq.' + woId}, order:'sequence_no.asc', limit:200
+  }) || [];
+  const desired = (Array.isArray(requestedRouting) ? requestedRouting : []).filter(function(row) {
+    return !!String(row && (row.dept || row.department) || '').trim();
+  }).map(function(row, index) {
+    return {
+      source:row,
+      sequence_no:index + 1,
+      process_name:String(row.operation || row.process_name || row.dept || row.department || '').trim(),
+      department:String(row.dept || row.department || '').trim(),
+      planned_machine:String(row.machine || row.planned_machine || '').trim()
+    };
+  });
+  const byId = {};
+  existing.forEach(function(row) { byId[String(row.id || '')] = row; });
+  const used = {};
+  const matched = new Array(desired.length);
+
+  desired.forEach(function(item, index) {
+    const id = String(item.source.routingId || item.source.routing_id || '').trim();
+    if (id && byId[id] && !used[id]) {
+      matched[index] = byId[id];
+      used[id] = true;
+    }
+  });
+  desired.forEach(function(item, index) {
+    if (matched[index]) return;
+    const identity = _workOrderRoutingIdentity_(item);
+    const candidate = existing.filter(function(row) {
+      return !used[String(row.id)] && _workOrderRoutingIdentity_(row) === identity;
+    }).sort(function(a, b) {
+      return Math.abs(Number(a.sequence_no || 0) - item.sequence_no) -
+        Math.abs(Number(b.sequence_no || 0) - item.sequence_no);
+    })[0];
+    if (candidate) {
+      matched[index] = candidate;
+      used[String(candidate.id)] = true;
+    }
+  });
+  desired.forEach(function(item, index) {
+    if (matched[index]) return;
+    const candidate = existing.find(function(row) {
+      return !used[String(row.id)] && Number(row.sequence_no || 0) === item.sequence_no;
+    });
+    if (candidate) {
+      matched[index] = candidate;
+      used[String(candidate.id)] = true;
+    }
+  });
+
+  const removals = existing.filter(function(row) { return !used[String(row.id)]; });
+  _assertWorkOrderRoutingRowsRemovable_(removals);
+  return { existing:existing, desired:desired, matched:matched, removals:removals };
+}
+
+function _applyWorkOrderRoutingReconciliation_(woId, plan) {
+  const source = plan || { desired:[], matched:[], removals:[] };
+  const removalIds = (source.removals || []).map(function(row) { return row.id; }).filter(Boolean);
+  if (removalIds.length) {
+    supabaseDeleteMinimal_('work_order_routing', { id:_supabaseInFilter_(removalIds) });
+  }
+  const inserts = [];
+  (source.desired || []).forEach(function(row, index) {
+    const fields = {
+      sequence_no:row.sequence_no,
+      process_name:row.process_name,
+      department:row.department,
+      planned_machine:row.planned_machine
+    };
+    const current = source.matched[index];
+    if (current) {
+      supabaseUpdateMinimal_('work_order_routing', { id:'eq.' + current.id }, fields);
+      row.source.routingId = current.id;
+      return;
+    }
+    inserts.push(Object.assign({
+      wo_id:woId, so_number:'', line_no:'', planned_qty:0, completed_qty:0, status:'PENDING'
+    }, fields));
+  });
+  if (inserts.length) supabaseBulkInsertMinimal_('work_order_routing', inserts);
+  return (source.desired || []).length;
 }
 
 function _saveWorkOrderUnlocked_(payload, options, token) {
@@ -12970,6 +13172,7 @@ function _saveWorkOrderUnlocked_(payload, options, token) {
   let wo = null;
   let previousSoNumbers = [];
   let auditBefore = null;
+  let routingReconciliation = null;
 
   /* =========================
      1️⃣ Insert Header
@@ -12994,7 +13197,7 @@ function _saveWorkOrderUnlocked_(payload, options, token) {
 
     previousSoNumbers = [...new Set(existingJobs.map(j => j.so_number).filter(Boolean))];
 
-    supabaseDelete_('work_order_routing', { wo_id: 'eq.' + wo.id });
+    routingReconciliation = _prepareWorkOrderRoutingReconciliation_(wo.id, payload.routing || []);
     supabaseDelete_('work_order_materials', { wo_id: 'eq.' + wo.id });
     supabaseDelete_('work_order_jobs', { wo_id: 'eq.' + wo.id });
 
@@ -13272,7 +13475,10 @@ function pushMaterial(m, type) {
 
   });
 
-  if (routingRows.length) {
+  if (isUpdate) {
+    _applyWorkOrderRoutingReconciliation_(wo.id, routingReconciliation ||
+      _prepareWorkOrderRoutingReconciliation_(wo.id, payload.routing || []));
+  } else if (routingRows.length) {
     supabaseBulkInsertMinimal_('work_order_routing', routingRows);
   }
   saveOpts.persistedWoNo = woNo;
@@ -13561,17 +13767,17 @@ function getWorkOrder(woNo) {
   }
 
   const snapRouting = Array.isArray(snap.routing) ? snap.routing : [];
-  const needsRoutingRows = !snapRouting.length || snapRouting.some(function(row) {
-    return !String(row.dept || row.department || '').trim() ||
-      !String(row.operation || row.process_name || '').trim();
-  });
-  const routingRows = needsRoutingRows ? (supabaseSelect_('work_order_routing', {
-    filters: { wo_id: 'eq.' + wo.id },
-    order: 'sequence_no.asc'
-  }) || []) : [];
+  const routingRows = supabaseSelect_('work_order_routing', {
+    select:'id,sequence_no,process_name,department,planned_machine,status',
+    filters: { wo_id: 'eq.' + wo.id }, order: 'sequence_no.asc', limit:200
+  }) || [];
   const routingSourceRows = (snapRouting.length ? snapRouting : routingRows).map((r, index) => ({ row: r, index: index }));
   function getRoutingRouteInfo_(r, index) {
-    const dbRow = routingRows[index] || {};
+    const routeId = String(r.routingId || r.routing_id || '').trim();
+    const routeIdentity = _workOrderRoutingIdentity_(r);
+    const dbRow = (routeId && routingRows.find(function(row) { return String(row.id || '') === routeId; })) ||
+      routingRows.find(function(row) { return _workOrderRoutingIdentity_(row) === routeIdentity; }) ||
+      routingRows[index] || {};
     const rawDept = r.dept || r.department || dbRow.department || '';
     const rawOperation = r.operation || r.process_name || dbRow.process_name || '';
     const isDigitalRoute = String((rawDept || '') + ' ' + (rawOperation || '')).trim().toUpperCase() === 'DIGITAL' ||
@@ -13595,6 +13801,7 @@ function getWorkOrder(woNo) {
     const info = getRoutingRouteInfo_(r, item.index);
     const machine = r.machine || r.planned_machine || info.dbRow.planned_machine || '';
     return {
+      routingId: r.routingId || r.routing_id || info.dbRow.id || '',
       dept: info.isDigitalRoute ? 'Printing' : info.rawDept,
       machine: info.isDigitalRoute ? 'Canon Digital Printing' : machine,
       material: r.material || '',
@@ -23400,6 +23607,7 @@ const ROUTES = {
 
   order: 'OrderForm',
   jobwork: 'JobWork',
+  jobworkplanning: 'StagePlanning',
   historicalorder: 'HistoricalOrderPosting',
   salesorderapproval: 'SalesOrderApproval',
 
@@ -23475,7 +23683,7 @@ const ROUTES = {
   tpl.WEB_APP_URL = ScriptApp.getService().getUrl();
   tpl.TOKEN = token;
   tpl.CURRENT_USER = sessionUser;
-  tpl.PLANNING_KIND = page === 'packingplanning' ? 'PACKING' : 'DIE_CUTTING';
+  tpl.PLANNING_KIND = page === 'packingplanning' ? 'PACKING' : page === 'jobworkplanning' ? 'JOB_WORK' : 'DIE_CUTTING';
   tpl.ERP_COMPANY_LOGO_DATA_URL = getCompanyLogoDataUrl_();
   tpl.invoiceId = invoiceId;
   tpl.noteId = noteId;
@@ -23647,12 +23855,13 @@ function createArtworksFromSoLines(soId) {
 
   // 3️⃣ Prepare only missing artworks
 const rowsToInsert = _filterSalesServiceOnlyItems_(lines)
+  .filter(l => !/^JW-/.test(String(l.product_code || '')) || (typeof _jobWorkRequiresArtwork_ === 'function' && _jobWorkRequiresArtwork_(l.job_work_spec)))
   .filter(l => !existingLineNos.has(String(l.line_no)))
   .map(l => ({
     so_id: soId,
     line_no: l.line_no,
     artwork_no: null,
-    product_type: l.category || '',
+    product_type: /^JW-/.test(String(l.product_code || '')) ? (l.division || l.category || '') : (l.category || ''),
     plate_status: 'PENDING',
     die_status: 'PENDING',
     status: 'NO_ART',
@@ -24752,7 +24961,7 @@ function _artworkBuildMissingRowsFromSalesLines_(baseRows, fromDate, toDate, pen
 
   const lineRows = _supabaseSelectByKeyInBatches_(
     'sales_order_lines',
-    'id,so_id,line_no,product_code,product_name,category,division,job_type,qty,unit,accounts_status,business_status,status',
+    'id,so_id,line_no,product_code,product_name,category,division,job_type,qty,unit,accounts_status,business_status,status,job_work_spec',
     'so_id',
     soIds,
     'line_no.asc',
@@ -24794,6 +25003,7 @@ function _artworkBuildMissingRowsFromSalesLines_(baseRows, fromDate, toDate, pen
   return _filterSalesServiceOnlyItems_(lineRows).map(function(line) {
     const so = soById[String(line.so_id || '').trim()];
     if (!so) return null;
+    if (String(so.order_prefix || '').toUpperCase() === 'JW' && typeof _jobWorkRequiresArtwork_ === 'function' && !_jobWorkRequiresArtwork_(line.job_work_spec)) return null;
     const soNo = String(so.so_number || '').trim();
     const lineNo = String(line.line_no || '').trim();
     const key = soNo + '||' + lineNo;
@@ -25605,7 +25815,9 @@ function saveArtworkGroup(payload, token) {
 
     if (updates.length) {
       supabaseUpsertMinimal_('artworks', updates, { onConflict: 'id' });
-      _syncArtworkProductTypeToSalesOrderDivision_(selectedRows, payload.productType);
+      _syncArtworkProductTypeToSalesOrderDivision_(selectedRows.filter(function(row) {
+        return !selectedJobs.some(function(job) { return String(job.id)===String(row.id) && /^JW(?:[\/-]|\d)/i.test(String(job.so || '')); });
+      }), payload.productType);
     }
     const canClearSourceArtworkNo = _artworkSourceArtworkNoColumnAvailable_();
     const stockClosureUpdates = selectedRowsForSave
@@ -29572,6 +29784,7 @@ function packingListGetBootstrap(token) {
       ok: true,
       currentUser: _packingListActor_(user),
       canEdit: user.role === 'ADMIN' || _userHasPermission_(user, 'PACKING', 'can_edit'),
+      canCorrect: user.role === 'ADMIN' || _userHasPermission_(user, 'PACKING', 'can_edit'),
       isAdmin: String(user.role || '').toUpperCase() === 'ADMIN',
       company: _billingCompanyProfile_(),
       defaultEmails: defaults,
@@ -29792,14 +30005,14 @@ function _packingListLoadDocument_(packingListId) {
   if (!headers[0]) throw new Error('Packing list not found');
   const header = _packingListMapHeader_(headers[0]);
   const rawLines = supabaseSelect_('packing_list_lines', {
-    select: 'id,packing_list_id,sequence_no,so_id,so_line_id,so_number,so_date,sales_rep,line_no,product_code,product_name,artwork_no,unit,order_qty,packed_before,packed_qty,loose_qty,remarks,source_mode,packing_entry_id,created_at',
+    select: '*',
     filters: { packing_list_id: 'eq.' + id },
     order: 'sequence_no.asc',
     limit: 1000
   }) || [];
   const lineIds = rawLines.map(function(row) { return row.id; }).filter(Boolean);
   const rawBoxes = lineIds.length ? (supabaseSelect_('packing_list_box_lines', {
-    select: 'id,packing_list_line_id,sequence_no,box_master_id,box_code_snapshot,box_name_snapshot,length_mm_snapshot,width_mm_snapshot,height_mm_snapshot,rate_per_box_snapshot,box_count,qty_per_box,packed_qty,total_cost,created_at',
+    select: '*',
     filters: { packing_list_line_id: 'in.(' + lineIds.join(',') + ')' },
     order: 'packing_list_line_id.asc,sequence_no.asc',
     limit: 1000
@@ -29814,6 +30027,7 @@ function _packingListLoadDocument_(packingListId) {
       boxMasterId: row.box_master_id || '',
       boxCode: row.box_code_snapshot || '',
       boxName: row.box_name_snapshot || '',
+      boxNo: row.box_no == null ? '' : String(row.box_no),
       lengthMm: Number(row.length_mm_snapshot || 0),
       widthMm: Number(row.width_mm_snapshot || 0),
       heightMm: Number(row.height_mm_snapshot || 0),
@@ -29845,6 +30059,7 @@ function _packingListLoadDocument_(packingListId) {
       remarks: row.remarks || '',
       sourceMode: row.source_mode || 'NEW_PACKING',
       packingEntryId: row.packing_entry_id || '',
+      boxNo: row.box_no == null ? '' : String(row.box_no),
       boxes: boxesByLine[String(row.id || '')] || []
     };
   });
@@ -29959,7 +30174,7 @@ function _packingListEmailBody_(data, inlineLogoCid) {
   const rows = (data.lines || []).map(function(line, index) {
     const boxes = (line.boxes || []).map(function(box) {
       const identity = String(box.boxCode || box.boxName || '').trim();
-      return '<div style="margin-bottom:3px"><b>' + fmt(box.boxCount) + ' &times; ' + fmt(box.qtyPerBox) + '</b>' + (identity ? ' - ' + htmlText(identity, '') : '') + '</div>';
+      return '<div style="margin-bottom:3px;overflow-wrap:anywhere;word-break:break-word">' + (box.boxNo ? '<b>Box No.:</b> ' + htmlText(box.boxNo, '') + '<br>' : '') + '<b>' + fmt(box.boxCount) + ' &times; ' + fmt(box.qtyPerBox) + '</b>' + (identity ? ' - ' + htmlText(identity, '') : '') + '</div>';
     });
     if (Number(line.looseQty || 0) > 0) boxes.push('<div><b>Loose:</b> ' + fmt(line.looseQty) + '</div>');
     const sourceNote = String(line.sourceMode || '').toUpperCase() === 'EXISTING_PACKED'
@@ -29972,7 +30187,7 @@ function _packingListEmailBody_(data, inlineLogoCid) {
       '<td style="' + cell + '"><b>' + htmlText(line.productName, '-') + '</b><div style="color:#667085;font-size:11px">' + htmlText(line.productCode, '') + '</div></td>' +
       '<td style="' + cell + '">' + htmlText(line.artworkNo, '-') + '</td>' +
       '<td style="' + cell + 'text-align:right;white-space:nowrap"><b>' + fmt(line.packedQty) + '</b><div style="color:#667085;font-size:11px">' + htmlText(line.unit, 'Pcs') + '</div>' + sourceNote + '</td>' +
-      '<td style="' + cell + '">' + (boxes.length ? boxes.join('') : '<span style="color:#667085">Not specified</span>') + '</td>' +
+      '<td style="' + cell + '">' + (line.boxNo ? '<div style="overflow-wrap:anywhere;word-break:break-word"><b>Box No.:</b> ' + htmlText(line.boxNo, '') + '</div>' : '') + (boxes.length ? boxes.join('') : (line.boxNo ? '' : '<span style="color:#667085">Not specified</span>')) + '</td>' +
       '<td style="' + cell + '">' + htmlText(line.remarks, '-') + '</td>' +
       '</tr>';
   }).join('');
@@ -30038,9 +30253,9 @@ function _packingListEmailText_(data) {
   const h = data.header || {};
   const fmt = function(value) { const number=Number(value||0);return isFinite(number)?number.toLocaleString('en-IN',{maximumFractionDigits:4}):'0'; };
   const lines = (data.lines || []).map(function(line,index) {
-    const boxes=(line.boxes||[]).map(function(box){const identity=String(box.boxCode||box.boxName||'').trim();return fmt(box.boxCount)+' x '+fmt(box.qtyPerBox)+(identity?' - '+identity:'');});
+    const boxes=(line.boxes||[]).map(function(box){const identity=String(box.boxCode||box.boxName||'').trim();return (box.boxNo?'Box No.: '+String(box.boxNo)+' — ':'')+fmt(box.boxCount)+' x '+fmt(box.qtyPerBox)+(identity?' - '+identity:'');});
     if(Number(line.looseQty||0)>0)boxes.push('Loose: '+fmt(line.looseQty));
-    return (index+1)+'. '+String(line.soNumber||'-')+' | '+String(line.productName||'-')+' | Artwork: '+String(line.artworkNo||'-')+' | Packed: '+fmt(line.packedQty)+' '+String(line.unit||'Pcs')+' | Boxes: '+(boxes.join('; ')||'Not specified')+' | Remarks: '+String(line.remarks||'-');
+    return (index+1)+'. '+String(line.soNumber||'-')+' | '+String(line.productName||'-')+' | Artwork: '+String(line.artworkNo||'-')+' | Packed: '+fmt(line.packedQty)+' '+String(line.unit||'Pcs')+(line.boxNo?' | Box No.: '+String(line.boxNo):'')+' | Boxes: '+(boxes.join('; ')||'Not specified')+' | Remarks: '+String(line.remarks||'-');
   });
   return [h.replacesPackingNo?'CORRECTION: replaces '+String(h.replacesPackingNo)+'. Disregard the earlier packing list.':'','PACKING LIST '+String(h.packingNo||''),'Date: '+String(h.packingDate||''),'Customer: '+String(h.clientName||''),'Ship To: '+String(h.shipToAddress||'As per sales order'),'Salesperson: '+String(h.salesReps||'-'),''].concat(lines).concat(['','Total quantity: '+fmt(h.totalQty),'Total boxes: '+fmt(h.totalBoxes),'Remarks: '+String(h.remarks||'-')]).join('\n');
 }
@@ -30175,7 +30390,7 @@ function packingListFinalize(payload, token) {
   const user = _requireModuleAccess_(token, 'PACKING', 'can_edit');
   const p = payload || {};
   const replacesId = String(p.replacesPackingListId || '').trim();
-  if (replacesId) _requireAdmin_(token);
+  // Replacement uses the same Packing edit permission as creation/cancellation.
   const lines = Array.isArray(p.lines) ? p.lines : [];
   const boxes = Array.isArray(p.boxLines) ? p.boxLines : [];
   if (!lines.length) throw new Error('Select at least one open order line');
@@ -30200,9 +30415,12 @@ function packingListFinalize(payload, token) {
       p_remarks: String(p.remarks || '').trim(),
       p_actor: actor
     };
-    if (replacesId) createArgs.p_replaces_id = replacesId;
-    created = supabaseRpc_(replacesId ? 'packing_list_admin_create_replacement_v1' : 'create_packing_list_v1', createArgs);
+    createArgs.p_replaces_id = replacesId || null;
+    created = supabaseRpc_('packing_list_finalize_with_box_numbers_v2', createArgs);
   } catch (err) {
+    if (/packing_list_finalize_with_box_numbers_v[12]|box_no/.test(String(err && err.message || err)) && /Could not find|does not exist|schema cache/i.test(String(err && err.message || err))) {
+      throw new Error('Apply supabase/packing_list_box_line_numbers_20261126.sql after packing_list_box_numbers_20261126.sql before finalizing packing lists.');
+    }
     _packingListCheckCorrectionSchema_(err);
     if (_packingListIsSchemaMissing_(err)) throw _packingListSchemaError_();
     throw err;
@@ -30247,7 +30465,9 @@ function packingListRetryEmail(packingListId, recipients, token) {
 }
 
 function packingListAdminCancel(packingListId, reason, token) {
-  const admin = _requireAdmin_(token);
+  // Historical endpoint name retained for deployed clients. Packing editors
+  // may correct their lists; database stock/billing dependency guards still apply.
+  const user = _requireModuleAccess_(token, 'PACKING', 'can_edit');
   const id = String(packingListId || '').trim();
   const cancellationReason = String(reason || '').trim();
   if (!id) throw new Error('Packing list id is required');
@@ -30256,7 +30476,7 @@ function packingListAdminCancel(packingListId, reason, token) {
   lock.waitLock(30000);
   let result;
   try {
-    result = supabaseRpc_('packing_list_admin_cancel_v1', { p_id: id, p_reason: cancellationReason, p_actor: _packingListActor_(admin) });
+    result = supabaseRpc_('packing_list_admin_cancel_v1', { p_id: id, p_reason: cancellationReason, p_actor: _packingListActor_(user) });
   } catch (err) {
     _packingListCheckCorrectionSchema_(err);
     throw err;
@@ -33463,6 +33683,35 @@ function invScrapKraftReel(payload, token) {
   return result || { ok: true };
 }
 
+function invScrapIssuedKraftReels(payload, token) {
+  const p = payload || {};
+  const user = _invRequireReelAccess_(_authTokenFromPayload_(p, token), true);
+  const lines = Array.isArray(p.lines) ? p.lines : [];
+  const reasonCode = String(p.reasonCode || '').trim().toUpperCase();
+  const remarks = String(p.remarks || '').trim();
+  const approvalRef = String(p.approvalRef || '').trim();
+  if (!lines.length) throw new Error('Select at least one issued reel to scrap');
+  if (!reasonCode) throw new Error('Scrap reason is required');
+  if (!approvalRef) throw new Error('Approval reference is required');
+  if (reasonCode === 'OTHER' && !remarks) throw new Error('Remarks are required for Other scrap reason');
+  const normalizedLines = lines.map(function(line) {
+    const lotId = String(line?.lotId || '').trim();
+    const expectedQty = Number(line?.expectedScrapQtyKg || 0);
+    if (!lotId || !(expectedQty > 0)) throw new Error('Each selected issued reel must have a positive floor balance');
+    return { lotId:lotId, expectedScrapQtyKg:Number(expectedQty.toFixed(6)) };
+  });
+  const result = supabaseRpc_('scrap_issued_kraft_reels', {
+    p_lines: normalizedLines,
+    p_reason_code: reasonCode,
+    p_remarks: remarks,
+    p_approval_ref: approvalRef,
+    p_actor: _authActorName_(user)
+  });
+  _invBumpStockSnapshotVersion_();
+  _prodBumpQueueVersion_();
+  return result || { ok:true };
+}
+
 function invListIssuedKraftReelsForWOJSON(woNo, token) {
   _requireModuleAccess_(token, 'PRODUCTION', 'can_view');
   const key = String(woNo || '').trim();
@@ -35436,9 +35685,11 @@ function _invPreparePOReceiptLine_(payload) {
     qty = _invGRNQtyRounded_(matchedQtyOverride.requested_qty, 3);
   }
   let matchedRateOverride = null;
-  const preflightBaseline = Number(payload.previousRate || 0) > 0 || Number(payload.standingRate || 0) > 0 ? {
+  const preflightBaseline = Number(payload.previousRate || 0) > 0 || Number(payload.standingRate || 0) > 0 || Number(payload.currentMasterRate || 0) > 0 ? {
     hasHistory: Number(payload.previousRate || 0) > 0,
     standingRate: Number(payload.standingRate || 0),
+    currentMasterRate: Number(payload.currentMasterRate || 0),
+    purchaseUom: line.purchaseUom || line.stockUom || '',
     rate: Number(payload.previousRate || 0),
     grnNo: String(payload.previousRateGrnNo || ''),
     receiptDate: String(payload.previousRateDate || ''),
@@ -35712,6 +35963,8 @@ function _invGRNRateBaselineContexts_(lines) {
 function _invNormalizeGRNRateBaselineRow_(row) {
   const source = row || {};
   const rate = Number(Number(source.rate || 0).toFixed(2));
+  const requestedUom = String(source.requested_purchase_uom || '').trim().toUpperCase();
+  const historyUom = String(source.purchase_uom || '').trim().toUpperCase();
   return {
     requestItemCode: source.requested_item_code || '',
     requestRateKey: source.requested_rate_key || '',
@@ -35740,7 +35993,10 @@ function _invNormalizeGRNRateBaselineRow_(row) {
     standingRateKey: source.standing_rate_key || '',
     standingRateApprovedBy: source.standing_rate_approved_by || '',
     standingRateApprovedAt: source.standing_rate_approved_at || '',
-    hasHistory: !!source.receipt_id && rate > 0
+    currentMasterRate: String(source.current_master_uom || '').trim().toUpperCase() === requestedUom
+      ? Number(source.current_master_rate || 0) : 0,
+    currentMasterUom: source.current_master_uom || '',
+    hasHistory: !!source.receipt_id && rate > 0 && !!historyUom && historyUom === requestedUom
   };
 }
 
@@ -35749,7 +36005,7 @@ function _invLoadGRNRateBaselines_(lines, required, asOf) {
   const empty = { ok: true, rows: [], latestByRequest: {}, latestByItem: {} };
   if (!contexts.length) return empty;
   try {
-    const rows = supabaseRpc_('get_inventory_grn_rate_baselines_v2', { p_contexts: contexts, p_as_of: asOf || null }) || [];
+    const rows = supabaseRpc_('get_inventory_grn_rate_baselines_v3', { p_contexts: contexts, p_as_of: asOf || null }) || [];
     const normalizedRows = (Array.isArray(rows) ? rows : []).map(_invNormalizeGRNRateBaselineRow_);
     const latestByRequest = {};
     const latestByItem = {};
@@ -35767,7 +36023,7 @@ function _invLoadGRNRateBaselines_(lines, required, asOf) {
     const message = String(err && err.message || err);
     Logger.log('GRN rate baseline lookup failed: ' + message);
     if (/get_inventory_grn_rate_baselines|inventory_grn_rate_comparison_key|v_inventory_grn_rate_baseline_history_v1|PGRST202/i.test(message)) {
-      throw new Error('Purchase rate validation is not available. Apply supabase/purchase_standing_rate_approval_20261106.sql after the existing PO/GRN rate migrations. ' + message);
+      throw new Error('Purchase rate validation is not available. Apply supabase/purchase_rate_uom_comparison_fix_20261124.sql after the existing PO/GRN rate migrations. ' + message);
     }
     if (required) throw new Error('Unable to validate the previous purchase rate. ' + message);
     return { ok: false, rows: [], latestByRequest: {}, latestByItem: {}, message: message };
@@ -36412,6 +36668,7 @@ function _invPreflightPurchaseReceipt_(payload) {
       result.rateCeilingSource = commercial.ceilingSource;
       result.previousRate = commercial.historyRate;
       result.standingRate = Number(rateBaseline && rateBaseline.standingRate || 0);
+      result.currentMasterRate = Number(rateBaseline && rateBaseline.currentMasterRate || 0);
       result.previousRateGrnNo = commercial.history && commercial.history.grnNo || '';
       result.previousRateDate = commercial.history && commercial.history.receiptDate || '';
       result.previousRateVendor = commercial.history && commercial.history.vendorName || '';
@@ -36564,6 +36821,7 @@ function invPostPurchaseReceiptBulk(payload, token) {
     receiptLines[row.index].rateCeilingSource = String(row.rateCeilingSource || '');
     receiptLines[row.index].previousRate = Number(row.previousRate || 0);
     receiptLines[row.index].standingRate = Number(row.standingRate || 0);
+    receiptLines[row.index].currentMasterRate = Number(row.currentMasterRate || 0);
     receiptLines[row.index].previousRateGrnNo = String(row.previousRateGrnNo || '');
     receiptLines[row.index].previousRateDate = String(row.previousRateDate || '');
     receiptLines[row.index].previousRateVendor = String(row.previousRateVendor || '');
@@ -36651,6 +36909,7 @@ function invPostPurchaseReceiptBulk(payload, token) {
         rateCeilingSource: String(line.rateCeilingSource || ''),
         previousRate: Number(line.previousRate || 0),
         standingRate: Number(line.standingRate || 0),
+        currentMasterRate: Number(line.currentMasterRate || 0),
         previousRateGrnNo: String(line.previousRateGrnNo || ''),
         previousRateDate: String(line.previousRateDate || ''),
         previousRateVendor: String(line.previousRateVendor || ''),
@@ -47420,6 +47679,9 @@ function _prodCorrPaperIdentitySet_(snapshot) {
 
 function _invReceiptCommercialControl_(payload, liveLine, rateBaseline) {
   const baseLine = liveLine || {};
+  const lineUom = String(baseLine.purchaseUom || baseLine.purchase_uom || baseLine.stockUom || baseLine.stock_uom || '').trim().toUpperCase();
+  const baselineUom = String(rateBaseline && (rateBaseline.requestPurchaseUom || rateBaseline.purchaseUom) || '').trim().toUpperCase();
+  if (lineUom && baselineUom && lineUom !== baselineUom) rateBaseline = null;
   const policy = _purchaseNormalizeRatePolicy_(baseLine.ratePolicy || baseLine.rate_policy);
   const governedTaxPct = Number(baseLine.taxPct || baseLine.tax_pct || 0);
   const taxMismatch = policy === 'RATE_CONTROLLED' &&
@@ -47454,6 +47716,11 @@ function _invReceiptCommercialControl_(payload, liveLine, rateBaseline) {
   if (standingRate > ceilingRate) {
     ceilingRate = standingRate;
     ceilingSource = 'STANDING_APPROVED_RATE';
+  }
+  const currentMasterRate = Number(rateBaseline && rateBaseline.currentMasterRate || 0);
+  if (currentMasterRate > ceilingRate) {
+    ceilingRate = currentMasterRate;
+    ceilingSource = 'CURRENT_UOM_RATE_MASTER';
   }
   return {
     policy: policy,
@@ -53563,7 +53830,14 @@ function _reportsJobProcessCostRows_(filters, allowedJobKeys, allowedSoLineIds) 
       allocatedProcessHours: _reportsSafeNumber_(row.allocated_process_hours),
       processHoursSource: row.hours_source || '',
       mhr: _reportsSafeNumber_(row.mhr),
+      costMethod: row.cost_method || 'MHR_PER_HOUR',
+      costQuantity: _reportsSafeNumber_(row.cost_quantity),
+      unitRate: _reportsSafeNumber_(row.unit_rate),
       processCost: _reportsSafeNumber_(row.process_cost),
+      inkAndWashCost: _reportsSafeNumber_(row.ink_and_wash_cost),
+      inkAndWashBasis: row.ink_and_wash_basis || 'NOT_APPLICABLE',
+      inkAndWashQuantity: _reportsSafeNumber_(row.ink_and_wash_quantity),
+      inkAndWashRate: _reportsSafeNumber_(row.ink_and_wash_rate),
       mhrMissing: row.mhr_missing === true,
       processCostStatus: row.mhr_missing === true ? 'MHR_MISSING' : (_reportsSafeNumber_(row.process_cost) > 0 ? 'COSTED' : 'NO_COST'),
       productionEntryCount: _reportsSafeNumber_(row.production_entry_count),
@@ -53592,6 +53866,8 @@ function _reportsJobProcessCostRows_(filters, allowedJobKeys, allowedSoLineIds) 
         'productionMachine',
         'machineKey',
         'costAllocationBasis',
+        'costMethod',
+        'inkAndWashBasis',
         'processHoursSource',
         'processCostStatus'
       ]) &&
@@ -53600,6 +53876,8 @@ function _reportsJobProcessCostRows_(filters, allowedJobKeys, allowedSoLineIds) 
         'division',
         'productionStage',
         'productionMachine',
+        'costMethod',
+        'inkAndWashBasis',
         'processHoursSource',
         'costAllocationBasis',
         'processCostStatus'
@@ -53757,6 +54035,10 @@ function _reportsSectionJobProfitability_(token, params) {
       varnishCost: _reportsSafeNumber_(row.varnish_cost),
       varnishCostStatus: row.varnish_cost_status || 'NOT_APPLICABLE',
       finishingCost: finishingCost,
+      inkAndWashCost: _reportsSafeNumber_(row.ink_and_wash_cost),
+      inkAndWashBasis: row.ink_and_wash_basis || '',
+      inkAndWashSheetQty: _reportsSafeNumber_(row.ink_and_wash_sheet_qty),
+      inkAndWashFlexoHours: _reportsSafeNumber_(row.ink_and_wash_flexo_hours),
       completeCostTillDate: completeCostTillDate,
       latestProductionStage: row.latest_production_stage || '',
       latestProductionMachine: row.latest_production_machine || '',
@@ -53815,6 +54097,7 @@ function _reportsSectionJobProfitability_(token, params) {
         'laminationCostStatus',
         'varnishType',
         'varnishCostStatus',
+        'inkAndWashBasis',
         'invoiceNos'
       ]) &&
       _reportsStatusPasses_(row, filters, [
@@ -53830,7 +54113,8 @@ function _reportsSectionJobProfitability_(token, params) {
         'laminationType',
         'laminationCostStatus',
         'varnishType',
-        'varnishCostStatus'
+        'varnishCostStatus',
+        'inkAndWashBasis'
       ]);
   });
 
@@ -53943,6 +54227,7 @@ function _reportsSectionJobProfitability_(token, params) {
       phase1Cost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.actualCostTillDate); }, 0) * 100) / 100,
       soDirectMaterialCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.soDirectIssuedValue); }, 0) * 100) / 100,
       processCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.processCost); }, 0) * 100) / 100,
+      inkAndWashCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.inkAndWashCost); }, 0) * 100) / 100,
       finishingCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.finishingCost); }, 0) * 100) / 100,
       completeCost: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.completeCostTillDate); }, 0) * 100) / 100,
       profitOnProducedValue: Math.round(rows.reduce(function(sum, row){ return sum + _reportsSafeNumber_(row.profitOnProducedComplete); }, 0) * 100) / 100
@@ -53950,8 +54235,8 @@ function _reportsSectionJobProfitability_(token, params) {
     tables: [{
       key: 'jobprofitability',
       title: 'Job Profitability Report',
-      subtitle: 'Date range is based on Last Billing Date. Complete cost includes WO RM, SO-line direct material issues, tooling, MHR process, lamination, and job-card coating/varnish costs.',
-      minWidth: 9250,
+      subtitle: 'Date range is based on Last Billing Date. Complete cost includes material, tooling, machine/process, ink and wash, lamination, and coating/varnish costs.',
+      minWidth: 9750,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -54012,6 +54297,10 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'processHoursSource', label:'Hours Source', type:'status' },
         { key:'processCostMachines', label:'Process Machines' },
         { key:'processCostAllocationBasis', label:'Process Cost Basis', type:'status' },
+        { key:'inkAndWashBasis', label:'Ink and Wash Basis', type:'status' },
+        { key:'inkAndWashSheetQty', label:'Ink and Wash Sheets', type:'number' },
+        { key:'inkAndWashFlexoHours', label:'Ink and Wash Flexo Hrs', type:'number' },
+        { key:'inkAndWashCost', label:'Ink and Wash Cost', type:'money' },
         { key:'finishingBillingQty', label:'Finishing Billing Qty', type:'number' },
         { key:'laminationType', label:'Lamination Type' },
         { key:'laminationSqIn', label:'Lamination Sq.In', type:'number' },
@@ -54095,8 +54384,8 @@ function _reportsSectionJobProfitability_(token, params) {
     }, {
       key: 'jobProcessCostLines',
       title: 'Process Cost Lines',
-      subtitle: 'Actual production-entry net hours are used when all entries have start/end time; otherwise the machine/date allocation fallback is used. MHR_MISSING rows need a machine hour rate in Admin Console.',
-      minWidth: 4450,
+      subtitle: 'Machine cost uses MHR except Manual Sheet Pasting at Rs 0.30 per 2-ply leaf set. Ink and wash uses printed sheets for Corrugation/Offset and run hours for Flexo.',
+      minWidth: 5050,
       columns: [
         { key:'soNumber', label:'SO No' },
         { key:'lineNo', label:'Line' },
@@ -54127,7 +54416,14 @@ function _reportsSectionJobProfitability_(token, params) {
         { key:'processHoursSource', label:'Hours Source', type:'status' },
         { key:'processHours', label:'Process Hrs Used', type:'number' },
         { key:'mhr', label:'MHR', type:'money' },
+        { key:'costMethod', label:'Cost Method', type:'status' },
+        { key:'costQuantity', label:'Cost Qty / Hrs', type:'number' },
+        { key:'unitRate', label:'Unit Rate', type:'money' },
         { key:'processCost', label:'Process Cost', type:'money' },
+        { key:'inkAndWashBasis', label:'Ink and Wash Basis', type:'status' },
+        { key:'inkAndWashQuantity', label:'Ink and Wash Qty / Hrs', type:'number' },
+        { key:'inkAndWashRate', label:'Ink and Wash Rate', type:'money' },
+        { key:'inkAndWashCost', label:'Ink and Wash Cost', type:'money' },
         { key:'processCostStatus', label:'Cost Status', type:'status' }
       ],
       rows: processCostRows
@@ -59602,7 +59898,7 @@ function reportsGetSectionData(section, params, token) {
   const sectionCacheVersion = key === 'productionnop'
     ? 'V3'
     : (key === 'jobprofitability'
-    ? 'V3'
+    ? 'V4'
     : (key === 'otif'
       ? 'V7'
       : (key === 'monthlyperformance'
@@ -59642,6 +59938,8 @@ function _reportsExportCellValue_(value) {
 
 function _reportsExportNumberFormat_(type) {
   const key = String(type || '').trim().toLowerCase();
+  if (key === 'integer') return '#,##0';
+  if (key === 'quantity') return '#,##0.###';
   if (key === 'money') return '#,##0.00';
   if (key === 'number' || key === 'nop') return '#,##0.00';
   if (key === 'date') return 'dd-mmm-yyyy';
@@ -59706,6 +60004,16 @@ function _reportsExportWorkbookXlsx_(payload) {
       values.push(columns.map(function(col) {
         return String((col && col.label) || '');
       }));
+
+      // Text formatting must precede setValues to preserve leading-zero codes
+      // and keep explicitly labeled timestamp text from being auto-converted.
+      if (spec.preserveText === true && dataRows.length) {
+        columns.forEach(function(col, index) {
+          if (String(col && col.type || '').toLowerCase() === 'text') {
+            sheet.getRange(values.length + 1, index + 1, dataRows.length, 1).setNumberFormat('@');
+          }
+        });
+      }
 
       dataRows.forEach(function(row) {
         const src = Array.isArray(row) ? row : [];
@@ -63792,6 +64100,7 @@ function _printingHydratePlateStatuses_(rows) {
 }
 
 function _printingBoardRow_(row, availability) {
+  const clientMaterial=row.original_item_type==='CLIENT_MATERIAL',jw=row.job_work_plan||{};
   const effectiveId = row.effective_item_id || row.original_item_id;
   const stock = availability[effectiveId] || { physical:0, allocated:0, free:0, byWo:{} };
   const allocatedThisWo = Number(stock.byWo && stock.byWo[row.wo_number] || 0);
@@ -63804,19 +64113,26 @@ function _printingBoardRow_(row, availability) {
   const style = String(row.print_style || '');
   const blockers = [];
   if (!style || style.toUpperCase() === 'NO PRINT') blockers.push('Printing style does not require a printing run');
-  if (!row.work_order_material_id) blockers.push('Printing material is not selected in the work order');
+  if (!clientMaterial && !row.work_order_material_id) blockers.push('Printing material is not selected in the work order');
   if (!row.original_item_type) blockers.push('Selected work-order item has no RM type in Item Master');
   if (!(Number(row.required_printing_sheets || row.total_plan_sheets || 0) > 0)) blockers.push('Combined sheet requirement is not available in the work order');
   if (!String(row.routing_machine || row.machine_name || '').trim()) blockers.push('Printing machine is not assigned to this paper line');
   if (row.needs_machine_review === true) blockers.push('Confirm the inherited machine for this legacy multi-paper job in the Work Order');
   if (row.needs_production_review === true) blockers.push('Allocate legacy printing production across this job\'s paper runs before further planning');
   const sheetShortMm = Number(row.printing_sheet_short_mm || 0), sheetLongMm = Number(row.printing_sheet_long_mm || 0);
+  if(clientMaterial){
+    if(!jw.routing_id)blockers.push('Refresh the JW live material position');
+    if(!jw.commercial_ready)blockers.push('JW sales order is on hold or awaits approval');
+    if(!(Number(jw.ready_qty)>0))blockers.push('Awaiting client material / previous JW operation');
+    if(!jw.artwork||!jw.artwork.approved)blockers.push('JW printing artwork awaits approval');
+  }
   if (effectiveId && availableForJob < required && String(row.material_decision || 'EXACT') !== 'SUBSTITUTED') blockers.push('Selected material has insufficient allocated/free stock');
   const coating=String(row.coating||'').trim(),coatingApplicable=_printingCoatingApplicable_(coating);
   const laminationType=String(row.lamination_type||'').trim();
   const finishingProcess=coatingApplicable?'Coating':(laminationType?'Lamination':'None');
   const finishingType=coatingApplicable?coating:(laminationType||'None');
   return {
+    isJobWork:clientMaterial,materialOwner:clientMaterial?'CLIENT':'COMPANY',qtyUnit:clientMaterial?(jw.input_unit||row.material_uom):'SHEETS',clientReadyQty:clientMaterial?Number(jw.ready_qty||0):null,
     runId:row.printing_run_id,componentId:row.print_component_id||'',paperLineId:row.paper_line_id||'',
     candidateId:row.print_component_id||row.routing_id,woId:row.wo_id,routingId:row.routing_id,woNumber:row.wo_number,
     woDate:row.wo_date,soNumbers:row.so_numbers||'',artworkNos:row.artwork_nos||'',clientNames:row.client_names||'',
@@ -63938,6 +64254,7 @@ function printingAdminGetBoard(params, token) {
       raw=_printingLoadLegacyOpenRows_();hydrateLaminationFallback=true;
     }
     if(componentMode)raw=_printingHydrateEffectiveRoutingMachines_(raw);
+    if(typeof _jobWorkHydratePrintingRows_==='function')_jobWorkHydratePrintingRows_(raw);
     if(hydrateLaminationFallback)raw=_printingHydrateLaminationTypes_(raw,laminationCache);
     else _printingHydrateLaminationTypes_(raw.filter(function(row){return !!row.printing_run_id;}),laminationCache);
     const availability = _printingItemAvailability_(raw);
@@ -64368,6 +64685,7 @@ function printingAdminAddSelected(payload,token) {
   catch(componentErr){if(!_supabaseRelationMissing_(componentErr,'v_printing_plan_component_jobs'))throw componentErr;componentSchemaAvailable=false;}
   const componentIdMap={};componentRows.forEach(function(row){if(row.print_component_id)componentIdMap[String(row.print_component_id)]=true;});
   const legacyCandidateIds=candidateIds.filter(function(id){return !componentIdMap[id];}),raw=componentRows.concat(step('legacy_jobs',function(){return _printingLoadLegacyOpenRowsByRoutingIds_(legacyCandidateIds);}));
+  if(typeof _jobWorkHydratePrintingRows_==='function')_jobWorkHydratePrintingRows_(raw);
   const byId={};raw.forEach(function(row){byId[String(row.print_component_id||row.routing_id)]=row;});
   const missing=candidateIds.filter(function(id){return !byId[id];});
   if(missing.length)throw new Error('Some selected paper runs are no longer open or have no balance to print. Refresh and select again.');
@@ -65019,7 +65337,10 @@ function _finishingOperationalCandidates_(requestedKeys) {
   const keys=requestedKeys||[];
   // Old paper-specific actions/history remain compatible; the live desk and
   // all newly selected plans use a single sheet-based job-card scope.
-  return _finishingComponentCandidates_(keys,!keys.length||keys.some(function(key){return /\|\|JOB_CARD$/.test(String(key));}));
+  const normal=_finishingComponentCandidates_(keys,!keys.length||keys.some(function(key){return /\|\|JOB_CARD$/.test(String(key));}));
+  const jw=typeof _jobWorkFinishingCandidates_==='function'?_jobWorkFinishingCandidates_(keys):[];
+  const jwIds=new Set(jw.map(function(r){return r.routingId;}));
+  return normal.filter(function(r){return !jwIds.has(r.routingId);}).concat(jw);
 }
 
 function _finishingComponentCandidates_(requestedKeys,jobCardMode) {
